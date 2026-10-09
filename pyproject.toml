@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "adf2fabric"
+version = "0.1.0"
+description = "Agent that migrates an Azure Data Factory estate into Microsoft Fabric Data Factory"
+requires-python = ">=3.11"
+dependencies = [
+    "click>=8.1",
+    "pydantic>=2.6",
+    "PyYAML>=6.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+# Real connectivity validation for the Consultation phase. Optional: the base
+# install stays lightweight, and connectors degrade to a clear
+# "dependency_unavailable" result when a library here is missing.
+connectivity = [
+    "pyodbc>=5.0",
+    "azure-identity>=1.15",
+    "azure-storage-file-datalake>=12.14",
+    "msal>=1.28",
+    "requests>=2.31",
+]
+
+[project.scripts]
+adf2fabric = "adf2fabric.cli:cli"
+
+[tool.setuptools.packages.find]
+where = ["src"]

@@ -1,0 +1,24 @@
+# Intake Agent configuration. Deliberately minimal.
+# CLI flags override the provider/branch defaults below.
+
+default_provider: github
+default_branch: main
+
+# Where cloned source repositories and project records are stored.
+# Relative paths are resolved against the repository root.
+projects_root: projects
+
+# Environment variable the GitHub token is read from. The token itself is
+# NEVER stored here or anywhere else on disk.
+github_token_env: GITHUB_TOKEN
+
+# --- Consultation phase ----------------------------------------------------
+# Default filename for the structured Consultation questionnaire input. The CLI
+# `--input` flag overrides it.
+consultation_input_filename: consultation-input.yaml
+
+# Consultation validates connectivity across five domains (repository, adf,
+# sql_server, adls_gen2, fabric). Credentials are supplied ONLY by reference:
+# the questionnaire names environment variables (e.g. AZ_CLIENT_SECRET,
+# SQL_PASSWORD) and the connectors resolve them at validation time. Actual
+# secrets are NEVER written to config, project.yaml, or consultation.yaml.

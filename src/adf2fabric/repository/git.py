@@ -1,0 +1,93 @@
+"""Thin, deterministic wrappers around the ``git`` command-line tool.
+
+No network library and no third-party git binding - just subprocess calls to
+the installed ``git``. Each function accepts an already-authenticated URL when
+one is needed; callers are responsible for redacting secrets from any error
+they surface (see ``authentication.redact``).
+"""
+
+from __future__ import annotations
+
+import shutil
+import subprocess
+from pathlib import Path
+
+
+class GitError(Exception):
+    """A git command failed. The message is caller-redacted before surfacing."""
+
+
+class GitNotAvailableError(Exception):
+    """The ``git`` executable was not found on PATH."""
+
+
+def _git_path() -> str:
+    git = shutil.which("git")
+    if git is None:
+        raise GitNotAvailableError(
+            "The 'git' executable was not found on PATH. Install Git and ensure "
+            "it is available to run the Intake Agent."
+        )
+    return git
+
+
+def _run(args: list[str], *, cwd: Path | None = None) -> subprocess.CompletedProcess:
+    """Run a git command, returning the completed process.
+
+    Raises :class:`GitError` on non-zero exit. The raw (possibly secret-bearing)
+    stderr is attached so the caller can redact and re-raise.
+    """
+    proc = subprocess.run(
+        [_git_path(), *args],
+        cwd=str(cwd) if cwd else None,
+        capture_output=True,
+        text=True,
+    )
+    if proc.returncode != 0:
+        raise GitError(proc.stderr.strip() or proc.stdout.strip() or "git command failed")
+    return proc
+
+
+def ls_remote(url: str, branch: str) -> bool:
+    """Return True if ``branch`` exists on the remote at ``url``.
+
+    Validates accessibility + authentication + branch existence in a single
+    deterministic step without cloning. ``url`` may carry credentials.
+    """
+    proc = _run(["ls-remote", "--heads", url, branch])
+    return bool(proc.stdout.strip())
+
+
+def clone(url: str, dest: Path, branch: str) -> None:
+    """Clone ``branch`` from ``url`` into ``dest`` (single-branch, shallowish).
+
+    ``url`` may carry credentials; scrub them afterwards with :func:`set_remote_url`.
+    """
+    _run(["clone", "--branch", branch, "--single-branch", url, str(dest)])
+
+
+def head_sha(repo_dir: Path) -> str:
+    """Return the full HEAD commit SHA of the repository at ``repo_dir``."""
+    return _run(["-C", str(repo_dir), "rev-parse", "HEAD"]).stdout.strip()
+
+
+def current_branch(repo_dir: Path) -> str:
+    """Return the checked-out branch name of the repository at ``repo_dir``."""
+    return _run(
+        ["-C", str(repo_dir), "rev-parse", "--abbrev-ref", "HEAD"]
+    ).stdout.strip()
+
+
+def get_remote_url(repo_dir: Path, remote: str = "origin") -> str:
+    """Return the configured URL of ``remote`` (token-free after scrubbing)."""
+    return _run(["-C", str(repo_dir), "remote", "get-url", remote]).stdout.strip()
+
+
+def set_remote_url(repo_dir: Path, url: str, remote: str = "origin") -> None:
+    """Reset ``remote`` to ``url`` so no token remains in .git/config."""
+    _run(["-C", str(repo_dir), "remote", "set-url", remote, url])
+
+
+def is_git_repo(path: Path) -> bool:
+    """True if ``path`` looks like the working tree of a git repository."""
+    return (Path(path) / ".git").exists()

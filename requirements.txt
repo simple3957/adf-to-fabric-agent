@@ -1,0 +1,6 @@
+click>=8.1
+pydantic>=2.6
+PyYAML>=6.0
+
+# Development / tests
+pytest>=8.0
