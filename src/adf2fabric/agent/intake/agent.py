@@ -24,8 +24,11 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-from adf2fabric.agent.intake.models import IntakeRequest, IntakeResult
+from adf2fabric.agent.intake import github_source
+from adf2fabric.agent.intake.azure_source import AzureSourceIntake
+from adf2fabric.agent.intake.models import AzureIntakeRequest, IntakeRequest, IntakeResult
 from adf2fabric.project.models import Project, RepositoryMetadata
+from adf2fabric.project.source import SourceManifest
 from adf2fabric.project.store import ProjectStore, slugify
 from adf2fabric.repository import authentication, git
 from adf2fabric.repository.client import RepositoryClient
@@ -50,9 +53,20 @@ def _remove_tree(path: Path) -> None:
 
 
 class IntakeAgent:
-    def __init__(self, store: ProjectStore, token_env: str = authentication.DEFAULT_TOKEN_ENV):
+    def __init__(
+        self,
+        store: ProjectStore,
+        token_env: str = authentication.DEFAULT_TOKEN_ENV,
+        azure_intake: AzureSourceIntake | None = None,
+    ):
         self.store = store
         self.token_env = token_env
+        # Mode A (live Azure Data Factory); injectable so tests never touch Azure.
+        self._azure = azure_intake or AzureSourceIntake(store)
+
+    def run_azure(self, request: AzureIntakeRequest) -> IntakeResult:
+        """Mode A: retrieve ADF JSON from a live factory into the project source."""
+        return self._azure.run(request)
 
     def run(self, request: IntakeRequest) -> IntakeResult:
         token: str = ""
@@ -73,10 +87,15 @@ class IntakeAgent:
                         fetched_at=datetime.now(timezone.utc),
                         local_source_path=str(dest),
                     )
-                    project = self._persist(project_id, request.project_name, metadata)
+                    manifest = github_source.build_manifest(
+                        project_id, metadata, dest,
+                        subdirectory=request.subdirectory, pipelines=request.pipelines,
+                    )
+                    project = self._persist(project_id, request.project_name, metadata, manifest)
                     return IntakeResult(
                         success=True,
                         project=project,
+                        manifest=manifest,
                         reused=True,
                         message=(
                             f"Reused existing local source for '{project_id}' "
@@ -93,10 +112,15 @@ class IntakeAgent:
             token = authentication.resolve_token(self.token_env)
             client = RepositoryClient(provider, token)
             metadata = client.fetch(request.repository_url, request.branch, dest)
-            project = self._persist(project_id, request.project_name, metadata)
+            manifest = github_source.build_manifest(
+                project_id, metadata, dest,
+                subdirectory=request.subdirectory, pipelines=request.pipelines,
+            )
+            project = self._persist(project_id, request.project_name, metadata, manifest)
             return IntakeResult(
                 success=True,
                 project=project,
+                manifest=manifest,
                 reused=False,
                 message=(
                     f"Fetched '{clean_url}' ({request.branch} @ "
@@ -117,7 +141,12 @@ class IntakeAgent:
         except git.GitError:
             return False
 
-    def _persist(self, project_id: str, name: str, metadata: RepositoryMetadata) -> Project:
+    def _persist(
+        self, project_id: str, name: str, metadata: RepositoryMetadata,
+        manifest: SourceManifest | None = None,
+    ) -> Project:
         project = Project(id=project_id, name=name, repository=metadata)
         self.store.save(project)
+        if manifest is not None:
+            self.store.save_source_manifest(project_id, manifest)
         return project

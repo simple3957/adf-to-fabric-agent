@@ -180,10 +180,12 @@ def test_secrets_never_persisted(store, source_repo, token_env):
 def test_no_discovery_artifacts_produced(store, source_repo, token_env):
     _run(store, source_repo)
     project_dir = store.project_dir("demo")
-    # Only the project record and the source/ copy exist - no inventory,
-    # no artifacts, no classification output.
+    # Only the project record, the source/ copy and the source manifest (how the
+    # source was obtained + integrity findings) exist - no Discovery inventory,
+    # no classification output.
     entries = {p.name for p in project_dir.iterdir()}
-    assert entries == {"project.yaml", "source"}
+    assert entries == {"project.yaml", "source", "source-manifest.yaml"}
+    assert not (project_dir / "discovery").exists()
 
     # And project.yaml records only intake-level fields.
     data = yaml.safe_load((project_dir / "project.yaml").read_text(encoding="utf-8"))

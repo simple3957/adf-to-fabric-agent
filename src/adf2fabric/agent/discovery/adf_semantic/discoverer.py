@@ -19,13 +19,14 @@ from __future__ import annotations
 import json
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Optional
 
 from adf2fabric.agent.discovery.adf_semantic import references
 from adf2fabric.agent.discovery.adf_semantic.models import (
     AdfSemanticDiscoveryRequest,
     AdfSemanticDiscoveryResult,
 )
-from adf2fabric.agent.discovery.adf_semantic import parser
+from adf2fabric.agent.discovery.adf_semantic import parser, parser_pipelines
 from adf2fabric.project.discovery import (
     AdfArtifactKind,
     AdfSemanticDiscovery,
@@ -47,6 +48,7 @@ _RELEVANT_KINDS = {
     AdfArtifactKind.linked_service,
     AdfArtifactKind.trigger,
     AdfArtifactKind.factory,
+    AdfArtifactKind.integration_runtime,
 }
 
 
@@ -79,53 +81,30 @@ class AdfSemanticDiscoverer:
                 )
 
             repo = self.store.load_repository_discovery(project_id)
-            source_dir = self.store.source_dir(project_id)
+            source_dir = self.store.source_root(project_id)
 
             candidates = [
                 c for c in repo.adf_candidates if c.artifact_kind in _RELEVANT_KINDS
             ]
+            # Honor the pipeline selection Intake recorded (pipelines + what they
+            # reference). No selection recorded means every artifact.
+            selected = self._selected_paths(project_id)
+            if selected is not None:
+                candidates = [c for c in candidates if c.path in selected]
             if not candidates:
                 return self._persist(
                     project_id, repo.source_commit_sha, AdfSemanticStatus.no_artifacts,
                     detail="Repository Discovery found no ADF artifacts to parse.",
                 )
 
-            pipelines, datasets, linked_services, triggers, factory = [], [], [], [], []
-            parsed = skipped = failed = 0
-            failures: list[str] = []
-
-            for cand in sorted(candidates, key=lambda c: c.path):
-                # Only parse candidates the repository read cleanly.
-                if getattr(cand.parse_status, "value", cand.parse_status) != "discovered":
-                    skipped += 1
-                    continue
-                data = self._load_json(source_dir / cand.path)
-                if data is None or not isinstance(data, dict):
-                    failed += 1
-                    failures.append(cand.path)
-                    continue
-                try:
-                    self._dispatch(
-                        cand.artifact_kind, data, cand.path,
-                        pipelines, datasets, linked_services, triggers, factory,
-                    )
-                    parsed += 1
-                except Exception:  # noqa: BLE001 - a single bad artifact never aborts the run
-                    failed += 1
-                    failures.append(cand.path)
-
-            pipelines.sort(key=lambda a: a.name)
-            datasets.sort(key=lambda a: a.name)
-            linked_services.sort(key=lambda a: a.name)
-            triggers.sort(key=lambda a: a.name)
-            factory.sort(key=lambda a: a.name)
-
-            external_references = references.build_external_references(
-                pipelines, datasets, linked_services
-            )
-            relationships, unresolved = references.build_relationships(
-                pipelines, datasets, linked_services, triggers, external_references
-            )
+            parsed_set = self._parse_all(candidates, source_dir)
+            pipelines, datasets, linked_services = (
+                parsed_set["pipelines"], parsed_set["datasets"], parsed_set["linked_services"])
+            triggers, factory = parsed_set["triggers"], parsed_set["factory"]
+            parsed, skipped, failed = parsed_set["parsed"], parsed_set["skipped"], parsed_set["failed"]
+            failures = parsed_set["failures"]
+            external_references = parsed_set["external_references"]
+            relationships, unresolved = parsed_set["relationships"], parsed_set["unresolved"]
 
             status = AdfSemanticStatus.partial if failed else AdfSemanticStatus.discovered
             detail = (
@@ -144,7 +123,102 @@ class AdfSemanticDiscoverer:
                 success=False, message="ADF Semantic Discovery failed.", error=str(exc)
             )
 
+    def discover_in_memory(
+        self, project_id: str, overrides: "dict[str, dict] | None" = None
+    ) -> "AdfSemanticDiscovery | None":
+        """The same parse as :meth:`run`, WITHOUT persisting anything.
+
+        ``overrides`` maps a repository-relative artifact path to JSON that replaces that file's
+        content for this parse only (used to parse a proposed completion). The source on disk is
+        read-only and never modified. Returns ``None`` when there is nothing to parse.
+        """
+        if not self.store.has_repository_discovery(project_id):
+            return None
+        repo = self.store.load_repository_discovery(project_id)
+        source_dir = self.store.source_root(project_id)
+        candidates = [c for c in repo.adf_candidates if c.artifact_kind in _RELEVANT_KINDS]
+        selected = self._selected_paths(project_id)
+        if selected is not None:
+            candidates = [c for c in candidates if c.path in selected]
+        if not candidates:
+            return None
+        ps = self._parse_all(candidates, source_dir, overrides)
+        status = AdfSemanticStatus.partial if ps["failed"] else AdfSemanticStatus.discovered
+        return self._assemble(
+            project_id, repo.source_commit_sha, status, "",
+            ps["pipelines"], ps["datasets"], ps["linked_services"], ps["triggers"], ps["factory"],
+            ps["external_references"], ps["relationships"], ps["unresolved"],
+            ps["parsed"], ps["skipped"], ps["failed"],
+        )
+
+    def _parse_all(self, candidates, source_dir: Path, overrides: "dict[str, dict] | None" = None) -> dict:
+        pipelines, datasets, linked_services, triggers, factory = [], [], [], [], []
+        runtime_kinds: dict[str, Optional[str]] = {}  # runtime name (lower) -> kind
+        parsed = skipped = failed = 0
+        failures: list[str] = []
+        for cand in sorted(candidates, key=lambda c: c.path):
+            # Only parse candidates the repository read cleanly.
+            if getattr(cand.parse_status, "value", cand.parse_status) != "discovered":
+                skipped += 1
+                continue
+            if overrides and cand.path in overrides:
+                data = overrides[cand.path]
+            else:
+                data = self._load_json(source_dir / cand.path)
+            if data is None or not isinstance(data, dict):
+                failed += 1
+                failures.append(cand.path)
+                continue
+            if cand.artifact_kind == AdfArtifactKind.integration_runtime:
+                name = str(data.get("name") or "").lower()
+                if name:
+                    runtime_kinds[name] = parser.classify_integration_runtime(data)
+                parsed += 1
+                continue
+            try:
+                self._dispatch(
+                    cand.artifact_kind, data, cand.path,
+                    pipelines, datasets, linked_services, triggers, factory,
+                )
+                parsed += 1
+            except Exception:  # noqa: BLE001 - a single bad artifact never aborts the run
+                failed += 1
+                failures.append(cand.path)
+
+        pipelines.sort(key=lambda a: a.name)
+        datasets.sort(key=lambda a: a.name)
+        linked_services.sort(key=lambda a: a.name)
+        triggers.sort(key=lambda a: a.name)
+        factory.sort(key=lambda a: a.name)
+
+        for ls in linked_services:
+            if ls.integration_runtime:
+                ls.integration_runtime_kind = runtime_kinds.get(ls.integration_runtime.lower())
+
+        # Stage 7 of the pipeline parser: resolve datasets / linked services /
+        # child pipelines now that every artifact has been parsed.
+        parser_pipelines.resolve_pipelines(pipelines, datasets, linked_services)
+
+        external_references = references.build_external_references(pipelines, datasets, linked_services)
+        relationships, unresolved = references.build_relationships(
+            pipelines, datasets, linked_services, triggers, external_references
+        )
+        return dict(
+            pipelines=pipelines, datasets=datasets, linked_services=linked_services, triggers=triggers,
+            factory=factory, external_references=external_references, relationships=relationships,
+            unresolved=unresolved, parsed=parsed, skipped=skipped, failed=failed, failures=failures,
+        )
+
     # --- helpers ------------------------------------------------------------
+
+    def _selected_paths(self, project_id: str) -> "set[str] | None":
+        if not self.store.has_source_manifest(project_id):
+            return None
+        try:
+            paths = self.store.load_source_manifest(project_id).selection.resolved_paths
+        except Exception:  # noqa: BLE001 - an unreadable manifest never hides artifacts
+            return None
+        return set(paths) if paths else None
 
     @staticmethod
     def _load_json(path: Path):
@@ -157,7 +231,7 @@ class AdfSemanticDiscoverer:
     @staticmethod
     def _dispatch(kind, data, path, pipelines, datasets, linked_services, triggers, factory):
         if kind == AdfArtifactKind.pipeline:
-            pipelines.append(parser.parse_pipeline(data, path))
+            pipelines.append(parser_pipelines.parse_pipeline(data, path))
         elif kind == AdfArtifactKind.dataset:
             datasets.append(parser.parse_dataset(data, path))
         elif kind == AdfArtifactKind.linked_service:
@@ -223,6 +297,12 @@ class AdfSemanticDiscoverer:
             linked_service_count=len(linked_services),
             trigger_count=len(triggers),
             factory_count=len(factory),
+            activity_count=sum(p.activity_total for p in pipelines),
+            activity_type_counts=_sum_counts(pipelines),
+            unknown_activity_types=sorted({t for p in pipelines for t in p.unknown_activity_types}),
+            parse_issue_count=sum(
+                len(p.issues) + sum(len(a.warnings) for a in _all_activities(p.activities))
+                for p in pipelines),
             pipelines=pipelines,
             datasets=datasets,
             linked_services=linked_services,
@@ -249,6 +329,20 @@ class AdfSemanticDiscoverer:
                 else:
                     discovery.updated_at = now
         return discovery
+
+
+def _all_activities(activities):
+    for a in activities:
+        yield a
+        yield from _all_activities(a.activities)
+
+
+def _sum_counts(pipelines) -> dict:
+    total: dict = {}
+    for p in pipelines:
+        for k, v in p.activity_type_counts.items():
+            total[k] = total.get(k, 0) + v
+    return {k: total[k] for k in sorted(total)}
 
 
 def _semantic(discovery: AdfSemanticDiscovery) -> dict:

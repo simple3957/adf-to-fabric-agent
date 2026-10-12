@@ -12,6 +12,9 @@ import sys
 import click
 
 from adf2fabric.agent.consultation import ConsultationAgent, ConsultationRequest
+from adf2fabric.agent.conversion import ConversionAgent, ConversionRequest
+from adf2fabric.agent.reconstruction.agent import ReconstructionAgent
+from adf2fabric.agent.reconstruction.models import ReconstructionRequest
 from adf2fabric.agent.discovery import DiscoveryAgent, DiscoveryRequest
 from adf2fabric.agent.discovery.adf import AdfDiscoveryRequest
 from adf2fabric.agent.discovery.adf_semantic import AdfSemanticDiscoveryRequest
@@ -19,7 +22,8 @@ from adf2fabric.agent.discovery.adls import AdlsDiscoveryRequest
 from adf2fabric.agent.discovery.adls_paths import AdlsPathsDiscoveryRequest
 from adf2fabric.agent.discovery.sql import SqlDiscoveryRequest
 from adf2fabric.agent.discovery.sql_structural import SqlStructuralDiscoveryRequest
-from adf2fabric.agent.intake import IntakeAgent, IntakeRequest
+from adf2fabric.agent.intake import AzureIntakeRequest, IntakeAgent, IntakeRequest
+from adf2fabric.agent.intake.azure_source import KIND_CHOICES as AZURE_KIND_CHOICES
 from adf2fabric.config import load_config, projects_root
 from adf2fabric.project.models import (
     AdfAccess,
@@ -32,6 +36,47 @@ from adf2fabric.project.models import (
 from adf2fabric.project.store import ProjectStore
 
 
+# --- shared Azure authentication options ---------------------------------------------------------------
+# Every command that talks to Azure accepts every mechanism the credential layer supports. Options name
+# environment variables (never values); only the ones the chosen mechanism needs are read.
+
+_AUTH_ENV_OPTIONS = (
+    ("tenant_id_env", "the tenant id (azure_cli, client_secret, client_certificate; optional for interactive_browser/device_code)"),
+    ("client_id_env", "the client id (client_secret, client_certificate; optional user-assigned id for managed_identity)"),
+    ("client_secret_env", "the client secret (client_secret)"),
+    ("certificate_path_env", "the path of a PEM/PFX certificate file (client_certificate)"),
+    ("certificate_password_env", "the certificate password (client_certificate, optional)"),
+    ("access_token_env", "a pre-acquired bearer token (access_token)"),
+    ("account_key_env", "the storage account key (account_key; ADLS Gen2 only)"),
+    ("sas_token_env", "a storage SAS token (sas_token; ADLS Gen2 only)"),
+    ("connection_string_env", "a storage connection string (connection_string; ADLS Gen2 only)"),
+)
+
+
+def azure_auth_options(*, storage: bool = False, default: str = "azure_cli"):
+    """Decorator adding ``--auth`` plus the ``--*-env`` options for every supported mechanism."""
+    from adf2fabric.connectivity._azure import AUTH_MECHANISMS, ENTRA_MECHANISMS
+
+    choices = AUTH_MECHANISMS if storage else ENTRA_MECHANISMS
+
+    def decorate(fn):
+        for name, what in reversed(_AUTH_ENV_OPTIONS):
+            if not storage and name in ("account_key_env", "sas_token_env", "connection_string_env"):
+                continue
+            fn = click.option(f"--{name.replace('_', '-')}", name, default=None,
+                              help=f"NAME of the env var holding {what}. Never the value itself.")(fn)
+        return click.option(
+            "--auth", type=click.Choice(choices), default=default, show_default=True,
+            help="Azure authentication mechanism (azure_cli reuses your `az login`).")(fn)
+
+    return decorate
+
+
+def credential_from(auth: str, **env_names: str | None) -> AzureCredentialRef:
+    """An AzureCredentialRef from CLI values (env-var NAMES only)."""
+    return AzureCredentialRef(auth=auth, **{k: v for k, v in env_names.items() if v})
+
+
 @click.group()
 def cli() -> None:
     """ADF -> Microsoft Fabric migration agent."""
@@ -39,45 +84,129 @@ def cli() -> None:
 
 @cli.command()
 @click.option("--project", "project_name", required=True, help="Project/engagement name.")
-@click.option("--repo", "repository_url", required=True, help="Source repository URL.")
+@click.option("--repo", "repository_url", default=None, help="Mode B: source repository URL (GitHub).")
 @click.option("--branch", default=None, help="Branch to fetch (default from config).")
 @click.option("--provider", default=None, help="Source provider (default from config).")
 @click.option("--refresh", is_flag=True, help="Force a fresh fetch even if a local source exists.")
+@click.option("--subdirectory", default=None, help="Mode B: repository subdirectory holding the ADF folders.")
+@click.option("--factory", "factory_name", default=None, help="Mode A: Azure Data Factory name.")
+@click.option("--resource-group", "resource_group", default=None, help="Mode A: resource group of the factory.")
+@click.option(
+    "--subscription", "subscription_id", default=None,
+    help="Mode A: Azure subscription id (default: the active `az login` subscription).",
+)
+@click.option(
+    "--pipeline", "pipelines", multiple=True,
+    help="Only this pipeline (and what it references). Repeatable.",
+)
+@click.option(
+    "--artifact-kind", "artifact_kinds", multiple=True,
+    type=click.Choice(AZURE_KIND_CHOICES, case_sensitive=False),
+    help="Mode A: restrict retrieved artifact kinds (pipelines are always included). Repeatable.",
+)
+@azure_auth_options()
+@click.option("--allow-partial", is_flag=True, help="Mode A: keep the source even if some artifacts could not be retrieved.")
 def intake(
     project_name: str,
-    repository_url: str,
+    repository_url: str | None,
     branch: str | None,
     provider: str | None,
     refresh: bool,
+    subdirectory: str | None,
+    factory_name: str | None,
+    resource_group: str | None,
+    subscription_id: str | None,
+    pipelines: tuple[str, ...],
+    artifact_kinds: tuple[str, ...],
+    allow_partial: bool,
+    auth: str,
+    **auth_env: str | None,
 ) -> None:
-    """Fetch a source repository and record it as a project."""
+    """Obtain ADF source: from a GitHub repo (--repo) or a live factory (--factory)."""
+    if bool(repository_url) == bool(factory_name):
+        raise click.UsageError(
+            "Choose exactly one source: --repo <url> (GitHub) or --factory <name> "
+            "(live Azure Data Factory, with --resource-group)."
+        )
     config = load_config()
     store = ProjectStore(projects_root(config))
     agent = IntakeAgent(store, token_env=config["github_token_env"])
 
-    request = IntakeRequest(
-        project_name=project_name,
-        repository_url=repository_url,
-        branch=branch or config["default_branch"],
-        provider=provider or config["default_provider"],
-        refresh=refresh,
-    )
-
-    result = agent.run(request)
+    if factory_name:
+        if not resource_group:
+            raise click.UsageError("--resource-group is required with --factory.")
+        if subdirectory or branch or provider or refresh:
+            raise click.UsageError(
+                "--branch/--provider/--refresh/--subdirectory apply to --repo only."
+            )
+        result = agent.run_azure(
+            AzureIntakeRequest(
+                project_name=project_name,
+                resource_group=resource_group,
+                factory_name=factory_name,
+                subscription_id=subscription_id,
+                pipelines=list(pipelines),
+                artifact_kinds=list(artifact_kinds),
+                credential=credential_from(auth, **auth_env),
+                allow_partial=allow_partial,
+            )
+        )
+    else:
+        if resource_group or subscription_id or artifact_kinds or allow_partial:
+            raise click.UsageError(
+                "--resource-group/--subscription/--artifact-kind/--allow-partial apply to --factory only."
+            )
+        result = agent.run(
+            IntakeRequest(
+                project_name=project_name,
+                repository_url=repository_url,
+                branch=branch or config["default_branch"],
+                provider=provider or config["default_provider"],
+                refresh=refresh,
+                subdirectory=subdirectory,
+                pipelines=list(pipelines),
+            )
+        )
 
     if not result.success:
         click.secho(f"Intake failed: {result.error}", fg="red", err=True)
         sys.exit(1)
 
     meta = result.project.repository
-    verb = "Reused" if result.reused else "Fetched"
+    verb = "Reused" if result.reused else ("Retrieved" if factory_name else "Fetched")
     click.secho(f"Intake succeeded ({verb.lower()}).", fg="green")
     click.echo(f"  project:      {result.project.id}")
     click.echo(f"  provider:     {meta.provider}")
-    click.echo(f"  repository:   {meta.repository_url}")
+    click.echo(f"  source:       {meta.repository_url}")
     click.echo(f"  branch:       {meta.branch}")
     click.echo(f"  commit:       {meta.commit_sha}")
     click.echo(f"  local source: {meta.local_source_path}")
+    _echo_manifest(result.manifest, store, result.project.id)
+
+
+def _echo_manifest(manifest, store: ProjectStore, project_id: str) -> None:
+    """Print the source manifest summary plus every failure/finding (never silent)."""
+    if manifest is None:
+        return
+    kinds: dict[str, int] = {}
+    for a in manifest.artifacts:
+        kinds[a.kind] = kinds.get(a.kind, 0) + 1
+    summary = ", ".join(f"{n} {k}" for k, n in sorted(kinds.items())) or "no artifacts"
+    click.echo(f"  artifacts:    {summary}")
+    if manifest.selection.pipelines:
+        click.echo(f"  selection:    {', '.join(manifest.selection.pipelines)}")
+    if manifest.redactions:
+        click.echo(f"  redacted:     {len(manifest.redactions)} secret value(s) masked")
+    click.echo(f"  manifest:     {store.source_manifest_path(project_id)}")
+    for f in manifest.failures:
+        click.secho(f"  FAILED [{f.kind}]: {f.error} {f.action}", fg="red")
+    for f in manifest.findings:
+        if f.code == "retrieval_failed":
+            continue  # already shown above
+        colour = "red" if f.severity.value == "error" else "yellow"
+        click.secho(f"  {f.severity.value.upper()} [{f.code}]: {f.message} {f.action}", fg=colour)
+    if not manifest.complete:
+        click.secho("  source is INCOMPLETE; see the items above.", fg="yellow")
 
 
 @cli.command()
@@ -463,31 +592,14 @@ def discovery_sql_structural(
 @click.option("--subscription", "subscription_id", required=True, help="Azure subscription id.")
 @click.option("--resource-group", "resource_group", required=True, help="Resource group of the factory.")
 @click.option("--factory", "factory_name", required=True, help="Data Factory name.")
-@click.option(
-    "--auth",
-    type=click.Choice(["azure_cli", "client_secret", "azure_identity"]),
-    default="azure_cli",
-    show_default=True,
-    help="Azure authentication mechanism.",
-)
-@click.option("--tenant-id-env", "tenant_id_env", default=None, help="NAME of env var holding the tenant id (client_secret only).")
-@click.option("--client-id-env", "client_id_env", default=None, help="NAME of env var holding the client id (client_secret only).")
-@click.option(
-    "--client-secret-env",
-    "client_secret_env",
-    default=None,
-    help="NAME of env var holding the client secret (client_secret only). "
-    "The value is never read into logs, output, or the persisted record.",
-)
+@azure_auth_options()
 def discovery_adf(
     project_name: str,
     subscription_id: str,
     resource_group: str,
     factory_name: str,
     auth: str,
-    tenant_id_env: str | None,
-    client_id_env: str | None,
-    client_secret_env: str | None,
+    **auth_env: str | None,
 ) -> None:
     """Inventory a live Data Factory's artifacts via ARM (read-only, name + kind only)."""
     config = load_config()
@@ -499,12 +611,7 @@ def discovery_adf(
         subscription_id=subscription_id,
         resource_group=resource_group,
         factory_name=factory_name,
-        credential=AzureCredentialRef(
-            auth=auth,
-            tenant_id_env=tenant_id_env,
-            client_id_env=client_id_env,
-            client_secret_env=client_secret_env,
-        ),
+        credential=credential_from(auth, **auth_env),
     )
 
     result = agent.discover_adf(
@@ -588,6 +695,179 @@ def discovery_adf_semantic(project_name: str) -> None:
     if d.failed_count:
         click.secho(f"  note: {d.detail}", fg="yellow")
     click.echo(f"  record: {store.adf_semantic_discovery_path(d.project_id)}")
+
+
+@cli.command(name="convert")
+@click.option(
+    "--project", "project_name", required=True,
+    help="Project/engagement name (Intake + ADF Semantic Discovery must have run).",
+)
+@click.option("--pipeline", "pipelines", multiple=True, help="Convert only this pipeline. Repeatable.")
+@click.option(
+    "--resolutions", "resolutions_path", type=click.Path(exists=True, dir_okay=False), default=None,
+    help="JSON file binding linked services / items to real Fabric ids (see conversion/resolutions.template.json).",
+)
+@click.option(
+    "--apply-reconstruction", "apply_reconstruction", is_flag=True,
+    help="Convert the completed pipelines (original + SAFE inferred proposals from `reconstruct`); "
+         "every inferred element is marked. Off by default.",
+)
+def convert(project_name: str, pipelines: tuple[str, ...], resolutions_path: str | None,
+            apply_reconstruction: bool) -> None:
+    """Convert the discovered ADF pipelines to Fabric pipeline definitions (deterministic, no LLM)."""
+    config = load_config()
+    store = ProjectStore(projects_root(config))
+    result = ConversionAgent(store).run(
+        ConversionRequest(project_name=project_name, pipelines=list(pipelines), resolutions_path=resolutions_path,
+                          apply_reconstruction=apply_reconstruction)
+    )
+    if not result.success:
+        click.secho(f"Conversion failed: {result.error}", fg="red", err=True)
+        sys.exit(1)
+
+    c = result.conversion
+    click.echo("ADF -> FABRIC CONVERSION")
+    click.echo(f"  project:    {c.project_id}")
+    click.echo(f"  commit:     {c.source_commit_sha}")
+    click.echo(f"  outcome:    {c.status.value}")
+    click.echo(f"  pipelines:  {c.pipeline_count}   activities: {c.activity_count}")
+    colours = {"converted": "green", "converted_with_differences": "yellow", "manual_required": "yellow", "blocked": "red"}
+    for status, n in c.status_counts.items():
+        click.secho(f"    {status}: {n}", fg=colours[status] if n else None)
+    for p in c.pipelines:
+        valid = "valid" if p.structural_valid else "INVALID"
+        click.echo(f"  - {p.source_pipeline}: {p.status.value} ({valid}; runtime ready: {'yes' if p.runtime_ready else 'no'})")
+        for a in p.activities:
+            if a.status.value in ("manual_required", "blocked"):
+                click.secho(f"      {a.status.value.upper()}: {a.source_name} ({a.source_type}) - {a.summary}", fg=colours[a.status.value])
+    for problem in result.problems:
+        click.secho(f"  resolution file: {problem}", fg="yellow")
+    if c.reconstruction_applied:
+        click.secho(f"  inferred elements applied: {', '.join(c.reconstruction_applied)} (marked in the output; review them)",
+                    fg="yellow")
+    if c.reconstruction_open:
+        click.secho(f"  {len(c.reconstruction_open)} reconstruction blocker(s) remain unresolved.", fg="yellow")
+    unbound = [q for q in [*c.connections, *c.workspace_items] if not q.bound]
+    if unbound:
+        click.secho(f"  {len(unbound)} binding(s) still to supply before anything can run; see the report.", fg="yellow")
+    base = store.conversion_dir(c.project_id)
+    click.echo(f"  report:     {base / 'conversion-report.md'}")
+    click.echo(f"  record:     {store.conversion_path(c.project_id)}")
+    click.echo(f"  resolutions template: {base / 'resolutions.template.json'}")
+
+
+@cli.command(name="reconstruct")
+@click.option(
+    "--project", "project_name", required=True,
+    help="Project/engagement name (Intake, Repository Discovery and ADF Semantic Discovery must have run).",
+)
+def reconstruct(project_name: str) -> None:
+    """Find incomplete pipelines and propose evidence-backed completions (deterministic, no LLM)."""
+    config = load_config()
+    store = ProjectStore(projects_root(config))
+    result = ReconstructionAgent(store).run(ReconstructionRequest(project_name=project_name))
+    if not result.success:
+        click.secho(f"Reconstruction failed: {result.error}", fg="red", err=True)
+        sys.exit(1)
+    r = result.reconstruction
+    click.echo("RECONSTRUCTION (original source is never modified)")
+    click.echo(f"  project:   {r.project_id}")
+    click.echo(f"  commit:    {r.source_commit_sha}")
+    click.echo(f"  outcome:   {r.status.value}")
+    for cls, n in r.finding_counts.items():
+        click.echo(f"  gaps ({cls}): {n}")
+    for conf, n in r.proposal_counts.items():
+        click.echo(f"  proposals ({conf}): {n}")
+    click.echo(f"  safe to generate: {r.safe_proposal_count}   blockers: {r.blocker_count}")
+    colours = {"complete": "green", "reconstructable": "yellow", "partially_reconstructable": "yellow",
+               "blocked": "red", "unusable": "red"}
+    for p in r.pipelines:
+        click.secho(f"  - {p.pipeline}: {p.completeness.value}"
+                    f"{'' if p.executable_as_is else ' (not executable as authored)'}", fg=colours[p.completeness.value])
+    base = store.reconstruction_dir(r.project_id)
+    click.echo(f"  report:    {base / 'reconstruction-report.md'}")
+    click.echo(f"  record:    {store.reconstruction_path(r.project_id)}")
+    if r.completed_files:
+        click.echo(f"  proposed completion: {base / 'completed'}  (apply with `convert --apply-reconstruction`)")
+
+
+@cli.command(name="deploy")
+@click.option("--project", "project_name", required=True, help="Project name (`convert` must have run).")
+@click.option("--workspace-id", "workspace_id", required=True, help="Target Fabric workspace id (GUID).")
+@click.option("--pipeline", "pipelines", multiple=True, help="Deploy only this converted pipeline. Repeatable.")
+@click.option("--with-children", is_flag=True,
+              help="Also deploy the pipelines a selected pipeline invokes (transitively), children first.")
+@click.option("--allow-unbound", is_flag=True,
+              help="Push even with <connection:...> placeholders left (bind them in Fabric afterwards).")
+@azure_auth_options()
+@click.option("--apply", "apply_", is_flag=True,
+              help="Actually create/overwrite pipelines in Fabric. Without it this is a dry run (read-only).")
+def deploy_cmd(project_name: str, workspace_id: str, pipelines: tuple[str, ...], with_children: bool,
+               allow_unbound: bool, apply_: bool, auth: str, **auth_env: str | None) -> None:
+    """Deploy converted pipelines to a Fabric workspace (dry run unless --apply)."""
+    import json as _json
+
+    from adf2fabric.agent.deployment.fabric_deploy import (
+        DeployError, DeployItem, FabricClient, child_refs, deploy,
+    )
+    from adf2fabric.connectivity._azure import CredentialUnavailable, build_credential
+    from adf2fabric.project.models import AzureCredentialRef
+
+    store = ProjectStore(projects_root(load_config()))
+    try:
+        conversion = store.load_conversion(project_name)
+    except Exception as exc:  # noqa: BLE001
+        click.secho(f"Deploy failed: {exc}", fg="red", err=True)
+        sys.exit(1)
+    base = store.conversion_dir(project_name)
+    available: dict[str, DeployItem] = {}
+    for p in conversion.pipelines:
+        rel = p.artifact_path
+        if rel and (base / rel).exists():
+            path = base / rel
+            available[p.source_pipeline.lower()] = DeployItem(
+                p.fabric_pipeline_name, _json.loads(path.read_text(encoding="utf-8")), str(path), p.structural_valid)
+    wanted = [n.lower() for n in pipelines] or list(available)
+    unknown = [n for n in pipelines if n.lower() not in available]
+    if unknown:
+        click.secho(f"Deploy failed: no converted pipeline named {', '.join(unknown)}. "
+                    f"Available: {', '.join(sorted(available)) or '(none)'}.", fg="red", err=True)
+        sys.exit(1)
+    if with_children:  # transitively add every pipeline a selected one invokes
+        seen: list[str] = []
+        queue = [n for n in wanted if n in available]
+        while queue:
+            n = queue.pop(0)
+            if n in seen:
+                continue
+            seen.append(n)
+            queue += [c.lower() for c in child_refs(available[n].content) if c.lower() in available]
+        wanted = seen
+    items = [available[n] for n in wanted if n in available]
+    if not items:
+        click.secho("Nothing to deploy (run `convert` first).", fg="yellow")
+        sys.exit(1)
+    try:
+        credential, _ = build_credential(credential_from(auth, **auth_env))
+        from adf2fabric.agent.deployment.fabric_deploy import FABRIC_SCOPE
+        client = FabricClient(credential.get_token(FABRIC_SCOPE).token)
+        results = deploy(client, workspace_id, items, apply=apply_, allow_unbound=allow_unbound)
+    except (DeployError, CredentialUnavailable) as exc:
+        click.secho(f"Deploy failed: {getattr(exc, 'detail', None) or exc}", fg="red", err=True)
+        sys.exit(1)
+    except Exception as exc:  # noqa: BLE001 - e.g. az login missing/expired; message carries no token
+        click.secho(f"Deploy failed: could not get a Fabric token or reach Fabric ({type(exc).__name__}). "
+                    "Check `az login` with an account that has access to the workspace.", fg="red", err=True)
+        sys.exit(1)
+    click.echo(("DEPLOY TO FABRIC" if apply_ else "DEPLOY TO FABRIC (dry run - nothing changed; add --apply)")
+               + f"  workspace: {workspace_id}")
+    colours = {"create": "green", "update": "yellow", "refused": "red", "failed": "red"}
+    for r in results:
+        click.secho(f"  - {r.name}: {r.action}{f' [{r.item_id}]' if r.item_id else ''} - {r.detail}", fg=colours[r.action])
+        if r.children:
+            click.echo(f"      invokes: {', '.join(r.children)} (deployed first; their Fabric ids are filled in)")
+    if any(r.action in ("refused", "failed") for r in results):
+        sys.exit(2)
 
 
 if __name__ == "__main__":

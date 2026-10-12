@@ -28,6 +28,9 @@ from adf2fabric.project.discovery import (
     SqlDiscovery,
     SqlStructuralDiscovery,
 )
+from adf2fabric.project.conversion import ProjectConversion
+from adf2fabric.project.reconstruction import ProjectReconstruction
+from adf2fabric.project.source import SourceManifest
 from adf2fabric.project.models import Consultation, Project
 
 # Repo root is three parents up from this file: src/adf2fabric/project/store.py
@@ -64,6 +67,49 @@ class ProjectStore:
     def source_dir(self, project_id: str) -> Path:
         """Canonical local copy of the source repository for this project."""
         return self.project_dir(project_id) / SOURCE_DIRNAME
+
+    # --- Source manifest (how Intake obtained the source) --------------------
+
+    def source_manifest_path(self, project_id: str) -> Path:
+        return self.project_dir(project_id) / "source-manifest.yaml"
+
+    def has_source_manifest(self, project_id: str) -> bool:
+        return self.source_manifest_path(project_id).exists()
+
+    def save_source_manifest(self, project_id: str, manifest: SourceManifest) -> Path:
+        self.project_dir(project_id).mkdir(parents=True, exist_ok=True)
+        data = json.loads(manifest.model_dump_json())
+        path = self.source_manifest_path(project_id)
+        with path.open("w", encoding="utf-8") as f:
+            yaml.safe_dump(data, f, sort_keys=False)
+        return path
+
+    def load_source_manifest(self, project_id: str) -> SourceManifest:
+        path = self.source_manifest_path(project_id)
+        if not path.exists():
+            raise ProjectNotFoundError(
+                f"No source manifest for '{project_id}' under {self.projects_root}. "
+                "Run `adf2fabric intake` first."
+            )
+        with path.open(encoding="utf-8") as f:
+            data = yaml.safe_load(f)
+        return SourceManifest.model_validate(data)
+
+    def source_root(self, project_id: str) -> Path:
+        """Directory Discovery scans: ``source/`` or its recorded subdirectory.
+
+        Equals :meth:`source_dir` unless Intake recorded a repository
+        subdirectory in the source manifest.
+        """
+        base = self.source_dir(project_id)
+        if self.has_source_manifest(project_id):
+            try:
+                sub = self.load_source_manifest(project_id).subdirectory
+            except Exception:  # noqa: BLE001 - a corrupt manifest never blocks discovery
+                sub = None
+            if sub:
+                return base / sub
+        return base
 
     def exists(self, project_id: str) -> bool:
         return (self.project_dir(project_id) / "project.yaml").exists()
@@ -349,3 +395,85 @@ class ProjectStore:
         with path.open(encoding="utf-8") as f:
             data = yaml.safe_load(f)
         return AdfSemanticDiscovery.model_validate(data)
+
+    # --- Conversion record + generated Fabric artifacts ----------------------
+
+    def conversion_dir(self, project_id: str) -> Path:
+        return self.project_dir(project_id) / "conversion"
+
+    def conversion_path(self, project_id: str) -> Path:
+        return self.conversion_dir(project_id) / "conversion.yaml"
+
+    def has_conversion(self, project_id: str) -> bool:
+        return self.conversion_path(project_id).exists()
+
+    def save_conversion(self, project_id: str, conversion: ProjectConversion) -> Path:
+        self.conversion_dir(project_id).mkdir(parents=True, exist_ok=True)
+        # Round-trip through JSON so datetimes/enums serialize cleanly. No secrets exist
+        # on the model by design (it is built from the secret-masked semantic record).
+        data = json.loads(conversion.model_dump_json())
+        path = self.conversion_path(project_id)
+        with path.open("w", encoding="utf-8") as f:
+            yaml.safe_dump(data, f, sort_keys=False)
+        return path
+
+    def load_conversion(self, project_id: str) -> ProjectConversion:
+        path = self.conversion_path(project_id)
+        if not path.exists():
+            raise ProjectNotFoundError(
+                f"No conversion for '{project_id}' under {self.projects_root}. "
+                "Run `adf2fabric convert` first."
+            )
+        with path.open(encoding="utf-8") as f:
+            data = yaml.safe_load(f)
+        return ProjectConversion.model_validate(data)
+
+    def write_conversion_file(self, project_id: str, relative_path: str, text: str) -> Path:
+        """Write a generated artifact under ``conversion/`` (never under ``source/``)."""
+        target = (self.conversion_dir(project_id) / relative_path).resolve()
+        root = self.conversion_dir(project_id).resolve()
+        if root not in target.parents:
+            raise ValueError(f"Refusing to write outside the conversion folder: {relative_path}")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(text, encoding="utf-8")
+        return target
+
+    # --- Reconstruction record + proposed completion -------------------------
+
+    def reconstruction_dir(self, project_id: str) -> Path:
+        return self.project_dir(project_id) / "reconstruction"
+
+    def reconstruction_path(self, project_id: str) -> Path:
+        return self.reconstruction_dir(project_id) / "reconstruction.yaml"
+
+    def has_reconstruction(self, project_id: str) -> bool:
+        return self.reconstruction_path(project_id).exists()
+
+    def save_reconstruction(self, project_id: str, record: ProjectReconstruction) -> Path:
+        self.reconstruction_dir(project_id).mkdir(parents=True, exist_ok=True)
+        data = json.loads(record.model_dump_json())
+        path = self.reconstruction_path(project_id)
+        with path.open("w", encoding="utf-8") as f:
+            yaml.safe_dump(data, f, sort_keys=False)
+        return path
+
+    def load_reconstruction(self, project_id: str) -> ProjectReconstruction:
+        path = self.reconstruction_path(project_id)
+        if not path.exists():
+            raise ProjectNotFoundError(
+                f"No reconstruction for '{project_id}' under {self.projects_root}. "
+                "Run `adf2fabric reconstruct` first."
+            )
+        with path.open(encoding="utf-8") as f:
+            data = yaml.safe_load(f)
+        return ProjectReconstruction.model_validate(data)
+
+    def write_reconstruction_file(self, project_id: str, relative_path: str, text: str) -> Path:
+        """Write a reconstruction artifact under ``reconstruction/`` (never under ``source/``)."""
+        root = self.reconstruction_dir(project_id).resolve()
+        target = (root / relative_path).resolve()
+        if root not in target.parents:
+            raise ValueError(f"Refusing to write outside the reconstruction folder: {relative_path}")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(text, encoding="utf-8")
+        return target

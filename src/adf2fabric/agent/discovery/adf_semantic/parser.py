@@ -18,12 +18,10 @@ from typing import Any, Optional
 from adf2fabric.agent.discovery.repository.artifacts import _SECRET_KEY_HINTS
 from adf2fabric.project.discovery import (
     NOT_EXTRACTED,
-    AdfActivity,
     AdfColumn,
     AdfArtifactKind,
     AdfArtifactRef,
     AdfDataset,
-    AdfDependency,
     AdfFactoryConfig,
     AdfKeyVaultRef,
     AdfLinkedService,
@@ -115,6 +113,32 @@ def _folder_name(props: dict) -> Optional[str]:
     return None
 
 
+def _clean_json(node: Any, _depth: int = 0) -> Any:
+    """A secret-masked copy of authored JSON (keys + structure preserved).
+
+    Masks SecureString values, string values under credential-named keys, and strings
+    carrying a secret-value marker. Dynamic content (Expression objects) is kept.
+    """
+    if _depth > _MAX_DEPTH * 2:
+        return node
+    if isinstance(node, dict):
+        secure = node.get("type") == "SecureString"
+        out: dict = {}
+        for k, v in node.items():
+            if isinstance(v, str) and (
+                (secure and k == "value") or (isinstance(k, str) and k.lower() in SECRET_KEY_HINTS)
+            ):
+                out[k] = v if set(v) <= {"*"} and v else "[REDACTED]"
+            else:
+                out[k] = _clean_json(v, _depth + 1)
+        return out
+    if isinstance(node, list):
+        return [_clean_json(v, _depth + 1) for v in node]
+    if isinstance(node, str) and any(m in node.lower() for m in _SECRET_VALUE_MARKERS):
+        return "[REDACTED]"
+    return node
+
+
 def _parse_param_map(node: Any) -> list[AdfParameter]:
     """Parse a ``{name: {type, defaultValue}}`` parameter/global-parameter map."""
     out: list[AdfParameter] = []
@@ -125,15 +149,21 @@ def _parse_param_map(node: Any) -> list[AdfParameter]:
         ptype = spec.get("type") if isinstance(spec, dict) else None
         default = None
         is_expr = False
+        has_default = False
+        default_raw = None
         if isinstance(spec, dict) and ("defaultValue" in spec or "value" in spec):
             raw = spec.get("defaultValue", spec.get("value"))
             default, is_expr = _field_value(raw)
+            has_default = True
+            default_raw = _clean_json(raw)
         out.append(
             AdfParameter(
                 name=str(name),
                 type=ptype if isinstance(ptype, str) else None,
                 is_expression=is_expr,
                 default_value=default,
+                has_default=has_default,
+                default_raw=default_raw,
             )
         )
     return out
@@ -148,14 +178,20 @@ def _parse_variables(node: Any) -> list[AdfVariable]:
         vtype = spec.get("type") if isinstance(spec, dict) else None
         default = None
         is_expr = False
+        has_default = False
+        default_raw = None
         if isinstance(spec, dict) and "defaultValue" in spec:
             default, is_expr = _field_value(spec.get("defaultValue"))
+            has_default = True
+            default_raw = _clean_json(spec.get("defaultValue"))
         out.append(
             AdfVariable(
                 name=str(name),
                 type=vtype if isinstance(vtype, str) else None,
                 is_expression=is_expr,
                 default_value=default,
+                has_default=has_default,
+                default_raw=default_raw,
             )
         )
     return out
@@ -180,99 +216,16 @@ def _has_secret_key(data: Any, _depth: int = 0) -> bool:
 
 # --- pipelines --------------------------------------------------------------
 
-# Child-activity containers → the typeProperties keys holding nested activities.
-_NESTED_ACTIVITY_KEYS = ("activities", "ifTrueActivities", "ifFalseActivities", "defaultActivities")
-
-
-def _parse_activity(node: dict, _depth: int = 0) -> AdfActivity:
-    tp = node.get("typeProperties") if isinstance(node.get("typeProperties"), dict) else {}
-
-    depends_on: list[AdfDependency] = []
-    for dep in node.get("dependsOn", []) or []:
-        if isinstance(dep, dict) and isinstance(dep.get("activity"), str):
-            conds = [str(c) for c in (dep.get("dependencyConditions") or []) if isinstance(c, str)]
-            depends_on.append(AdfDependency(activity=dep["activity"], conditions=conds))
-
-    dataset_refs: list[str] = []
-    for io_key in ("inputs", "outputs"):
-        for ref in node.get(io_key, []) or []:
-            name = _ref_name(ref)
-            if name:
-                dataset_refs.append(name)
-    lookup_ds = _ref_name(tp.get("dataset"))
-    if lookup_ds:
-        dataset_refs.append(lookup_ds)
-
-    linked_service_refs: list[str] = []
-    ls_ref = _ref_name(node.get("linkedServiceName"))
-    if ls_ref:
-        linked_service_refs.append(ls_ref)
-
-    pipeline_refs: list[str] = []
-    pl_ref = _ref_name(tp.get("pipeline"))
-    if pl_ref:
-        pipeline_refs.append(pl_ref)
-
-    source = tp.get("source") if isinstance(tp.get("source"), dict) else {}
-    sink = tp.get("sink") if isinstance(tp.get("sink"), dict) else {}
-    source_type = source.get("type") if isinstance(source.get("type"), str) else None
-    sink_type = sink.get("type") if isinstance(sink.get("type"), str) else None
-
-    stored_procedures: list[str] = []
-    for sp in (tp.get("storedProcedureName"), source.get("sqlReaderStoredProcedureName")):
-        if isinstance(sp, str) and sp:
-            stored_procedures.append(sp)
-
-    nested: list[AdfActivity] = []
-    if _depth < _MAX_DEPTH:
-        for key in _NESTED_ACTIVITY_KEYS:
-            for child in tp.get(key, []) or []:
-                if isinstance(child, dict):
-                    nested.append(_parse_activity(child, _depth + 1))
-        # Switch ``cases[].activities``
-        for case in tp.get("cases", []) or []:
-            if isinstance(case, dict):
-                for child in case.get("activities", []) or []:
-                    if isinstance(child, dict):
-                        nested.append(_parse_activity(child, _depth + 1))
-
-    return AdfActivity(
-        name=str(node.get("name") or ""),
-        type=node.get("type") if isinstance(node.get("type"), str) else None,
-        depends_on=depends_on,
-        dataset_refs=sorted(set(dataset_refs)),
-        linked_service_refs=sorted(set(linked_service_refs)),
-        pipeline_refs=sorted(set(pipeline_refs)),
-        source_type=source_type,
-        sink_type=sink_type,
-        stored_procedures=sorted(set(stored_procedures)),
-        activities=nested,
-    )
-
-
-def _collect_pipeline_refs(activities: list[AdfActivity]) -> set[str]:
-    refs: set[str] = set()
-    for a in activities:
-        refs.update(a.pipeline_refs)
-        refs.update(_collect_pipeline_refs(a.activities))
-    return refs
-
 
 def parse_pipeline(data: dict, path: str) -> AdfPipeline:
-    props = data.get("properties") if isinstance(data.get("properties"), dict) else {}
-    activities = [
-        _parse_activity(a) for a in props.get("activities", []) or [] if isinstance(a, dict)
-    ]
-    return AdfPipeline(
-        name=str(data.get("name") or ""),
-        path=path,
-        folder=_folder_name(props),
-        parameters=_parse_param_map(props.get("parameters")),
-        variables=_parse_variables(props.get("variables")),
-        activities=activities,
-        activity_count=len(activities),
-        pipeline_dependencies=sorted(_collect_pipeline_refs(activities)),
-    )
+    """Pipelines are parsed by :mod:`.parser_pipelines` — the single pipeline interface.
+
+    Kept as a thin delegate so existing callers keep working; there is no second
+    pipeline-parsing implementation.
+    """
+    from adf2fabric.agent.discovery.adf_semantic import parser_pipelines
+
+    return parser_pipelines.parse_pipeline(data, path)
 
 
 # --- datasets ---------------------------------------------------------------
@@ -357,6 +310,9 @@ def parse_dataset(data: dict, path: str) -> AdfDataset:
         parameters=_parse_param_map(props.get("parameters")),
         columns=_dataset_columns(props),
         asset=_dataset_asset(name, dtype, tp),
+        type_properties=_clean_json(tp),
+        annotations=[a for a in (props.get("annotations") or []) if isinstance(a, str)]
+        if isinstance(props.get("annotations"), list) else [],
     )
 
 
@@ -407,7 +363,30 @@ def parse_linked_service(data: dict, path: str) -> AdfLinkedService:
         connection_field_names=sorted(str(k) for k in tp) if isinstance(tp, dict) else [],
         credential_present=_has_secret_key(props),
         authentication_type=safe_scalar(auth) if isinstance(auth, str) else None,
+        integration_runtime=_ref_name(props.get("connectVia")),
     )
+
+
+# --- integration runtimes ---------------------------------------------------
+
+
+def classify_integration_runtime(data: dict) -> Optional[str]:
+    """azure | self_hosted | managed_vnet from an integration runtime definition; None if not classifiable.
+
+    ``SelfHosted`` is an on-premises runtime. ``Managed`` is an Azure runtime; one that carries a
+    ``managedVirtualNetwork`` reference runs inside a managed virtual network. An Azure-SSIS runtime
+    (``ssisProperties``) is deliberately left unclassified: it is not a data-store gateway question.
+    """
+    props = data.get("properties") if isinstance(data.get("properties"), dict) else {}
+    kind = props.get("type")
+    tp = props.get("typeProperties") if isinstance(props.get("typeProperties"), dict) else {}
+    if kind == "SelfHosted":
+        return "self_hosted"
+    if kind == "Managed":
+        if "ssisProperties" in tp:
+            return None
+        return "managed_vnet" if (props.get("managedVirtualNetwork") or tp.get("managedVirtualNetwork")) else "azure"
+    return None
 
 
 # --- triggers ---------------------------------------------------------------

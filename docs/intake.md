@@ -98,9 +98,55 @@ Intake returns a clear success/failure result (the CLI exits non-zero on failure
   (the remote URL is scrubbed to a token-free form after cloning).
 - Any command output surfaced in an error is redacted so an embedded token cannot leak.
 
+## Source modes
+
+Intake normalizes every source into the same place — `projects/<id>/source/` in the ADF
+Git folder layout (`pipeline/`, `dataset/`, `linkedService/`, `trigger/`, `factory/` ...)
+— so Discovery and the single `parser_pipelines` interface never care where it came from.
+
+| Mode | Command | Source of truth |
+|------|---------|-----------------|
+| B: GitHub | `adf2fabric intake --project P --repo URL [--branch B] [--subdirectory DIR] [--pipeline NAME]...` | the cloned branch; commit SHA recorded |
+| A: Azure  | `adf2fabric intake --project P --factory F --resource-group RG [--subscription S] [--pipeline NAME]... [--artifact-kind K]... [--auth azure_cli] [--allow-partial]` | live ARM `GET`s; the export is committed locally and that SHA recorded |
+
+Exactly one of `--repo` / `--factory` is required. Local JSON directories and ZIP inputs
+were not provided by the project before this work and are still not supported.
+
+**Azure mode authentication:** `--auth` accepts `azure_cli` (default), `client_secret`, `client_certificate`,
+`managed_identity`, `interactive_browser`, `device_code`, `access_token` and `azure_identity`, each with the
+`--*-env` options naming the environment variables it reads (see the README's Authentication table). Storage-only
+mechanisms (`account_key`, `sas_token`, `connection_string`) are not valid here: ARM needs a Microsoft Entra token.
+
+**Azure mode** reuses your `az login` session (via `azure-identity`, or the `az` CLI
+directly when that extra is not installed). It issues only `GET`s: the factory (global
+parameters) plus pipelines, datasets, linked services, triggers, data flows and integration
+runtimes, following `nextLink` paging and retrying 429/502/503/504 (honouring
+`Retry-After`, exponential backoff otherwise). Definitions are stored as Azure returned
+them, except secret **values** (SecureString and credential-named fields), which are masked
+and listed in the manifest by location. The export is built in a staging directory and only
+replaces `source/` when complete, so a failed retrieval never destroys a good source. Any
+failed collection fails the intake with an actionable message unless `--allow-partial`.
+
+**Pipeline selection** (`--pipeline`, either mode) keeps the pipelines plus everything they
+reference (datasets, linked services, executed pipelines, data flows, integration runtimes)
+and the triggers that start them. Discovery honours it.
+
+## Source manifest
+
+`projects/<id>/source-manifest.yaml` records how the source was obtained: `source_type`,
+`source_identifier` (token-free URL / `azure://` resource id), `branch`, `subdirectory`,
+`version` (commit SHA), `content_sha256`, `retrieved_at`, the Azure factory identity, the
+selection, every artifact (path, hash, ARM etag), every retrieval `failure`, every
+`redaction` (location only) and integrity `findings`. It never holds a token or secret.
+
+Findings (shared by both modes, each with an `action`): `invalid_json`,
+`duplicate_artifact` (names are case-insensitive), `missing_reference`, `no_adf_artifacts`,
+`no_pipelines`, `arm_template_only` (warning), `retrieval_failed`. Errors set
+`complete: false`; the source is still stored so it can be inspected.
+
 ## Scope boundary
 
-After metadata is recorded, Intake **hard-stops**. It does not read files, count files,
-parse ADF JSON, inspect pipelines/datasets/linked services/triggers, build inventories or
-dependency graphs, or perform any migration analysis. Those belong to Discovery and later
-stages.
+Intake does not parse activities, build inventories or dependency graphs, or analyse the
+migration. It does now perform a shallow, read-only **integrity check** of the ADF artifact
+files (valid JSON, duplicates, dangling references) so an incomplete export is caught at
+the door. Everything semantic still belongs to Discovery and later stages.

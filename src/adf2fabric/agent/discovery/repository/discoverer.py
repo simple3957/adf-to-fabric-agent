@@ -70,8 +70,11 @@ class RepositoryDiscoverer:
 
             self._verify_source(source_dir, project)
 
-            structure, files = scan_repository(source_dir)
-            candidates = extract_candidates(source_dir, files)
+            # Git integrity is checked on source/; the scan honors the source root
+            # Intake recorded (a repository subdirectory), otherwise source/ itself.
+            scan_root = self.store.source_root(project_id)
+            structure, files = scan_repository(scan_root)
+            candidates = extract_candidates(scan_root, files)
             discovery = self._assemble(project_id, project, structure, files, candidates)
             self.store.save_repository_discovery(project_id, discovery)
 

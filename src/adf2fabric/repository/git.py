@@ -91,3 +91,29 @@ def set_remote_url(repo_dir: Path, url: str, remote: str = "origin") -> None:
 def is_git_repo(path: Path) -> bool:
     """True if ``path`` looks like the working tree of a git repository."""
     return (Path(path) / ".git").exists()
+
+
+def init_repo(path: Path, branch: str) -> None:
+    """Initialize a new repository at ``path`` on ``branch``."""
+    Path(path).mkdir(parents=True, exist_ok=True)
+    _run(["init", "-b", branch, str(path)])
+
+
+def commit_all(repo_dir: Path, message: str) -> str:
+    """Stage everything in ``repo_dir`` and commit it; return the commit SHA.
+
+    Identity is passed per-command so the result never depends on (or modifies)
+    the user's git configuration. Used to give a locally-built source (e.g. an
+    Azure export) the same verifiable commit identity a cloned source has.
+    """
+    _run(["-C", str(repo_dir), "add", "-A"])
+    _run(
+        [
+            "-C", str(repo_dir),
+            "-c", "user.name=adf2fabric",
+            "-c", "user.email=adf2fabric@localhost",
+            "-c", "commit.gpgsign=false",
+            "commit", "--allow-empty", "-m", message,
+        ]
+    )
+    return head_sha(repo_dir)

@@ -27,7 +27,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from enum import Enum
-from typing import Optional
+from typing import Any, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -436,6 +436,10 @@ class AdfParameter(_Strict):
     type: Optional[str] = None
     is_expression: bool = False
     default_value: Optional[str] = None  # None when absent OR dropped by secret guard
+    # The default exactly as authored (arrays/objects/numbers/booleans/Expression objects),
+    # secret-masked. ``has_default`` distinguishes "no default" from an explicit null.
+    has_default: bool = False
+    default_raw: Optional[Any] = None
 
 
 class AdfVariable(_Strict):
@@ -443,6 +447,8 @@ class AdfVariable(_Strict):
     type: Optional[str] = None
     is_expression: bool = False
     default_value: Optional[str] = None
+    has_default: bool = False
+    default_raw: Optional[Any] = None
 
 
 class AdfColumn(_Strict):
@@ -453,10 +459,16 @@ class AdfColumn(_Strict):
 
 
 class AdfDependency(_Strict):
-    """An activity ordering edge (``dependsOn``)."""
+    """An activity ordering edge (``dependsOn``).
+
+    ``conditions`` are normalized to ``Succeeded`` / ``Failed`` / ``Completed`` /
+    ``Skipped``; anything else is kept verbatim in ``unknown_conditions``.
+    """
 
     activity: str
     conditions: list[str] = Field(default_factory=list)
+    unknown_conditions: list[str] = Field(default_factory=list)
+    resolved: bool = True  # the named activity exists in the same scope
 
 
 class AdfArtifactRef(_Strict):
@@ -515,8 +527,159 @@ class AdfRelationship(_Strict):
     resolved: bool = False
 
 
+# ---------------------------------------------------------------------------
+# Activity-level semantic representation (deterministic, no inference engine).
+#
+# These models extend ``AdfActivity`` / ``AdfPipeline`` in place — they are the
+# intermediate representation a later converter consumes. Original property
+# values and expressions are preserved next to their interpretation; nothing in
+# here is Fabric-specific.
+# ---------------------------------------------------------------------------
+
+
+class AdfSemanticCategory(str, Enum):
+    data_movement = "data_movement"
+    data_transformation = "data_transformation"
+    data_retrieval = "data_retrieval"
+    control_flow = "control_flow"
+    orchestration = "orchestration"
+    external_execution = "external_execution"
+    compute = "compute"
+    validation = "validation"
+    variable_management = "variable_management"
+    unknown = "unknown"
+
+
+class AdfOperationKind(str, Enum):
+    read = "read"
+    write = "write"
+    transform = "transform"
+    orchestrate = "orchestrate"
+    validate = "validate"
+    external_execution = "external_execution"
+    branch = "branch"
+    loop = "loop"
+    filter = "filter"
+    wait = "wait"
+    fail = "fail"
+    delete = "delete"
+    set_variable = "set_variable"
+    append_variable = "append_variable"
+    unknown = "unknown"
+
+
+class AdfConfidence(str, Enum):
+    high = "high"  # known type, required properties present, fully understood
+    medium = "medium"  # understood, but something is dynamic/unresolved/contradictory
+    low = "low"  # known type but required properties are missing
+    unsupported = "unsupported"  # unknown activity type: described structurally only
+
+
+class AdfIssueSeverity(str, Enum):
+    error = "error"
+    warning = "warning"
+    info = "info"
+
+
+class AdfParseIssue(_Strict):
+    """Something the parser could not fully understand or found inconsistent."""
+
+    code: str
+    severity: AdfIssueSeverity = AdfIssueSeverity.warning
+    message: str
+    property_path: Optional[str] = None
+
+
+class AdfSourceLocation(_Strict):
+    file: str  # repository-relative path of the pipeline JSON
+    pointer: str  # JSON pointer-style path, e.g. properties.activities[2].typeProperties.ifTrueActivities[0]
+
+
+class AdfExpressionRef(_Strict):
+    """A reference found inside an expression (never resolved to a value)."""
+
+    kind: str  # pipeline_parameter | global_parameter | variable | activity_output | loop_item | ...
+    name: Optional[str] = None
+    path: Optional[str] = None  # accessor path after the name, e.g. ".output.firstRow.maxdate"
+    raw: str = ""
+
+
+class AdfExpression(_Strict):
+    """One dynamic-content value: the original text AND its analysis."""
+
+    property_path: str
+    role: str = "general"  # e.g. loop_collection, source_query, destination_path, condition
+    raw: str  # exactly as authored; never rewritten
+    form: str  # expression | interpolated | literal | escaped_literal
+    is_dynamic: bool = True
+    parse_status: str = "parsed"  # parsed | unparsed
+    error: Optional[str] = None
+    references: list[AdfExpressionRef] = Field(default_factory=list)
+    functions: list[str] = Field(default_factory=list)  # as written, sorted, unique
+    unknown_functions: list[str] = Field(default_factory=list)  # not in the documented set
+    function_groups: list[str] = Field(default_factory=list)  # datetime, string, collection, ...
+    literal_text: str = ""  # static text of an interpolated string (for query/comparison analysis)
+
+
+class AdfIO(_Strict):
+    """A data endpoint an activity reads from or writes to."""
+
+    role: str  # input | output | source | sink | target
+    kind: str = "dataset"  # dataset | inline | dataflow
+    name: Optional[str] = None  # dataset name
+    connector_type: Optional[str] = None  # e.g. AzureSqlSource / ParquetSink
+    store: Optional[str] = None  # e.g. AzureBlobFS (from store settings)
+    format: Optional[str] = None  # e.g. DelimitedText / Parquet
+    dataset_type: Optional[str] = None  # filled when the dataset resolves
+    linked_service: Optional[str] = None
+    connection_type: Optional[str] = None  # linked service type, when resolved
+    resolved: Optional[bool] = None  # None = not checked yet
+    parameters: dict[str, Any] = Field(default_factory=dict)  # arguments passed to the dataset
+    location: dict[str, Any] = Field(default_factory=dict)  # table/schema/path/query/stored_procedure
+    declared_columns: Optional[int] = None
+    settings: dict[str, Any] = Field(default_factory=dict)  # source/sink options, preserved
+
+
+class AdfActivityReference(_Strict):
+    kind: str  # pipeline | dataset | linkedService | dataflow | integrationRuntime | notebook | ...
+    name: str
+    role: str  # property path it was found at
+    resolved: Optional[bool] = None  # None = this kind is not inventoried
+
+
+class AdfPolicy(_Strict):
+    timeout: Optional[str] = None
+    retry: Optional[int] = None
+    retry_interval_in_seconds: Optional[int] = None
+    secure_input: Optional[bool] = None
+    secure_output: Optional[bool] = None
+    is_dynamic: bool = False  # some policy value is an expression
+    raw: dict[str, Any] = Field(default_factory=dict)  # every policy key, as authored
+
+
+class AdfActivityUsage(_Strict):
+    """Where an activity's output (or a variable it sets) is consumed."""
+
+    activity_id: str
+    property_path: str
+    via: str  # activity_output | variable
+    detail: str = ""
+
+
+class AdfPattern(_Strict):
+    name: str
+    description: str
+    activities: list[str] = Field(default_factory=list)  # activity ids
+    evidence: list[str] = Field(default_factory=list)
+
+
 class AdfActivity(_Strict):
-    """A pipeline activity. Nested container activities recurse via ``activities``."""
+    """A pipeline activity. Nested container activities recurse via ``activities``.
+
+    The first block of fields is the original structural record (unchanged). The
+    rest is the semantic representation; every field has a default so records
+    written before it existed still load.
+    """
 
     name: str
     type: Optional[str] = None
@@ -529,6 +692,40 @@ class AdfActivity(_Strict):
     stored_procedures: list[str] = Field(default_factory=list)
     activities: list["AdfActivity"] = Field(default_factory=list)  # nested (ForEach/If/Until/Switch)
     note: str = ""
+
+    # --- semantic representation ---
+    activity_id: str = ""  # <pipeline>/<ancestor>/.../<name>, unique within the pipeline
+    semantic_category: AdfSemanticCategory = AdfSemanticCategory.unknown
+    operation: AdfOperationKind = AdfOperationKind.unknown  # primary operation
+    operations: list[AdfOperationKind] = Field(default_factory=list)
+    semantic_tags: list[str] = Field(default_factory=list)  # evidence-backed, e.g. watermark_lookup
+    parent_activity_id: Optional[str] = None
+    nesting_path: list[str] = Field(default_factory=list)  # ancestor activity names, outermost first
+    branch: Optional[str] = None  # which container slot: activities | ifTrue | ifFalse | default | case:<v>
+    execution_order: Optional[int] = None  # topological rank within its scope (None if cyclic)
+    stage: Optional[int] = None  # parallel stage within its scope (0 = no dependencies)
+    dependents: list[str] = Field(default_factory=list)  # sibling activities that depend on this one
+    inputs: list[AdfIO] = Field(default_factory=list)
+    outputs: list[AdfIO] = Field(default_factory=list)
+    expressions: list[AdfExpression] = Field(default_factory=list)
+    parameters: list[str] = Field(default_factory=list)  # pipeline parameters referenced
+    global_parameters: list[str] = Field(default_factory=list)
+    variables_read: list[str] = Field(default_factory=list)
+    variables_written: list[str] = Field(default_factory=list)
+    configuration: dict[str, Any] = Field(default_factory=dict)  # interpreted, activity-specific
+    raw_properties: dict[str, Any] = Field(default_factory=dict)  # typeProperties as authored (secret-masked)
+    unknown_properties: dict[str, Any] = Field(default_factory=dict)  # preserved, not understood
+    missing_properties: list[str] = Field(default_factory=list)  # required but absent
+    empty_properties: list[str] = Field(default_factory=list)  # present but explicitly empty
+    policy: Optional[AdfPolicy] = None
+    state: Optional[str] = None  # Active | Inactive (deactivated activities)
+    description: Optional[str] = None
+    references: list[AdfActivityReference] = Field(default_factory=list)
+    output_consumers: list[AdfActivityUsage] = Field(default_factory=list)
+    semantic_summary: str = ""
+    confidence: AdfConfidence = AdfConfidence.unsupported
+    warnings: list[AdfParseIssue] = Field(default_factory=list)
+    source_location: Optional[AdfSourceLocation] = None
 
 
 class AdfPipeline(_Strict):
@@ -543,6 +740,18 @@ class AdfPipeline(_Strict):
     parse_status: DiscoveryStatus = DiscoveryStatus.discovered
     note: str = ""
 
+    # --- semantic representation ---
+    description: Optional[str] = None
+    annotations: list[str] = Field(default_factory=list)
+    concurrency: Optional[int] = None
+    activity_total: int = 0  # every activity, nested included
+    activity_type_counts: dict[str, int] = Field(default_factory=dict)  # sorted by type
+    unknown_activity_types: list[str] = Field(default_factory=list)
+    patterns: list[AdfPattern] = Field(default_factory=list)
+    issues: list[AdfParseIssue] = Field(default_factory=list)  # pipeline-level problems
+    unknown_properties: dict[str, Any] = Field(default_factory=dict)
+    raw_properties: dict[str, Any] = Field(default_factory=dict)  # pipeline settings (policy, runDimensions...)
+
 
 class AdfDataset(_Strict):
     name: str
@@ -553,6 +762,10 @@ class AdfDataset(_Strict):
     parameters: list[AdfParameter] = Field(default_factory=list)
     columns: list[AdfColumn] = Field(default_factory=list)  # declared columns only
     asset: Optional[ExternalReference] = None  # source/sink asset identity
+    # The dataset's typeProperties as authored (secret-masked; dynamic content kept as
+    # Expression objects). Needed to inline the dataset into a target pipeline.
+    type_properties: dict[str, Any] = Field(default_factory=dict)
+    annotations: list[str] = Field(default_factory=list)
     parse_status: DiscoveryStatus = DiscoveryStatus.discovered
     note: str = ""
 
@@ -569,6 +782,10 @@ class AdfLinkedService(_Strict):
     authentication_type: Optional[str] = None
     parse_status: DiscoveryStatus = DiscoveryStatus.discovered
     note: str = ""
+    integration_runtime: Optional[str] = None  # connectVia reference name, if any
+    # azure | self_hosted | managed_vnet, from the runtime's own definition; None = not classified (runtime
+    # artifact missing or of a type we do not classify), which the converter treats cautiously.
+    integration_runtime_kind: Optional[str] = None
 
 
 class AdfTrigger(_Strict):
@@ -605,6 +822,10 @@ class AdfSemanticDiscovery(_Strict):
     linked_service_count: int = 0
     trigger_count: int = 0
     factory_count: int = 0
+    activity_count: int = 0  # every pipeline activity, nested included
+    activity_type_counts: dict[str, int] = Field(default_factory=dict)
+    unknown_activity_types: list[str] = Field(default_factory=list)
+    parse_issue_count: int = 0  # pipeline + activity issues across all pipelines
     pipelines: list[AdfPipeline] = Field(default_factory=list)  # sorted by name
     datasets: list[AdfDataset] = Field(default_factory=list)  # sorted by name
     linked_services: list[AdfLinkedService] = Field(default_factory=list)  # sorted by name

@@ -135,12 +135,22 @@ class ReadinessStatus(str, Enum):
 # --- credential references (never actual secrets) --------------------------
 
 class AzureCredentialRef(_Strict):
-    """Reference to an Azure credential. Holds env-var *names*, never values."""
+    """Reference to an Azure credential. Holds env-var *names*, never values.
 
-    auth: str = Field(description="'client_secret' or 'azure_identity'.")
+    ``auth`` selects the mechanism (see ``connectivity._azure.AUTH_MECHANISMS``); only the ``*_env``
+    fields that mechanism needs are read. Secret values live in the named environment variables.
+    """
+
+    auth: str = Field(description="One of the mechanisms in connectivity._azure.AUTH_MECHANISMS.")
     tenant_id_env: Optional[str] = None
     client_id_env: Optional[str] = None
     client_secret_env: Optional[str] = None
+    certificate_path_env: Optional[str] = None  # client_certificate: path to a PEM/PFX file
+    certificate_password_env: Optional[str] = None  # client_certificate: optional password
+    access_token_env: Optional[str] = None  # access_token: a pre-acquired bearer token
+    account_key_env: Optional[str] = None  # storage only: account key
+    sas_token_env: Optional[str] = None  # storage only: SAS token
+    connection_string_env: Optional[str] = None  # storage only: connection string (key or SAS is extracted)
 
 
 class SqlCredentialRef(_Strict):

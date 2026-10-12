@@ -80,7 +80,7 @@ class AdlsDiscoverer:
 
             # Credential — owned entirely by the abstraction; secret only for redaction.
             try:
-                credential, secret = build_credential(request.credential)
+                credential, secret = build_credential(request.credential, storage_ok=True)
             except CredentialUnavailable as exc:
                 status = (
                     AdlsDiscoveryStatus.dependency_unavailable

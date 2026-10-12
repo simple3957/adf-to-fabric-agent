@@ -46,8 +46,13 @@ access:
     environment: prod
     credential:
       auth: azure_cli                 # current local method: uses your `az login` identity
-      # auth: client_secret           # alt: tenant_id_env / client_id_env / client_secret_env
-      # auth: azure_identity          # alt: ambient DefaultAzureCredential chain
+      # Any Microsoft Entra mechanism works for ADF, ADLS Gen2 and Fabric (see "Authentication mechanisms" below):
+      # auth: client_secret           # tenant_id_env / client_id_env / client_secret_env
+      # auth: client_certificate      # tenant_id_env / client_id_env / certificate_path_env [/ certificate_password_env]
+      # auth: managed_identity        # optional client_id_env for a user-assigned identity
+      # auth: interactive_browser     # optional tenant_id_env (also: device_code)
+      # auth: access_token            # access_token_env (a pre-acquired bearer token)
+      # auth: azure_identity          # ambient DefaultAzureCredential chain
     owner: "Cloud platform team"
 
   sql_server:
@@ -75,7 +80,10 @@ access:
     filesystem: "raw"                 # optional; validated only if provided
     environment: prod
     credential:
-      auth: azure_identity            # or 'client_secret' with the three *_env fields
+      auth: azure_identity            # any Entra mechanism above, or a storage-only one:
+      # auth: account_key             # account_key_env: NAME of an env var holding the storage account key
+      # auth: sas_token               # sas_token_env
+      # auth: connection_string       # connection_string_env (its AccountKey / SharedAccessSignature is used)
       tenant_id_env: AZ_TENANT_ID
       client_id_env: AZ_CLIENT_ID
       client_secret_env: AZ_CLIENT_SECRET
@@ -127,3 +135,25 @@ additional_requirements: []
   explicit `tls.mode`.
 - A missing required field, an unknown key, or an invalid fixed platform/tool
   value fails the run clearly and writes nothing.
+
+## Authentication mechanisms
+
+A `credential:` block names a mechanism (`auth`) and the **names** of the environment variables holding its
+secrets; values are never written into the questionnaire or any record.
+
+| `auth` | Reads (env-var name fields) | Works for |
+|---|---|---|
+| `azure_cli` | optional `tenant_id_env` (pick a tenant when several are logged in) | ADF, Fabric, ADLS |
+| `client_secret` | `tenant_id_env`, `client_id_env`, `client_secret_env` | ADF, Fabric, ADLS |
+| `client_certificate` | `tenant_id_env`, `client_id_env`, `certificate_path_env`, optional `certificate_password_env` | ADF, Fabric, ADLS |
+| `managed_identity` | optional `client_id_env` (user-assigned) | ADF, Fabric, ADLS |
+| `interactive_browser`, `device_code` | optional `tenant_id_env` | ADF, Fabric, ADLS |
+| `access_token` | `access_token_env` (you own its audience and lifetime) | ADF, Fabric, ADLS |
+| `azure_identity` | none (the SDK's default chain) | ADF, Fabric, ADLS |
+| `account_key` | `account_key_env` | **ADLS only** |
+| `sas_token` | `sas_token_env` | **ADLS only** |
+| `connection_string` | `connection_string_env` | **ADLS only** |
+
+Storage-only mechanisms are refused for ADF and Fabric with a message saying so. Service principals, certificates and
+managed identities need the matching role on the target (for example Storage Blob Data Reader for ADLS, Reader on the
+factory, a workspace role in Fabric).

@@ -52,7 +52,7 @@ class AdlsGen2Connector:
             )
 
         try:
-            credential, secret = build_credential(access.credential)
+            credential, secret = build_credential(access.credential, storage_ok=True)
         except CredentialUnavailable as exc:
             return outcome(AccessDomain.adls_gen2, exc.status, detail=exc.detail)
 
