@@ -7,6 +7,7 @@ displayed to explain what to do (for example a device code and its URL).
 
 from __future__ import annotations
 
+import shutil
 import subprocess
 import threading
 import time
@@ -50,8 +51,11 @@ class LoginManager:
             self._attempts[attempt.id] = attempt
             self._active = attempt.id
         env = {**os.environ, "NO_COLOR": "1", "PYTHONIOENCODING": "utf-8", **(env_extra or {})}
+        # Resolve the program like run_cli does: on Windows 'az' is az.cmd, which Popen won't find by its bare name.
+        exe = shutil.which(argv[0]) or argv[0]
         try:
-            proc = self._popen(argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, env=env, shell=False)
+            proc = self._popen([exe, *argv[1:]], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, env=env,
+                               shell=False)
         except OSError as exc:
             attempt.state = FAILED
             attempt.lines.append(redact(f"Could not start '{argv[0]}' ({type(exc).__name__})."))

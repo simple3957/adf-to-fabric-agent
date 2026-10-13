@@ -124,7 +124,9 @@ class AzureCliProvider:
             argv += ["--tenant", tenant]
         if device_code:
             argv.append("--use-device-code")
-        return self.logins.start(argv)
+        # The API runs in the background, where Windows' account-picker (WAM) can't come to the front and the sign-in
+        # hangs unseen. Use the browser sign-in instead (still supports Microsoft Authenticator / MFA).
+        return self.logins.start(argv, env_extra={"AZURE_CORE_ENABLE_BROKER_ON_WINDOWS": "false"})
 
     # ---- tokens (internal only; never returned by any API) ---------------------------------------------------
     def token(self, subscription: Optional[str] = None, tenant: Optional[str] = None, resource: str = ARM_RESOURCE) -> str:
