@@ -49,6 +49,7 @@ _RELEVANT_KINDS = {
     AdfArtifactKind.trigger,
     AdfArtifactKind.factory,
     AdfArtifactKind.integration_runtime,
+    AdfArtifactKind.change_data_capture,
 }
 
 
@@ -117,6 +118,7 @@ class AdfSemanticDiscoverer:
                 triggers=triggers, factory=factory,
                 external_references=external_references, relationships=relationships,
                 unresolved=unresolved, parsed=parsed, skipped=skipped, failed=failed,
+                cdcs=parsed_set["cdcs"], runtimes=parsed_set["runtimes"],
             )
         except ProjectNotFoundError as exc:
             return AdfSemanticDiscoveryResult(
@@ -148,12 +150,14 @@ class AdfSemanticDiscoverer:
             project_id, repo.source_commit_sha, status, "",
             ps["pipelines"], ps["datasets"], ps["linked_services"], ps["triggers"], ps["factory"],
             ps["external_references"], ps["relationships"], ps["unresolved"],
-            ps["parsed"], ps["skipped"], ps["failed"],
+            ps["parsed"], ps["skipped"], ps["failed"], ps["cdcs"], ps["runtimes"],
         )
 
     def _parse_all(self, candidates, source_dir: Path, overrides: "dict[str, dict] | None" = None) -> dict:
         pipelines, datasets, linked_services, triggers, factory = [], [], [], [], []
         runtime_kinds: dict[str, Optional[str]] = {}  # runtime name (lower) -> kind
+        cdcs: list = []
+        runtimes: list = []
         parsed = skipped = failed = 0
         failures: list[str] = []
         for cand in sorted(candidates, key=lambda c: c.path):
@@ -169,10 +173,22 @@ class AdfSemanticDiscoverer:
                 failed += 1
                 failures.append(cand.path)
                 continue
+            if cand.artifact_kind == AdfArtifactKind.change_data_capture:
+                try:
+                    cdcs.append(parser.parse_change_data_capture(data, cand.path))
+                    parsed += 1
+                except Exception:  # noqa: BLE001 - one bad artifact never aborts the run
+                    failed += 1
+                    failures.append(cand.path)
+                continue
             if cand.artifact_kind == AdfArtifactKind.integration_runtime:
                 name = str(data.get("name") or "").lower()
                 if name:
                     runtime_kinds[name] = parser.classify_integration_runtime(data)
+                try:
+                    runtimes.append(parser.parse_integration_runtime(data, cand.path))
+                except Exception:  # noqa: BLE001 - classification above still stands
+                    pass
                 parsed += 1
                 continue
             try:
@@ -190,6 +206,8 @@ class AdfSemanticDiscoverer:
         linked_services.sort(key=lambda a: a.name)
         triggers.sort(key=lambda a: a.name)
         factory.sort(key=lambda a: a.name)
+        cdcs.sort(key=lambda a: a.name)
+        runtimes.sort(key=lambda a: a.name)
 
         for ls in linked_services:
             if ls.integration_runtime:
@@ -207,6 +225,7 @@ class AdfSemanticDiscoverer:
             pipelines=pipelines, datasets=datasets, linked_services=linked_services, triggers=triggers,
             factory=factory, external_references=external_references, relationships=relationships,
             unresolved=unresolved, parsed=parsed, skipped=skipped, failed=failed, failures=failures,
+            cdcs=cdcs, runtimes=runtimes,
         )
 
     # --- helpers ------------------------------------------------------------
@@ -247,13 +266,13 @@ class AdfSemanticDiscoverer:
         self, project_id, source_commit_sha, status, *, detail,
         pipelines=None, datasets=None, linked_services=None, triggers=None, factory=None,
         external_references=None, relationships=None, unresolved=None,
-        parsed=0, skipped=0, failed=0,
+        parsed=0, skipped=0, failed=0, cdcs=None, runtimes=None,
     ) -> AdfSemanticDiscoveryResult:
         discovery = self._assemble(
             project_id, source_commit_sha, status, detail,
             pipelines or [], datasets or [], linked_services or [], triggers or [],
             factory or [], external_references or [], relationships or [], unresolved or [],
-            parsed, skipped, failed,
+            parsed, skipped, failed, cdcs or [], runtimes or [],
         )
         self.store.save_adf_semantic_discovery(project_id, discovery)
 
@@ -283,7 +302,7 @@ class AdfSemanticDiscoverer:
     def _assemble(
         self, project_id, source_commit_sha, status, detail,
         pipelines, datasets, linked_services, triggers, factory,
-        external_references, relationships, unresolved, parsed, skipped, failed,
+        external_references, relationships, unresolved, parsed, skipped, failed, cdcs=(), runtimes=(),
     ) -> AdfSemanticDiscovery:
         now = datetime.now(timezone.utc)
         discovery = AdfSemanticDiscovery(
@@ -308,6 +327,8 @@ class AdfSemanticDiscoverer:
             linked_services=linked_services,
             triggers=triggers,
             factory=factory,
+            change_data_captures=list(cdcs),
+            integration_runtimes=list(runtimes),
             external_references=external_references,
             relationships=relationships,
             unresolved_references=unresolved,

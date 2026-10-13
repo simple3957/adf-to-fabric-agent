@@ -23,6 +23,7 @@ from adf2fabric.agent.conversion.fabric_schema import (
     RETRY_INTERVAL_MIN,
     SECURE_POLICY_KEYS,
 )
+from adf2fabric.agent.conversion import compatibility as compat
 from adf2fabric.project.conversion import (
     ConversionIssue,
     ConversionStrategy,
@@ -330,6 +331,14 @@ class ActivityBuilder:
         ls = self.pc.project.linked_services.get(ls_name.lower())
         if ls and gateway_need(ls.integration_runtime, ls.integration_runtime_kind):
             self._bind("gateway", ls.integration_runtime)
+        if ls is not None:
+            for e in compat.for_linked_service(ls.type, ls.connector_version):
+                if not e.emit:
+                    continue
+                code = compat.issue_code(e)
+                msg = compat.issue_message(e, ls.connector_version, prefix=f"Linked service '{ls_name}' ({ls.type}): ")
+                if not any(i.code == code and i.message == msg for i in self.issues):  # one per activity, not per dataset
+                    self.issue(code, msg, impact=e.impact, action=e.alternatives[0] if e.alternatives else "")
         if ls is None:
             self.issue("linked_service_not_found",
                        f"Linked service '{ls_name}' was not found among the discovered artifacts; the connection "

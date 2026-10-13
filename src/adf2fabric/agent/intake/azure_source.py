@@ -64,7 +64,9 @@ REDACTED = "[REDACTED]"
 # Kinds a user may request. ``factory`` carries the global parameters. Pipelines
 # are always retrieved (they are what the migration is about).
 FACTORY_KIND = AdfArtifactKind.factory
-KIND_CHOICES = [k.value for k, _ in arm.ARTIFACT_COLLECTIONS] + [FACTORY_KIND.value]
+CDC_KIND = AdfArtifactKind.change_data_capture
+CDC_SEGMENT = "adfcdcs"  # Microsoft.DataFactory/factories/adfcdcs (ARM reference)
+KIND_CHOICES = [k.value for k, _ in arm.ARTIFACT_COLLECTIONS] + [FACTORY_KIND.value, CDC_KIND.value]
 
 _ALLOWED_HOST = "management.azure.com"
 _RETRY_STATUSES = frozenset({429, 502, 503, 504})
@@ -393,6 +395,21 @@ def retrieve(
                     error=f"A {kind.value} returned by Azure has no name and cannot be stored.",
                     action="Report this to Azure support; re-run intake to confirm."))
         out.items[kind] = good
+    if CDC_KIND in kinds:  # change data capture resources; a factory without the feature just has none
+        url = f"{base_url}/{CDC_SEGMENT}?api-version={arm.API_VERSION}"
+        try:
+            items = fetcher.list_all(url)
+        except AdfRequestError as exc:
+            if exc.status_code == 401:
+                raise fail_hard(exc, f"the {CDC_SEGMENT} of factory '{factory_name}'") from None
+            if exc.status_code not in (400, 404, 405, 501):  # anything else is a real failure, reported
+                err, action = describe_failure(
+                    exc, what=f"the {CDC_SEGMENT} of factory '{factory_name}'", factory=factory_name,
+                    resource_group=resource_group, subscription=subscription)
+                out.failures.append(RetrievalFailure(
+                    kind=CDC_KIND.value, status_code=exc.status_code, error_code=exc.code, error=err, action=action))
+            items = []
+        out.items[CDC_KIND] = [i for i in items if isinstance(i.get("name"), str) and i["name"]]
     out.requests_made = fetcher.requests_made
     return out
 
@@ -426,6 +443,8 @@ def write_export(staging: Path, retrieval: AzureRetrieval, kinds: set[AdfArtifac
     for kind, _seg in arm.ARTIFACT_COLLECTIONS:
         for item in sorted(retrieval.items.get(kind, []), key=lambda i: i["name"]):
             write(kind, item["name"], item)
+    for item in sorted(retrieval.items.get(CDC_KIND, []), key=lambda i: i["name"]):
+        write(CDC_KIND, item["name"], item)
     if FACTORY_KIND in kinds and retrieval.factory:
         write(FACTORY_KIND, str(retrieval.factory.get("name") or "factory"), retrieval.factory)
     return redactions
@@ -597,7 +616,7 @@ def _failed(message: str) -> IntakeResult:
 def _resolve_kinds(requested: list[str]) -> set[AdfArtifactKind]:
     """Requested kinds (default: all). Pipelines are always included."""
     if not requested:
-        return {k for k, _ in arm.ARTIFACT_COLLECTIONS} | {FACTORY_KIND}
+        return {k for k, _ in arm.ARTIFACT_COLLECTIONS} | {FACTORY_KIND, CDC_KIND}
     by_value = {k.value.lower(): k for k in AdfArtifactKind}
     kinds: set[AdfArtifactKind] = {AdfArtifactKind.pipeline}
     for raw in requested:

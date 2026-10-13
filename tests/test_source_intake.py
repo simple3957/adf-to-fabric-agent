@@ -299,7 +299,8 @@ def test_azure_only_get_requests(store, sleeps):
     transport = FakeArm(ok_routes())
     run_azure(store, transport, sleeps)  # any write verb raises AssertionError -> failure
     assert transport.gets and all(u.startswith("https://management.azure.com/") for u in transport.gets)
-    assert len(transport.gets) == 7  # factory + six collections
+    assert len(transport.gets) == 8  # factory + six collections + the change data capture (adfcdcs) collection
+    assert sum(u.split('?')[0].endswith('/adfcdcs') for u in transport.gets) == 1
 
 
 def test_azure_pagination_followed(store, sleeps):
@@ -690,3 +691,46 @@ def test_cli_azure_end_to_end(tmp_path, monkeypatch, sleeps):
     assert "azure-adf" in out.output and "manifest:" in out.output and "redacted:" in out.output
     assert TOKEN not in out.output and SECRET_CONN not in out.output
     yaml.safe_load(store.source_manifest_path("demo").read_text("utf-8"))
+
+
+# --- change data capture (adfcdcs): a tolerant extra collection -----------------------------------------------
+
+
+def _cdc_item(name="CDC_One"):
+    return {"id": f"/subscriptions/{SUB}/.../{name}", "name": name, "type": "Microsoft.DataFactory/factories/adfcdcs",
+            "etag": "e1", "properties": {"policy": {"mode": "Microbatch"}, "sourceConnectionsInfo": [],
+                                          "targetConnectionsInfo": []}}
+
+
+def test_azure_intake_retrieves_cdc_resources_into_their_own_folder(store, sleeps):
+    routes = ok_routes()
+    routes[f"{BASE}/adfcdcs"] = Resp(200, {"value": [_cdc_item()]})
+    result = run_azure(store, FakeArm(routes), sleeps)
+    assert result.success
+    assert (store.source_dir("demo") / "changeDataCapture" / "CDC_One.json").exists()
+    assert any(a.kind == "changeDataCapture" and a.path.endswith("CDC_One.json") for a in result.manifest.artifacts)
+
+
+def test_a_factory_without_cdc_support_is_not_a_failure(store, sleeps):
+    for status in (404, 400):
+        routes = ok_routes()
+        routes[f"{BASE}/adfcdcs"] = Resp(status, {"error": {"code": "ResourceNotFound"}})
+        result = run_azure(store, FakeArm(routes), sleeps)
+        assert result.success and not result.manifest.failures
+        assert not (store.source_dir("demo") / "changeDataCapture").exists()
+
+
+def test_a_real_cdc_retrieval_failure_is_reported_not_swallowed(store, sleeps):
+    routes = ok_routes()
+    routes[f"{BASE}/adfcdcs"] = Resp(403, {"error": {"code": "AuthorizationFailed"}})
+    result = run_azure(store, FakeArm(routes), sleeps)
+    assert not result.success and "adfcdcs" in (result.error or "")
+
+
+def test_cdc_is_not_requested_when_the_artifact_kinds_are_restricted(store, sleeps):
+    transport = FakeArm(ok_routes())
+    result = run_azure(store, transport, sleeps, artifact_kinds=["pipeline"])
+    assert result.success and not any(u.split("?")[0].endswith("/adfcdcs") for u in transport.gets)
+    wanted = FakeArm(ok_routes())
+    run_azure(store, wanted, sleeps, artifact_kinds=["pipeline", "changeDataCapture"])
+    assert any(u.split("?")[0].endswith("/adfcdcs") for u in wanted.gets)

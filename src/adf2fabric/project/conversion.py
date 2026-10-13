@@ -187,6 +187,11 @@ class TriggerNote(_Strict):
     pipelines: list[str] = Field(default_factory=list)
     summary: str = ""
     action: str = ""
+    # Fabric schedule definitions generated from the trigger (see agent/conversion/triggers.py).
+    schedule_status: Optional[str] = None  # generated | generated_with_differences | manual | not_supported
+    schedules: list[dict[str, Any]] = Field(default_factory=list)  # Create Item Schedule bodies
+    schedule_notes: list[str] = Field(default_factory=list)
+    schedule_file: Optional[str] = None  # relative to conversion/, when a definition file was written
 
 
 class PipelineConversion(_Strict):
@@ -206,6 +211,28 @@ class PipelineConversion(_Strict):
     notes: list[str] = Field(default_factory=list)
     structural_valid: bool = True
     runtime_ready: bool = False
+
+
+class CompatibilityFinding(_Strict):
+    """A retired / deprecated / preview / unavailable component found in the source estate.
+
+    Findings come from the compatibility catalog (``agent/conversion/compatibility.py``), whose every entry
+    cites the Microsoft page and the date it was verified on. ``emitted`` says whether the finding also became
+    an issue on the activity that uses it (components the handlers already block are listed here only).
+    """
+
+    id: str  # catalog entry id
+    kind: str  # activity | linked_service | artifact
+    subject: str  # the activity or linked service name
+    adf_type: str
+    pipelines: list[str] = Field(default_factory=list)  # pipelines that use it
+    status: str  # removed | deprecated | preview | not_available
+    date: Optional[str] = None  # ISO date of removal / end of support, when documented
+    impact: Impact = Impact.manual
+    summary: str
+    alternatives: list[str] = Field(default_factory=list)
+    source_url: str = ""
+    emitted: bool = False
 
 
 class ConversionOutcome(str, Enum):
@@ -233,5 +260,6 @@ class ProjectConversion(_Strict):
     schema_notes: list[str] = Field(default_factory=list)  # inferred (not documented) schema parts
     reconstruction_applied: list[str] = Field(default_factory=list)  # proposal ids that entered this output
     reconstruction_open: list[str] = Field(default_factory=list)  # blocker ids still unresolved
+    compatibility: list[CompatibilityFinding] = Field(default_factory=list)  # retired/deprecated/preview components
     detail: str = ""
     provenance: dict[str, str] = Field(default_factory=dict)

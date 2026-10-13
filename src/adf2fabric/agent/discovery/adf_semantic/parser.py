@@ -13,16 +13,23 @@ preserved (the file is immutable); derived collections are sorted by the caller.
 
 from __future__ import annotations
 
+import json
+
+import re
+
 from typing import Any, Optional
 
 from adf2fabric.agent.discovery.repository.artifacts import _SECRET_KEY_HINTS
 from adf2fabric.project.discovery import (
     NOT_EXTRACTED,
+    AdfChangeDataCapture,
     AdfColumn,
     AdfArtifactKind,
     AdfArtifactRef,
     AdfDataset,
     AdfFactoryConfig,
+    AdfIntegrationRuntime,
+    AdfLinkedConnection,
     AdfKeyVaultRef,
     AdfLinkedService,
     AdfParameter,
@@ -308,6 +315,7 @@ def parse_dataset(data: dict, path: str) -> AdfDataset:
             else None
         ),
         parameters=_parse_param_map(props.get("parameters")),
+        linked_service_arguments=_ls_arguments(props.get("linkedServiceName")),
         columns=_dataset_columns(props),
         asset=_dataset_asset(name, dtype, tp),
         type_properties=_clean_json(tp),
@@ -341,6 +349,36 @@ def _find_key_vault_refs(node: Any, _depth: int = 0) -> list[AdfKeyVaultRef]:
     return found
 
 
+def _ls_arguments(ref: Any) -> dict[str, Any]:
+    """The arguments a LinkedServiceReference passes to the linked service's parameters (secret-masked, as authored)."""
+    params = ref.get("parameters") if isinstance(ref, dict) else None
+    return _clean_json(params) if isinstance(params, dict) else {}
+
+
+def _text_of(v: Any) -> Optional[str]:
+    """A scalar's text, or an Expression's text; secret-looking values are dropped."""
+    if isinstance(v, dict) and isinstance(v.get("value"), str) and v.get("type") == "Expression":
+        v = v["value"]
+    return safe_scalar(v) if isinstance(v, (str, int, float)) and not isinstance(v, bool) else None
+
+
+_LS_PARAM = re.compile(r"linkedService\(\)\.(\w+)", re.IGNORECASE)
+
+
+def _connection_parts(tp: dict) -> AdfLinkedConnection:
+    """The explicitly authored ``server`` / ``database`` / ``userName`` properties, and which fields use ``linkedService().X``.
+
+    Connection strings are deliberately not read.
+    """
+    dynamic = sorted(k for k, v in tp.items()
+                     if k != "password" and _LS_PARAM.search(v if isinstance(v, str) else json.dumps(v, default=str)))
+    return AdfLinkedConnection(
+        server=_text_of(tp.get("server")) or _text_of(tp.get("serverName")) or _text_of(tp.get("host")),
+        database=_text_of(tp.get("database")) or _text_of(tp.get("databaseName")),
+        user_name=_text_of(tp.get("userName")) or _text_of(tp.get("username")),
+        parameterized_fields=dynamic)
+
+
 def parse_linked_service(data: dict, path: str) -> AdfLinkedService:
     props = data.get("properties") if isinstance(data.get("properties"), dict) else {}
     tp = props.get("typeProperties") if isinstance(props.get("typeProperties"), dict) else {}
@@ -353,6 +391,7 @@ def parse_linked_service(data: dict, path: str) -> AdfLinkedService:
                 break
 
     auth = tp.get("authenticationType")
+    connection = _connection_parts(tp)
     return AdfLinkedService(
         name=str(data.get("name") or ""),
         path=path,
@@ -364,6 +403,10 @@ def parse_linked_service(data: dict, path: str) -> AdfLinkedService:
         credential_present=_has_secret_key(props),
         authentication_type=safe_scalar(auth) if isinstance(auth, str) else None,
         integration_runtime=_ref_name(props.get("connectVia")),
+        connection=connection,
+        parameters=_parse_param_map(props.get("parameters")),
+        connector_version=(str(tp.get("version")).strip() if isinstance(tp.get("version"), (str, int, float))
+                           and not isinstance(tp.get("version"), bool) and str(tp.get("version")).strip() else None),
     )
 
 
@@ -389,6 +432,23 @@ def classify_integration_runtime(data: dict) -> Optional[str]:
     return None
 
 
+def parse_integration_runtime(data: dict, path: str) -> AdfIntegrationRuntime:
+    """Describe a runtime definition. Keys and secrets are never read (a self-hosted runtime's auth key is not in the JSON)."""
+    props = data.get("properties") if isinstance(data.get("properties"), dict) else {}
+    tp = props.get("typeProperties") if isinstance(props.get("typeProperties"), dict) else {}
+    vnet = props.get("managedVirtualNetwork") or tp.get("managedVirtualNetwork")
+    compute = tp.get("computeProperties") if isinstance(tp.get("computeProperties"), dict) else {}
+    linked = tp.get("linkedInfo") if isinstance(tp.get("linkedInfo"), dict) else {}
+    return AdfIntegrationRuntime(
+        name=str(data.get("name") or ""), path=path,
+        type=props.get("type") if isinstance(props.get("type"), str) else None,
+        kind=classify_integration_runtime(data), is_ssis="ssisProperties" in tp,
+        managed_virtual_network=_ref_name(vnet) if isinstance(vnet, dict) else (vnet if isinstance(vnet, str) else None),
+        compute_location=compute.get("location") if isinstance(compute.get("location"), str) else None,
+        shared_from=safe_scalar(linked.get("resourceId")) if linked else None,
+        description=safe_scalar(props.get("description")))
+
+
 # --- triggers ---------------------------------------------------------------
 
 
@@ -407,11 +467,24 @@ def parse_trigger(data: dict, path: str) -> AdfTrigger:
     rec = tp.get("recurrence")
     if isinstance(rec, dict):
         interval = rec.get("interval")
+        sched = rec.get("schedule") if isinstance(rec.get("schedule"), dict) else {}
+
+        def ints(v):
+            return [x for x in (v if isinstance(v, list) else []) if isinstance(x, int) and not isinstance(x, bool)]
+
         recurrence = AdfRecurrence(
             frequency=rec.get("frequency") if isinstance(rec.get("frequency"), str) else None,
             interval=interval if isinstance(interval, int) else None,
             time_zone=rec.get("timeZone") if isinstance(rec.get("timeZone"), str) else None,
             start_time=safe_scalar(rec.get("startTime")),
+            end_time=safe_scalar(rec.get("endTime")),
+            minutes=ints(sched.get("minutes")),
+            hours=ints(sched.get("hours")),
+            week_days=[d for d in (sched.get("weekDays") or []) if isinstance(d, str)],
+            month_days=ints(sched.get("monthDays")),
+            monthly_occurrences=[
+                {"day": o.get("day"), "occurrence": o.get("occurrence")}
+                for o in (sched.get("monthlyOccurrences") or []) if isinstance(o, dict)],
         )
 
     return AdfTrigger(
@@ -424,6 +497,47 @@ def parse_trigger(data: dict, path: str) -> AdfTrigger:
         pipeline_refs=sorted(set(pipeline_refs)),
         recurrence=recurrence,
     )
+
+
+# --- change data capture ----------------------------------------------------
+
+
+def parse_change_data_capture(data: dict, path: str) -> AdfChangeDataCapture:
+    """Describe an ADF CDC resource: its linked services, tables and mode. Nothing is converted or invented."""
+    props = data.get("properties") if isinstance(data.get("properties"), dict) else {}
+
+    def side(key: str, entity_key: str) -> tuple[list[str], list[str]]:
+        services: list[str] = []
+        tables: list[str] = []
+        for info in props.get(key) or []:
+            if not isinstance(info, dict):
+                continue
+            conn = info.get("connection") if isinstance(info.get("connection"), dict) else {}
+            name = _ref_name(conn.get("linkedService"))
+            if name:
+                services.append(name)
+            for ent in info.get(entity_key) or []:
+                if isinstance(ent, dict) and isinstance(ent.get("name"), str) and ent["name"]:
+                    tables.append(ent["name"])
+        return sorted(set(services)), sorted(set(tables))
+
+    src_ls, src_tables = side("sourceConnectionsInfo", "sourceEntities")
+    tgt_ls, tgt_tables = side("targetConnectionsInfo", "targetEntities")
+    mappings = 0
+    for info in props.get("targetConnectionsInfo") or []:
+        if isinstance(info, dict):
+            mappings += len([m for m in (info.get("dataMapperMappings") or []) if isinstance(m, dict)])
+    policy = props.get("policy") if isinstance(props.get("policy"), dict) else {}
+    rec = policy.get("recurrence") if isinstance(policy.get("recurrence"), dict) else {}
+    interval = rec.get("interval")
+    return AdfChangeDataCapture(
+        name=str(data.get("name") or ""), path=path,
+        status=props.get("status") if isinstance(props.get("status"), str) else None,
+        mode=policy.get("mode") if isinstance(policy.get("mode"), str) else None,
+        frequency=rec.get("frequency") if isinstance(rec.get("frequency"), str) else None,
+        interval=interval if isinstance(interval, int) else None,
+        source_linked_services=src_ls, target_linked_services=tgt_ls,
+        source_tables=src_tables, target_tables=tgt_tables, mapping_count=mappings)
 
 
 # --- factory ----------------------------------------------------------------

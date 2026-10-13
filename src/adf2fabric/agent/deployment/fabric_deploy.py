@@ -278,3 +278,107 @@ def deploy(client: FabricClient, workspace: str, items: list[DeployItem], *, app
             unavailable.add(item.name.lower())
             results.append(DeployResult(item.name, "failed", item_id, str(exc), children=children))
     return results
+
+
+# --- schedules (generated from ADF triggers) ----------------------------------------------------------------
+# GET/POST /v1/workspaces/{ws}/items/{id}/jobs/Pipeline/schedules  ("List Item Schedules" / "Create Item Schedule";
+# verified 2026-10-13). An item may hold at most 20 schedules. Schedules are created DISABLED unless the caller opts in,
+# nothing is ever deleted or modified, and a schedule identical to an existing one (ignoring `enabled`) is skipped so a
+# re-run never duplicates it.
+
+SCHEDULE_JOB_TYPE = "Pipeline"
+MAX_SCHEDULES_PER_ITEM = 20
+
+
+@dataclass
+class ScheduleItem:
+    pipeline: str  # Fabric display name of the pipeline
+    trigger: str  # the ADF trigger it came from
+    body: dict[str, Any]  # {"enabled": bool, "configuration": {...}} as generated
+
+
+@dataclass
+class ScheduleResult:
+    pipeline: str
+    trigger: str
+    action: str  # create | exists | skipped | failed
+    schedule_id: Optional[str] = None
+    detail: str = ""
+
+
+def list_schedules(client: FabricClient, workspace: str, item_id: str) -> list[dict]:
+    url = f"{FABRIC_API}/workspaces/{workspace}/items/{item_id}/jobs/{SCHEDULE_JOB_TYPE}/schedules"
+    found: list[dict] = []
+    token: Optional[str] = None
+    while True:
+        resp = client._call("GET", url + (f"?continuationToken={token}" if token else ""))
+        if resp.status_code != 200:
+            raise DeployError(f"Listing schedules failed (HTTP {resp.status_code}): {_error_text(resp)}")
+        data = resp.json()
+        found += data.get("value", [])
+        token = data.get("continuationToken")
+        if not token:
+            return found
+
+
+def create_schedule(client: FabricClient, workspace: str, item_id: str, body: dict) -> Optional[str]:
+    url = f"{FABRIC_API}/workspaces/{workspace}/items/{item_id}/jobs/{SCHEDULE_JOB_TYPE}/schedules"
+    resp = client._call("POST", url, body)
+    if resp.status_code != 201:
+        raise DeployError(f"Creating the schedule failed (HTTP {resp.status_code}): {_error_text(resp)}")
+    return (resp.json() or {}).get("id") if resp.content else None
+
+
+def deploy_schedules(client: FabricClient, workspace: str, items: list[ScheduleItem], pipeline_ids: dict[str, str],
+                     *, apply: bool, enable: bool = False) -> list[ScheduleResult]:
+    """Plan or create the schedules. ``pipeline_ids`` maps a pipeline's display name to its Fabric item id; a pipeline
+    without an id (not deployed yet, or a dry run of a new pipeline) is planned but not checked against Fabric."""
+    results: list[ScheduleResult] = []
+    cache: dict[str, list[dict]] = {}
+    created: dict[str, int] = {}
+    for it in items:
+        item_id = pipeline_ids.get(it.pipeline)
+        body = {"enabled": bool(it.body.get("enabled")) and enable, "configuration": it.body["configuration"]}
+        if not item_id:
+            results.append(ScheduleResult(it.pipeline, it.trigger, "skipped" if apply else "create",
+                                          detail="the pipeline does not exist in the workspace yet" if apply
+                                          else "dry run: the pipeline is not deployed yet, so it is not checked"))
+            continue
+        try:
+            existing = cache.setdefault(item_id, list_schedules(client, workspace, item_id))
+            same = next((e for e in existing if e.get("configuration") == it.body["configuration"]), None)
+            if same:
+                results.append(ScheduleResult(it.pipeline, it.trigger, "exists", same.get("id"),
+                                              "an identical schedule already exists; left unchanged"))
+                continue
+            if len(existing) + created.get(item_id, 0) >= MAX_SCHEDULES_PER_ITEM:
+                results.append(ScheduleResult(it.pipeline, it.trigger, "failed", detail=(
+                    f"the pipeline already has {MAX_SCHEDULES_PER_ITEM} schedules (the Fabric limit)")))
+                continue
+            state = "enabled" if body["enabled"] else "disabled"
+            if not apply:
+                results.append(ScheduleResult(it.pipeline, it.trigger, "create", detail=f"dry run: would create it {state}"))
+                continue
+            sid = create_schedule(client, workspace, item_id, body)
+            created[item_id] = created.get(item_id, 0) + 1
+            results.append(ScheduleResult(it.pipeline, it.trigger, "create", sid, f"created {state}"))
+        except DeployError as exc:
+            results.append(ScheduleResult(it.pipeline, it.trigger, "failed", detail=str(exc)))
+    return results
+
+
+def list_pipelines_by_name(client: FabricClient, workspace: str) -> dict[str, str]:
+    """Display name (as Fabric stores it) -> item id, for every data pipeline in the workspace."""
+    found: dict[str, str] = {}
+    url = f"{FABRIC_API}/workspaces/{workspace}/dataPipelines"
+    token: Optional[str] = None
+    while True:
+        resp = client._call("GET", url + (f"?continuationToken={token}" if token else ""))
+        if resp.status_code != 200:
+            raise DeployError(f"Listing data pipelines failed (HTTP {resp.status_code}): {_error_text(resp)}")
+        data = resp.json()
+        for it in data.get("value", []):
+            found[it["displayName"]] = it["id"]
+        token = data.get("continuationToken")
+        if not token:
+            return found

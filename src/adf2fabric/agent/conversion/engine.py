@@ -32,6 +32,8 @@ from adf2fabric.agent.conversion.context import (
 )
 from adf2fabric.agent.conversion.expr_convert import global_param_name
 from adf2fabric.agent.conversion.handlers._common import downgrade_if_not_direct, has_masked_secret
+from adf2fabric.agent.conversion import compatibility as compat
+from adf2fabric.agent.conversion.triggers import build_schedules
 from adf2fabric.agent.conversion.registry import ConversionRule, rule_for
 from adf2fabric.agent.conversion.pipeline_semantics import outcome_notes, verify_graph
 from adf2fabric.agent.conversion.validation import Validation, validate_content
@@ -183,6 +185,7 @@ class ConversionEngine:
             block(cx, "no_components", "the conversion produced no components.")
         downgrade_if_not_direct(cx)
         self._post_checks(cx)
+        self._compatibility(cx)
 
         nested = {n for c in cx.components for n in c.children}
         b = _Built(act=a, cx=cx, rule=rule, slot=slot)
@@ -190,6 +193,15 @@ class ConversionEngine:
         b.entry = cx.entry or b.top[:1]
         b.exit = cx.exit or b.top[:1]
         return b
+
+    def _compatibility(self, cx: ActivityBuilder) -> None:
+        """Retired / deprecated / preview activity types, from the catalog (entries the handlers block are skipped)."""
+        for e in compat.for_activity(cx.act.type):
+            if e.emit:
+                cx.issue(compat.issue_code(e), compat.issue_message(e), impact=e.impact,
+                         action=e.alternatives[0] if e.alternatives else "")
+                for alt in e.alternatives:
+                    cx.alternative(alt)
 
     def _unregistered(self, cx: ActivityBuilder) -> None:
         from adf2fabric.agent.conversion.handlers._common import block
@@ -468,7 +480,15 @@ def _trigger_note(t: AdfTrigger) -> TriggerNote:
         action = "Create a Fabric event trigger (Activator) for the same storage event."
     else:
         action = "Create the equivalent Fabric trigger or schedule manually."
+    sched = build_schedules(t)
+    if sched.status in ("generated", "generated_with_differences"):
+        action += (" A Fabric schedule definition was generated (deploy with --schedules; it is created disabled)."
+                   + (" It differs from the source in documented ways - read the schedule notes."
+                      if sched.status == "generated_with_differences" else ""))
+    elif sched.status == "manual":
+        action = action + " (A schedule could not be generated exactly: " + " ".join(sched.notes) + ")"
     return TriggerNote(
         name=t.name, trigger_type=t.type, runtime_state=t.runtime_state, pipelines=sorted(t.pipeline_refs),
         summary=f"{t.type or 'Trigger'} {when}".strip() + (f"; state {t.runtime_state}" if t.runtime_state else ""),
-        action=action + " Trigger-to-pipeline parameter mappings are not part of the semantic record; re-enter them.")
+        action=action + " Trigger-to-pipeline parameter mappings are not part of the semantic record; re-enter them.",
+        schedule_status=sched.status, schedules=sched.schedules, schedule_notes=sched.notes)

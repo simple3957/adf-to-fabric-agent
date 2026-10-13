@@ -747,6 +747,12 @@ def convert(project_name: str, pipelines: tuple[str, ...], resolutions_path: str
                     fg="yellow")
     if c.reconstruction_open:
         click.secho(f"  {len(c.reconstruction_open)} reconstruction blocker(s) remain unresolved.", fg="yellow")
+    if c.compatibility:
+        by_status: dict[str, int] = {}
+        for f in c.compatibility:
+            by_status[f.status] = by_status.get(f.status, 0) + 1
+        click.secho("  compatibility: " + ", ".join(f"{n} {k}" for k, n in sorted(by_status.items()))
+                    + " component(s) retired/deprecated/preview/unavailable; see the report.", fg="yellow")
     unbound = [q for q in [*c.connections, *c.workspace_items] if not q.bound]
     if unbound:
         click.secho(f"  {len(unbound)} binding(s) still to supply before anything can run; see the report.", fg="yellow")
@@ -799,11 +805,17 @@ def reconstruct(project_name: str) -> None:
               help="Also deploy the pipelines a selected pipeline invokes (transitively), children first.")
 @click.option("--allow-unbound", is_flag=True,
               help="Push even with <connection:...> placeholders left (bind them in Fabric afterwards).")
+@click.option("--schedules", "schedules", is_flag=True,
+              help="Also create the Fabric schedules generated from ADF triggers (created DISABLED; never duplicated).")
+@click.option("--enable-schedules", "enable_schedules", is_flag=True,
+              help="With --schedules: create schedules enabled when the ADF trigger was started. A start time in the "
+                   "past makes Fabric run the pipeline immediately.")
 @azure_auth_options()
 @click.option("--apply", "apply_", is_flag=True,
               help="Actually create/overwrite pipelines in Fabric. Without it this is a dry run (read-only).")
 def deploy_cmd(project_name: str, workspace_id: str, pipelines: tuple[str, ...], with_children: bool,
-               allow_unbound: bool, apply_: bool, auth: str, **auth_env: str | None) -> None:
+               allow_unbound: bool, schedules: bool, enable_schedules: bool, apply_: bool, auth: str,
+               **auth_env: str | None) -> None:
     """Deploy converted pipelines to a Fabric workspace (dry run unless --apply)."""
     import json as _json
 
@@ -866,7 +878,31 @@ def deploy_cmd(project_name: str, workspace_id: str, pipelines: tuple[str, ...],
         click.secho(f"  - {r.name}: {r.action}{f' [{r.item_id}]' if r.item_id else ''} - {r.detail}", fg=colours[r.action])
         if r.children:
             click.echo(f"      invokes: {', '.join(r.children)} (deployed first; their Fabric ids are filled in)")
-    if any(r.action in ("refused", "failed") for r in results):
+    failed_schedules = False
+    if schedules:
+        from adf2fabric.agent.deployment.fabric_deploy import ScheduleItem, deploy_schedules, list_pipelines_by_name
+
+        deployed = {r.name for r in results if r.action in ("create", "update")}
+        sched_items = [
+            ScheduleItem(p.fabric_pipeline_name, t.name, body)
+            for p in conversion.pipelines if p.fabric_pipeline_name in deployed
+            for t in p.triggers if t.schedules for body in t.schedules]
+        click.echo("SCHEDULES (generated from ADF triggers; created disabled unless --enable-schedules)")
+        if not sched_items:
+            click.echo("  none: no deployed pipeline has a generated schedule.")
+        else:
+            try:
+                ids = list_pipelines_by_name(client, workspace_id)
+                sres = deploy_schedules(client, workspace_id, sched_items, ids, apply=apply_, enable=enable_schedules)
+            except DeployError as exc:
+                click.secho(f"  schedules failed: {exc}", fg="red", err=True)
+                sys.exit(1)
+            scolours = {"create": "green", "exists": "yellow", "skipped": "yellow", "failed": "red"}
+            for r in sres:
+                click.secho(f"  - {r.pipeline} / {r.trigger}: {r.action}{f' [{r.schedule_id}]' if r.schedule_id else ''}"
+                            f" - {r.detail}", fg=scolours[r.action])
+            failed_schedules = any(r.action == "failed" for r in sres)
+    if failed_schedules or any(r.action in ("refused", "failed") for r in results):
         sys.exit(2)
 
 

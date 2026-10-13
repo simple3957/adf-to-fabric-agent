@@ -71,7 +71,7 @@ Microsoft's documented upgrader resolution type; `ItemToId` (`"pipeline:Name"`, 
 The schema table (`fabric_schema.py`) is encoded from Microsoft's documentation (DataPipeline definition,
 expression language, activity overview, upgrade guide). "Valid" means consistent with that table, **not**
 accepted by a Fabric service. Parts the documentation does not list are declared in `fabric_schema.INFERRED`
-and printed in every report. Triggers are not generated; the report says how to recreate each one.
+and printed in every report. Triggers become Fabric schedule definitions where they map exactly (see below); event triggers are recreated by hand.
 
 ## Integration runtimes and gateways
 
@@ -97,6 +97,37 @@ Activity conversion is only half of accuracy; the other half is how activities i
 * **Graph verification**: after assembly, the generated JSON is compared with the source `dependsOn` graph. Errors
   (`graph_activity_missing`, `graph_edge_missing`, `graph_condition_changed`, `graph_edge_added`) make the pipeline
   structurally invalid, so a dropped or re-routed dependency can never be reported as "converted".
+
+## Triggers become schedules (where they map exactly)
+
+Each ADF trigger is turned into Fabric **item schedule** definitions (`POST /v1/workspaces/{ws}/items/{id}/jobs/Pipeline/
+schedules`; verified against Microsoft's "Create Item Schedule" page on 2026-10-13) and written to
+`conversion/schedules/<trigger>.json`:
+
+| ADF recurrence | Fabric schedule |
+|---|---|
+| Minute n / Hour n (no schedule block) | `Cron`, interval n / n*60 minutes |
+| Hour 1 with `minutes` | `Daily`, times = every hour at those minutes (at most 100) |
+| Day 1 (start time, or `hours`/`minutes`) | `Daily`, `times` |
+| Day n > 1, no hours/minutes | `Cron`, interval n*1440 |
+| Week 1, `weekDays` | `Weekly` (`weekdays`, `times`) |
+| Month n, `monthDays` / `monthlyOccurrences` | one `Monthly` schedule per day (`DayOfMonth` or `OrdinalWeekday` First..Fifth) |
+| Tumbling window | `Cron` interval, **with a stated difference** (no window start/end, backfill, dependencies) |
+| Event triggers | not generated (Activator rules have no schedule API) |
+
+Anything else is `manual` with the reason, never approximated: Weekly every N weeks, Daily times on an interval above 1,
+"last day of the month" / negative `monthDays`, a `-1` (last) occurrence, more than 100 times, more than 20 schedules per
+item. `deploy --schedules` creates them **disabled** (`--enable-schedules` enables only schedules whose ADF trigger was
+started), skips one that already exists unchanged, and never deletes anything. Fabric runs a schedule immediately when its
+start time is in the past; the notes say so. Trigger parameters are not carried; re-enter them.
+
+## ADF change data capture
+
+An ADF CDC resource (`Microsoft.DataFactory/factories/adfcdcs`) is retrieved by Azure intake (best effort: a factory without
+the feature is fine; a real error is reported), described by semantic discovery and listed in the report's compatibility
+section with its source, target and tables. Fabric has no CDC artifact: Microsoft's comparison says incremental data
+movement moves to **Copy jobs**, which the converter does not generate. Azure Synapse Link is replaced by Fabric Mirroring
+per Microsoft, but it is not part of any ADF export, so it cannot be detected (see the playbook).
 
 ## Deploying: child pipelines first
 

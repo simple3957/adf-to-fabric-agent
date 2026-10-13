@@ -15,8 +15,10 @@ files live under ``projects/<id>/conversion/``.
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime, timezone
 from pathlib import Path
+from adf2fabric.agent.conversion import compatibility as compat
 from adf2fabric.agent.conversion.context import ProjectContext, Resolutions
 from adf2fabric.agent.conversion.engine import ConversionEngine
 from adf2fabric.agent.conversion.fabric_schema import INFERRED
@@ -141,6 +143,22 @@ class ConversionAgent:
             record.artifact_path = rel
             converted.append(record)
 
+        written: dict[str, str] = {}  # trigger name -> relative file (one file per trigger, shared by its pipelines)
+        for record in converted:
+            for t in record.triggers:
+                if not t.schedules:
+                    continue
+                if t.name not in written:
+                    safe = re.sub(r"[^A-Za-z0-9._-]+", "_", t.name).strip("._") or "trigger"
+                    rel = f"schedules/{safe}.json"
+                    body = {"trigger": t.name, "triggerType": t.trigger_type, "sourceState": t.runtime_state,
+                            "status": t.schedule_status, "pipelines": t.pipelines, "jobType": "Pipeline",
+                            "schedules": t.schedules, "notes": t.schedule_notes,
+                            "api": "POST /v1/workspaces/{workspaceId}/items/{itemId}/jobs/Pipeline/schedules"}
+                    self.store.write_conversion_file(pid, rel, json.dumps(body, indent=2, ensure_ascii=False) + "\n")
+                    written[t.name] = rel
+                t.schedule_file = written[t.name]
+
         all_fine = all(r.status is ConversionStatus.converted for r in converted)
         outcome = ConversionOutcome.converted if all_fine else ConversionOutcome.partial
         conv = self._assemble(pid, d, converted, ctx, outcome, "")
@@ -201,7 +219,8 @@ class ConversionAgent:
             pipelines=pipelines,
             connections=[q for q in ordered if q.kind in ("connection", "gateway", "credential")],
             workspace_items=[q for q in ordered if q.kind not in ("connection", "gateway", "credential")],
-            schema_notes=notes, detail=detail, provenance=dict(_PROVENANCE))
+            schema_notes=notes, detail=detail, provenance=dict(_PROVENANCE),
+            compatibility=compat.scan(d, {p.source_pipeline for p in pipelines}))
         if self.store.has_conversion(pid):
             try:
                 existing = self.store.load_conversion(pid)

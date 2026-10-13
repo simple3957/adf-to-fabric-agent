@@ -39,6 +39,8 @@ _ADF_DIR_KIND = {
     "factory": AdfArtifactKind.factory,
     "managedvirtualnetwork": AdfArtifactKind.managed_virtual_network,
     "credential": AdfArtifactKind.credential,
+    # Folder the Azure intake writes CDC resources to (the kind's own name).
+    "changedatacapture": AdfArtifactKind.change_data_capture,
 }
 
 # ARM ``.../factories/<subtype>`` -> kind. Stronger evidence when the top-level
@@ -52,6 +54,8 @@ _ADF_TYPE_SUBTYPE_KIND = {
     "dataflows": AdfArtifactKind.dataflow,
     "managedvirtualnetworks": AdfArtifactKind.managed_virtual_network,
     "credentials": AdfArtifactKind.credential,
+    # Microsoft.DataFactory/factories/adfcdcs (ARM template reference, verified 2026-10-13).
+    "adfcdcs": AdfArtifactKind.change_data_capture,
 }
 
 # Exact file names (lowercased) that deterministically identify ARM artifacts.

@@ -62,6 +62,7 @@ class AdfArtifactKind(str, Enum):
     factory = "factory"
     managed_virtual_network = "managedVirtualNetwork"
     credential = "credential"
+    change_data_capture = "changeDataCapture"
     arm_template = "armTemplate"
     arm_template_parameters = "armTemplateParameters"
     unknown = "unknown"
@@ -491,6 +492,13 @@ class AdfRecurrence(_Strict):
     interval: Optional[int] = None
     time_zone: Optional[str] = None
     start_time: Optional[str] = None
+    end_time: Optional[str] = None
+    # The trigger's ``recurrence.schedule`` block, flattened (empty = not stated).
+    minutes: list[int] = Field(default_factory=list)
+    hours: list[int] = Field(default_factory=list)
+    week_days: list[str] = Field(default_factory=list)
+    month_days: list[int] = Field(default_factory=list)  # negative values count from the end of the month
+    monthly_occurrences: list[dict[str, Any]] = Field(default_factory=list)  # [{day, occurrence}]
 
 
 class ExternalReference(_Strict):
@@ -768,6 +776,17 @@ class AdfDataset(_Strict):
     annotations: list[str] = Field(default_factory=list)
     parse_status: DiscoveryStatus = DiscoveryStatus.discovered
     note: str = ""
+    # Arguments this dataset passes to its linked service's parameters (linkedServiceName.parameters), as authored.
+    linked_service_arguments: dict[str, Any] = Field(default_factory=dict)
+
+
+class AdfLinkedConnection(_Strict):
+    """What a linked service states outright (``server``, ``database``, ``userName`` properties). Never a secret."""
+
+    server: Optional[str] = None
+    database: Optional[str] = None
+    user_name: Optional[str] = None  # a login NAME, never a password
+    parameterized_fields: list[str] = Field(default_factory=list)  # fields that use linkedService().X
 
 
 class AdfLinkedService(_Strict):
@@ -786,6 +805,13 @@ class AdfLinkedService(_Strict):
     # azure | self_hosted | managed_vnet, from the runtime's own definition; None = not classified (runtime
     # artifact missing or of a type we do not classify), which the converter treats cautiously.
     integration_runtime_kind: Optional[str] = None
+    # typeProperties.version as written ('1.0', '2.0', ...); None when the linked service does not state one.
+    # Several ADF connectors have a removed V1 and a current V2 under the same type name.
+    connector_version: Optional[str] = None
+    # Explicitly authored, non-secret connection properties. Connection strings are NEVER read or parsed, so a linked
+    # service that uses one has an empty ``connection`` (the UI asks the user for the values instead of guessing them).
+    connection: "AdfLinkedConnection" = Field(default_factory=lambda: AdfLinkedConnection())
+    parameters: list["AdfParameter"] = Field(default_factory=list)  # the linked service's own parameters
 
 
 class AdfTrigger(_Strict):
@@ -795,6 +821,43 @@ class AdfTrigger(_Strict):
     runtime_state: Optional[str] = None
     pipeline_refs: list[str] = Field(default_factory=list)
     recurrence: Optional[AdfRecurrence] = None
+    parse_status: DiscoveryStatus = DiscoveryStatus.discovered
+    note: str = ""
+
+
+class AdfIntegrationRuntime(_Strict):
+    """An integration runtime definition: what kind it is and the non-secret facts that decide how Fabric can reach data."""
+
+    name: str
+    path: str
+    type: Optional[str] = None  # Managed | SelfHosted
+    kind: Optional[str] = None  # azure | self_hosted | managed_vnet (None: unclassified, e.g. Azure-SSIS)
+    is_ssis: bool = False
+    managed_virtual_network: Optional[str] = None
+    compute_location: Optional[str] = None
+    shared_from: Optional[str] = None  # a self-hosted runtime shared from another factory (resource id, no key)
+    description: Optional[str] = None
+    parse_status: DiscoveryStatus = DiscoveryStatus.discovered
+    note: str = ""
+
+
+class AdfChangeDataCapture(_Strict):
+    """An ADF change data capture resource (``Microsoft.DataFactory/factories/adfcdcs``), described, not converted.
+
+    Fabric has no CDC artifact: Microsoft's comparison says incremental data movement moves to Copy jobs.
+    """
+
+    name: str
+    path: str
+    status: Optional[str] = None  # running / stopped, as stored
+    mode: Optional[str] = None  # batch | continuous
+    frequency: Optional[str] = None  # batch mode only
+    interval: Optional[int] = None
+    source_linked_services: list[str] = Field(default_factory=list)
+    target_linked_services: list[str] = Field(default_factory=list)
+    source_tables: list[str] = Field(default_factory=list)
+    target_tables: list[str] = Field(default_factory=list)
+    mapping_count: int = 0
     parse_status: DiscoveryStatus = DiscoveryStatus.discovered
     note: str = ""
 
@@ -831,6 +894,8 @@ class AdfSemanticDiscovery(_Strict):
     linked_services: list[AdfLinkedService] = Field(default_factory=list)  # sorted by name
     triggers: list[AdfTrigger] = Field(default_factory=list)  # sorted by name
     factory: list[AdfFactoryConfig] = Field(default_factory=list)  # sorted by name
+    change_data_captures: list[AdfChangeDataCapture] = Field(default_factory=list)  # sorted by name
+    integration_runtimes: list[AdfIntegrationRuntime] = Field(default_factory=list)  # sorted by name
     external_references: list[ExternalReference] = Field(default_factory=list)  # sorted, deduped
     relationships: list[AdfRelationship] = Field(default_factory=list)  # sorted, deduped
     unresolved_references: list[AdfArtifactRef] = Field(default_factory=list)  # sorted

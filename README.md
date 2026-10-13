@@ -4,9 +4,79 @@ An agent that migrates an **Azure Data Factory (ADF)** estate into **Microsoft F
 Data Factory**.
 
 The stages that exist today turn an Azure Data Factory estate into Fabric pipeline definitions
-(intake -> discovery -> parse -> convert -> deploy). The broader lifecycle below is the product
+(intake -> discovery -> parse -> convert -> deploy), plus a connection/authentication layer and a FastAPI backend
+for a UI (Streamlit, built separately). The broader lifecycle below is the product
 direction; [Implementation Status](#implementation-status) states exactly what is built.
 Everything is deterministic: **no LLM or generative model is used anywhere.**
+
+---
+
+## What this project is
+
+Moving from Azure Data Factory (ADF) to Fabric Data Factory is mostly mechanical, but the mechanical parts hide
+decisions: which activities have a Fabric equivalent, which are deprecated or changed, how each linked service
+becomes a Fabric *connection* (and with which credentials), and what still needs a person. This project does the
+mechanical work deterministically and **reports honestly what it could not do**.
+
+It is a Python package (`adf2fabric`) with three ways to drive it:
+
+* a **CLI** (`adf2fabric ...`) for each stage;
+* a **FastAPI backend** (`python -m adf2fabric.api`) that a UI calls; a Streamlit front end is built separately;
+* a **Demo mode** in that backend, running the same routes on a bundled sample with no network.
+
+### End-to-end flow
+
+```text
+ SOURCE                     ANALYSE                      CONVERT                    FABRIC
+ ADF via Azure CLI   ─►  Repository discovery   ─►   Compatibility catalog   ─►  Connections (one per
+ Git (HTTPS)               ADF semantic parse         Registry of activity          linked service)
+ ZIP export                Integration runtimes       handlers + validation      ─► Deploy (dry run first,
+        │                  Reconstruction of          Triggers -> schedules         children before parents)
+        ▼                  incomplete pipelines       CDC / Synapse Link
+ projects/<id>/source/     projects/<id>/discovery    projects/<id>/conversion
+```
+
+1. **Intake** obtains the ADF JSON (live factory, Git repository, or an uploaded ZIP) into a canonical local copy
+   `projects/<id>/source/`, masks secret values and records where it came from (commit, time, integrity findings).
+2. **Discovery** inventories the files and parses every pipeline, activity (nested ones included), dataset,
+   linked service, trigger and integration runtime into semantic records: what each does, its inputs and outputs,
+   expressions and dependencies.
+3. **Reconstruction** (optional) proposes evidence-backed completions for incomplete pipelines, never touching the original.
+4. **Conversion** maps each activity to Fabric components through a registry of handlers, checks the result against a
+   schema table taken from Microsoft's documentation, compares the graph to the source dependencies, and consults a
+   **compatibility catalog** of deprecated or changed ADF components. Schedule triggers become Fabric schedules; CDC and
+   Synapse Link resources are detected and reported. The report separates *converted* from *runnable*.
+5. **Connections** gives each linked service a card: the Fabric connector it maps to, the authentication methods
+   available (SQL login, service principal, workspace identity, Key Vault variants, existing connection, ...), the
+   integration runtime it uses and the Fabric path that implies (cloud connection, VNet gateway, on-premises gateway or
+   manual), matching existing Fabric connections, and a real test. Applying the choices creates or reuses Fabric
+   connections and writes `conversion/resolutions.json`, which the next conversion consumes to replace placeholders.
+6. **Deployment** pushes pipelines to a Fabric workspace through the REST API: dry run unless `--apply`, children before
+   parents, never deletes, refuses unresolved placeholders.
+
+### Design principles
+
+* **Deterministic, no LLM.** Same input, same output; every decision traces to a rule, a catalog entry or evidence.
+* **Evidence, not assumption.** A connection is "tested" only when a credential was actually used; Azure sign-in is not
+  proof of Fabric authorization; a self-hosted integration runtime is never assumed reusable in Fabric.
+* **Honest reporting.** Anything not converted, not verified or needing a person is listed, not hidden.
+* **Secrets stay out.** Sign-in uses the Azure and Fabric CLIs on the backend machine. Secrets are never put in project
+  files, reports, generated code, logs or API responses; a secret typed into the UI lives in an in-memory vault that
+  expires. Connection strings are never parsed and values are never invented.
+* **Safe by default.** Deploy is a dry run, nothing is deleted, ZIP contents are never executed, the API binds to loopback.
+
+### Where things live
+
+| Path | Contents |
+|---|---|
+| `src/adf2fabric/agent/` | the stages: intake, consultation, discovery, reconstruction, conversion, deployment |
+| `src/adf2fabric/connections/` | connector catalog, cards, runtime analysis, testing, providers, redaction, secret vault |
+| `src/adf2fabric/api/` | FastAPI backend, jobs, stages, Demo mode |
+| `projects/<id>/` | everything produced for one engagement (source, discovery, conversion, connections) |
+| `skills/`, `docs/` | operating instructions per agent and per-stage references |
+| `tests/` | offline tests (local git repos, fixtures, fake connectors and REST) |
+
+Start with [Setup](#setup) and [Usage](#usage); the status table below says exactly what is built and what is not.
 
 ---
 
@@ -99,13 +169,15 @@ Built stages (each reads the previous stage's saved output under `projects/<id>/
 
 | Stage | Command | What it does | Docs |
 |---|---|---|---|
-| Intake | `intake` | Gets the ADF source from a **live factory** (Azure Resource Manager, reusing `az login`) or a **GitHub repo**; masks secret values; records the commit and a manifest; checks for invalid JSON, duplicates and missing references. | [`docs/intake.md`](docs/intake.md) |
+| Intake | `intake` (CLI); API for Git and ZIP | Gets the ADF source from a **live factory** (Azure Resource Manager, reusing `az login`), a **GitHub repo**, any **HTTPS Git repository** or an uploaded **ZIP export** (safe extraction, JSON only, nothing executed); masks secret values; records the commit and a manifest; checks for invalid JSON, duplicates and missing references. | [`docs/intake.md`](docs/intake.md) |
 | Consultation | `consultation` | Readiness gate: questionnaire + connectivity checks (Repository, ADF, SQL Server, ADLS Gen2, Fabric). | [`docs/consultation.md`](docs/consultation.md) |
 | Repository discovery | `discovery` | Inventories the source files and recognises ADF artifacts. | |
-| ADF semantic discovery | `discovery-adf-semantic` | The pipeline parser (`parser_pipelines.py`): every activity, nested ones included, becomes a semantic record (operation, inputs/outputs, expressions, dependencies, summary). Also classifies integration runtimes. | [`docs/pipeline-parser.md`](docs/pipeline-parser.md) |
+| ADF semantic discovery | `discovery-adf-semantic` | The pipeline parser (`parser_pipelines.py`): every activity, nested ones included, becomes a semantic record (operation, inputs/outputs, expressions, dependencies, summary). Also classifies integration runtimes, and records linked-service connection properties (explicit server/database/user only; connection strings are never parsed), parameterized linked services and dataset arguments. | [`docs/pipeline-parser.md`](docs/pipeline-parser.md) |
 | Other discovery | `discovery-adf`, `discovery-adls`, `discovery-adls-paths`, `discovery-sql`, `discovery-sql-structural` | Read-only inventories of a live factory, ADLS Gen2 and SQL Server. | |
 | Reconstruction | `reconstruct` | Finds incomplete pipelines and proposes evidence-backed completions with explicit confidence. The original is never modified. | [`docs/reconstruction.md`](docs/reconstruction.md) |
-| Conversion | `convert` | Registry-driven conversion of every activity into Fabric components, with validation, a graph check against the source dependencies, and a report that separates *converted* from *runnable*. | [`docs/conversion.md`](docs/conversion.md) |
+| Conversion | `convert` | Registry-driven conversion of every activity into Fabric components, with validation, a graph check against the source dependencies, and a report that separates *converted* from *runnable*. | [`docs/conversion.md`](docs/conversion.md), [`docs/conversion-failure-modes.md`](docs/conversion-failure-modes.md), [`skills/conversion/`](skills/conversion/SKILL.md) |
+| Connections | API (`/projects/{id}/connections`) | One credential card per linked service: SQL, ADLS Gen2, Blob, REST and Databricks connectors; auth methods incl. Key Vault variants, service principal, workspace identity and existing-connection reuse; integration-runtime analysis (Azure / managed VNet / self-hosted / SSIS -> Fabric path); real connection tests; creates or reuses Fabric connections and merges `conversion/resolutions.json`; writes `connections-report.{md,json}`. | [`docs/connections.md`](docs/connections.md), [`skills/connections/`](skills/connections/SKILL.md) |
+| API | `python -m adf2fabric.api` | FastAPI backend for the UI: sign-in status, source/destination selection and tests, projects, connections, migration stages as jobs, Demo mode. | [`docs/connections.md`](docs/connections.md) |
 | Deployment | `deploy` | Pushes converted pipelines to a Fabric workspace through the REST API. **Dry run unless `--apply`**; refuses pipelines with unbound placeholders; never deletes. | [`docs/conversion.md`](docs/conversion.md) |
 
 ### Important limits
@@ -118,8 +190,15 @@ Built stages (each reads the previous stage's saved output under `projects/<id>/
   are supplied through a resolutions file. Credentials are never copied.
 - A Fabric gateway is required only for self-hosted or managed-virtual-network integration runtimes; a plain
   Azure runtime needs none.
-- Triggers are not generated (the report says how to recreate each one). Activities with no safe Fabric
+- Schedule triggers become Fabric schedule definitions where they map exactly (`deploy --schedules`); event triggers are recreated by hand. Activities with no safe Fabric
   equivalent (e.g. Mapping Data Flow, SSIS) are reported as alternatives or blockers.
+- Conversion also carries a compatibility catalog (deprecated or changed ADF components and their Fabric
+  equivalents, with a conversion skill) and CDC / Synapse Link detection; see
+  [`docs/conversion-failure-modes.md`](docs/conversion-failure-modes.md).
+- Connection limits: OAuth and gateway-backed connections cannot be created through Fabric's API (create them in
+  Fabric, then reuse them); a self-hosted integration runtime is never assumed reusable (it maps to an
+  on-premises gateway you set up); reachability tests run from this machine only; the Fabric CLI's signed-in
+  output is not yet verified live; deploy uses the Azure CLI sign-in. See [`docs/connections.md`](docs/connections.md).
 - The wider lifecycle in the product vision (Assessment, Planning, Architecture) is not built.
 
 ---
@@ -131,6 +210,7 @@ python -m venv .venv
 . .venv/Scripts/activate       # Windows: .venv\Scripts\activate
 pip install -e ".[dev]"                 # base + tests
 pip install -e ".[dev,connectivity]"    # + real Consultation connectivity validation
+pip install -e ".[dev,connectivity,api]" # + the FastAPI backend (UI support)
 ```
 
 Requires Python ≥ 3.11 and a `git` executable on `PATH`. The `connectivity` extra
@@ -257,11 +337,28 @@ Child pipelines are built first: `deploy` orders pipelines so every invoked chil
 fills the child's Fabric item id and the workspace id into the parent (`--with-children` adds a parent's children
 automatically). See [`docs/conversion.md`](docs/conversion.md).
 
+`deploy --schedules` also creates the Fabric schedules generated from ADF triggers (disabled unless `--enable-schedules`).
+
 `deploy` signs in through your `az login` session (the account needs a Contributor role on the workspace)
 and stops on any pipeline that still holds `<connection:...>` placeholders unless `--allow-unbound`.
 
 Configuration defaults live in [`config/config.yaml`](config/config.yaml); CLI flags
 override them.
+
+---
+
+## API and Demo mode
+
+```bash
+python -m adf2fabric.api            # http://127.0.0.1:8765 (loopback; set ADF2FABRIC_API_TOKEN to require a bearer token)
+```
+
+The UI talks to this backend. Sign-in is `az login` / `fab auth login` on the machine running it, so no password or CLI
+token ever reaches the browser; secrets typed into a card are held in memory only, expire, and are never returned,
+logged or written to a project or report. Send `X-Session-Id` to scope selections and secrets; `POST /mode {"mode":"demo"}`
+switches that session to Demo mode (canned providers, real parsing on a bundled sample, no network).
+`ADF2FABRIC_ALLOWED_ORIGINS` sets the CORS origins (default the local Streamlit ports). Route list and the
+implemented / not-implemented matrix: [`docs/connections.md`](docs/connections.md).
 
 ---
 
@@ -277,6 +374,8 @@ src/adf2fabric/
 ├── agent/reconstruction/        # incomplete-pipeline detection + proposals
 ├── agent/conversion/            # registry, handlers, expressions, validation, pipeline_semantics.py
 ├── agent/deployment/            # Fabric REST deployment (dry run by default)
+├── connections/                 # connector catalog, cards, runtime analysis, testing, providers (az, fab, git, zip), redaction, secret vault
+├── api/                         # FastAPI backend: routes, jobs, stages, Demo mode
 ├── connectivity/                # connector registry + real connectors
 ├── repository/                  # providers, git wrappers, auth
 └── project/                     # persisted models + on-disk store
@@ -286,8 +385,14 @@ docs/                        # per-stage references
 tests/                       # offline tests (local git repos, fixtures, fake connectors/REST)
 ```
 
+## Connections and the API
+
+A FastAPI backend (`pip install -e ".[api]"`, then `python -m adf2fabric.api`, loopback `127.0.0.1:8765`) serves the UI:
+Azure CLI / Git / ZIP sources, Azure CLI / Fabric CLI destinations, per-linked-service credential cards and a Demo mode.
+See [docs/connections.md](docs/connections.md) for what is implemented, tested and deliberately not supported.
+
 ## Providers
 
-Only **GitHub** is implemented. The provider abstraction leaves room for Azure DevOps,
+The CLI `intake --repo` supports **GitHub**; the API additionally accepts any HTTPS Git repository and ZIP exports. The provider abstraction leaves room for Azure DevOps,
 GitLab, and Bitbucket in the future; requesting them today raises a clear
 "not implemented" error.

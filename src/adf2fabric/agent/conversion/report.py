@@ -95,12 +95,32 @@ def render_report(c: ProjectConversion) -> str:
             for a in attention:
                 out += _activity_block(a)
         if p.triggers:
-            out += ["", "### Triggers (not generated - recreate in Fabric)", ""]
+            out += ["", "### Triggers (schedules are generated where they map exactly; events and the rest are recreated by hand)", ""]
             for t in p.triggers:
                 out.append(f"- `{t.name}`: {t.summary}. {t.action}")
+                if t.schedule_status:
+                    where = f" - `{t.schedule_file}`" if t.schedule_file else ""
+                    out.append(f"  - Fabric schedule: **{t.schedule_status}** ({len(t.schedules)} schedule(s)){where}")
+                    out += [f"  - {n}" for n in t.schedule_notes]
         if p.prerequisites:
             out += ["", "### Prerequisites for this pipeline", ""] + _prereq_lines(p.prerequisites)
 
+    if c.compatibility:
+        out += ["", "## Compatibility findings (retired, deprecated, preview and unavailable components)", "",
+                "Each finding cites Microsoft's page and the date the catalog was verified. A component that is retired "
+                "in ADF cannot be fixed by conversion: upgrade or replace it in the source first.", "",
+                "| Component | Type | Status | Date | Used in | Effect |", "| --- | --- | --- | --- | --- | --- |"]
+        for f in c.compatibility:
+            used = ", ".join(f"`{n}`" for n in f.pipelines[:3]) + (f" +{len(f.pipelines) - 3}" if len(f.pipelines) > 3 else "")
+            out.append(f"| `{f.subject}` | {f.adf_type} | {f.status} | {f.date or '-'} | {used or '-'} | {f.impact.value} |")
+        seen: set[str] = set()
+        for f in c.compatibility:
+            if f.id in seen:
+                continue
+            seen.add(f.id)
+            out += ["", f"**{f.id}** - {f.summary}"]
+            out += [f"- Way forward: {alt}" for alt in f.alternatives]
+            out.append(f"- Source: <{f.source_url}>")
     out += ["", "## Prerequisites (all pipelines)", ""]
     out += _prereq_lines([*c.connections, *c.workspace_items]) or ["None."]
     out += ["", "## Schema provenance", "",

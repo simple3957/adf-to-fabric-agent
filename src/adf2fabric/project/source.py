@@ -29,6 +29,8 @@ class _Strict(BaseModel):
 class SourceType(str, Enum):
     github = "github"
     azure_adf = "azure_adf"
+    git = "git"  # any HTTPS Git repository (GitHub, Azure DevOps, GitLab, Bitbucket, ...)
+    zip_export = "zip_export"  # an uploaded workspace / repository export
 
 
 class FindingSeverity(str, Enum):

@@ -1,0 +1,90 @@
+"""Background jobs for long-running stages (imports, discovery, conversion, deployment).
+
+Agents have no progress hooks, so progress is stage-level: a job is a function that may call ``log`` between steps. At most one
+job per project runs at a time (a second request gets a conflict, not a race), results are secret-free summaries, and every
+event passes through the redactor. Jobs live in memory; a restart forgets them (they are not a source of truth: the project
+files are).
+"""
+
+from __future__ import annotations
+
+import threading
+import time
+import uuid
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, field
+from typing import Any, Callable, Optional
+
+from adf2fabric.connections.redaction import redact, redact_mapping
+
+QUEUED, RUNNING, SUCCEEDED, FAILED = "queued", "running", "succeeded", "failed"
+
+
+class JobConflict(Exception):
+    """Another job is already running for this project."""
+
+
+@dataclass
+class Job:
+    id: str
+    kind: str
+    project_id: Optional[str]
+    state: str = QUEUED
+    events: list[dict[str, Any]] = field(default_factory=list)
+    result: Optional[dict[str, Any]] = None
+    error: Optional[str] = None
+    created: float = field(default_factory=time.time)
+    finished: Optional[float] = None
+
+    def public(self, since: int = 0) -> dict[str, Any]:
+        return {"id": self.id, "kind": self.kind, "project_id": self.project_id, "state": self.state,
+                "events": self.events[since:], "next_event": len(self.events), "result": self.result, "error": self.error}
+
+
+class JobRegistry:
+    def __init__(self, workers: int = 4):
+        self._pool = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="a2f-job")
+        self._jobs: dict[str, Job] = {}
+        self._active: dict[str, str] = {}  # project id -> job id
+        self._lock = threading.Lock()
+
+    def submit(self, kind: str, project_id: Optional[str], fn: Callable[[Callable[[str], None]], dict[str, Any]]) -> Job:
+        with self._lock:
+            if project_id and project_id in self._active and self._jobs[self._active[project_id]].state in (QUEUED, RUNNING):
+                raise JobConflict(f"A '{self._jobs[self._active[project_id]].kind}' job is already running for this project.")
+            job = Job(id=uuid.uuid4().hex[:12], kind=kind, project_id=project_id)
+            self._jobs[job.id] = job
+            if project_id:
+                self._active[project_id] = job.id
+        self._pool.submit(self._run, job, fn)
+        return job
+
+    def _run(self, job: Job, fn) -> None:
+        job.state = RUNNING
+
+        def log(message: str) -> None:
+            job.events.append({"t": round(time.time() - job.created, 2), "message": redact(message)})
+
+        try:
+            job.result = redact_mapping(fn(log))  # type: ignore[assignment]
+            job.state = SUCCEEDED
+        except Exception as exc:  # noqa: BLE001 - reported, redacted; the traceback never leaves the server
+            job.error = redact(f"{type(exc).__name__}: {exc}")[:400]
+            job.state = FAILED
+        finally:
+            job.finished = time.time()
+
+    def get(self, job_id: str) -> Optional[Job]:
+        return self._jobs.get(job_id)
+
+    def list(self, project_id: Optional[str] = None) -> list[Job]:
+        jobs = [j for j in self._jobs.values() if project_id is None or j.project_id == project_id]
+        return sorted(jobs, key=lambda j: j.created, reverse=True)
+
+    def wait(self, job_id: str, timeout: float = 30) -> Optional[Job]:
+        """For tests and scripts: block until the job finishes."""
+        end = time.time() + timeout
+        job = self._jobs.get(job_id)
+        while job and job.state in (QUEUED, RUNNING) and time.time() < end:
+            time.sleep(0.01)
+        return job
