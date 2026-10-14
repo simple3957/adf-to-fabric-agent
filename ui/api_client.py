@@ -1,0 +1,209 @@
+"""Thin HTTP client for the Migration Accelerator API (``python -m adf2fabric.api``).
+
+The UI never talks to agents directly: every page calls one method here. No Streamlit import, so it can be tested on its
+own. Secrets (Git token, connection passwords) are passed straight through to the API and never kept on this object.
+"""
+
+from __future__ import annotations
+
+import os
+import time
+from typing import Any, Callable, Iterable, Optional
+
+import requests
+
+DEFAULT_URL = "http://127.0.0.1:8765"
+TERMINAL = ("succeeded", "failed")
+
+
+class ApiError(Exception):
+    """An error response from the API, unwrapped from its ``{error, actions, details}`` envelope."""
+
+    def __init__(self, status: int, message: str, actions: Optional[list[str]] = None, details: Optional[list[Any]] = None):
+        super().__init__(message)
+        self.status = status
+        self.message = message
+        self.actions = actions or []
+        self.details = details or []
+
+
+class ApiClient:
+    def __init__(self, session_id: str, base_url: Optional[str] = None, token: Optional[str] = None,
+                 http: Any = None, timeout: float = 120):
+        self.base_url = (base_url or os.environ.get("ADF2FABRIC_API_URL") or DEFAULT_URL).rstrip("/")
+        self.session_id = session_id
+        self._token = token if token is not None else os.environ.get("ADF2FABRIC_API_TOKEN")
+        self._http = http or requests.Session()
+        self.timeout = timeout
+
+    # ---- transport -----------------------------------------------------------------------------------------------------
+    def _request(self, method: str, path: str, *, json: Any = None, params: Optional[dict] = None,
+                 data: Optional[bytes] = None, content_type: Optional[str] = None) -> Any:
+        headers = {"X-Session-Id": self.session_id}
+        if self._token:
+            headers["Authorization"] = f"Bearer {self._token}"
+        if content_type:
+            headers["Content-Type"] = content_type
+        try:
+            resp = self._http.request(method, f"{self.base_url}{path}", json=json, params=params, data=data,
+                                      headers=headers, timeout=self.timeout)
+        except requests.ConnectionError:
+            raise ApiError(0, f"Cannot reach the API at {self.base_url}.",
+                           ["Start it with: python -m adf2fabric.api"]) from None
+        if resp.status_code >= 400:
+            try:
+                body = resp.json()
+            except ValueError:
+                body = {}
+            raise ApiError(resp.status_code, body.get("error") or f"HTTP {resp.status_code}",
+                           body.get("actions"), body.get("details"))
+        return resp.json() if resp.content else None
+
+    def _get(self, path: str, **params: Any) -> Any:
+        return self._request("GET", path, params={k: v for k, v in params.items() if v is not None} or None)
+
+    def _post(self, path: str, body: Any = None) -> Any:
+        return self._request("POST", path, json=body if body is not None else {})
+
+    def _put(self, path: str, body: Any) -> Any:
+        return self._request("PUT", path, json=body)
+
+    # ---- health + mode -------------------------------------------------------------------------------------------------
+    def health(self) -> dict:
+        return self._get("/health")
+
+    def get_mode(self) -> str:
+        return self._get("/mode")["mode"]
+
+    def set_mode(self, mode: str) -> str:
+        return self._post("/mode", {"mode": mode})["mode"]
+
+    def session(self) -> dict:
+        return self._get("/session")
+
+    # ---- sign-in -------------------------------------------------------------------------------------------------------
+    def auth_status(self, provider: str) -> dict:
+        return self._get(f"/auth/{provider}/status")
+
+    def start_login(self, provider: str, *, tenant_id: Optional[str] = None, device_code: bool = False,
+                    method: str = "interactive") -> dict:
+        body: dict[str, Any] = {"tenant_id": tenant_id or None}
+        if provider == "azure_cli":
+            body["device_code"] = device_code
+        else:
+            body["method"] = method
+        return self._post(f"/auth/{provider}/login", body)
+
+    def login_state(self, provider: str, attempt_id: str) -> dict:
+        return self._get(f"/auth/{provider}/login/{attempt_id}")
+
+    def tenants(self) -> list[dict]:
+        return self._get("/auth/azure_cli/tenants")["tenants"]
+
+    # ---- source --------------------------------------------------------------------------------------------------------
+    def subscriptions(self) -> list[dict]:
+        return self._get("/azure/subscriptions")["subscriptions"]
+
+    def discover(self, subscription_id: str) -> dict:
+        return self._get("/azure/discover", subscription_id=subscription_id)
+
+    def set_source(self, source: dict) -> dict:
+        return self._put("/session/source", source)["source"]
+
+    def test_source(self, source: dict) -> dict:
+        return self._post("/test/source", source)
+
+    def upload_zip(self, data: bytes) -> dict:
+        return self._request("PUT", "/uploads/zip", data=data, content_type="application/octet-stream")
+
+    def import_project(self, project_name: str, source: dict, pipelines: Iterable[str] = ()) -> dict:
+        return self._post("/projects", {"project_name": project_name, "source": source, "pipelines": list(pipelines)})
+
+    # ---- destination ---------------------------------------------------------------------------------------------------
+    def set_destination(self, provider: str = "azure_cli", workspace_id: Optional[str] = None,
+                        tenant_id: Optional[str] = None) -> dict:
+        return self._put("/session/destination", {"provider": provider, "workspace_id": workspace_id,
+                                                  "tenant_id": tenant_id})["destination"]
+
+    def workspaces(self, provider: Optional[str] = None) -> list[dict]:
+        return self._get("/fabric/workspaces", provider=provider)["workspaces"]
+
+    def capacities(self, provider: Optional[str] = None) -> list[dict]:
+        return self._get("/fabric/capacities", provider=provider)["capacities"]
+
+    def test_destination(self, provider: str, workspace_id: str, tenant_id: Optional[str] = None) -> dict:
+        return self._post("/test/destination", {"provider": provider, "workspace_id": workspace_id, "tenant_id": tenant_id})
+
+    # ---- projects ------------------------------------------------------------------------------------------------------
+    def projects(self) -> list[dict]:
+        return self._get("/projects")["projects"]
+
+    def project(self, pid: str) -> dict:
+        return self._get(f"/projects/{pid}")
+
+    def linked_services(self, pid: str) -> dict:
+        return self._get(f"/projects/{pid}/linked-services")
+
+    # ---- connections ---------------------------------------------------------------------------------------------------
+    def connectors(self) -> list[dict]:
+        return self._get("/connectors")["connectors"]
+
+    def cards(self, pid: str) -> list[dict]:
+        return self._get(f"/projects/{pid}/connections")["cards"]
+
+    def set_choice(self, pid: str, ls: str, method: str, endpoint: Optional[dict] = None, values: Optional[dict] = None,
+                   display_name: Optional[str] = None) -> dict:
+        return self._put(f"/projects/{pid}/connections/{ls}/choice",
+                         {"method": method, "endpoint": endpoint or {}, "values": values or {},
+                          "display_name": display_name or None})
+
+    def put_secret(self, pid: str, ls: str, field: str, value: str) -> list[str]:
+        """Send one secret to the API's in-memory vault. Returns the field NAMES now held (never values)."""
+        return self._put(f"/projects/{pid}/connections/{ls}/secrets", {"field": field, "value": value})["held"]
+
+    def clear_secrets(self, pid: str, ls: Optional[str] = None) -> int:
+        return self._request("DELETE", f"/projects/{pid}/connections/secrets", params={"ls": ls} if ls else None)["cleared"]
+
+    def test_connection(self, pid: str, ls: str) -> dict:
+        return self._post(f"/projects/{pid}/connections/{ls}/test")
+
+    def apply_connections(self, pid: str, names: Iterable[str] = (), dry_run: bool = True, auto_match: bool = False,
+                          workspace_id: Optional[str] = None) -> dict:
+        return self._post(f"/projects/{pid}/connections/apply",
+                          {"names": list(names), "dry_run": dry_run, "auto_match": auto_match, "workspace_id": workspace_id})
+
+    def provision_workspace_identity(self, pid: str, workspace_id: Optional[str] = None) -> dict:
+        return self._post(f"/projects/{pid}/connections/workspace-identity", {"workspace_id": workspace_id})
+
+    def connections_report(self, pid: str) -> dict:
+        return self._get(f"/projects/{pid}/connections/report")
+
+    # ---- stages + jobs -------------------------------------------------------------------------------------------------
+    def run_stage(self, pid: str, stage: str, *, pipelines: Iterable[str] = (), workspace_id: Optional[str] = None,
+                  with_children: bool = False, allow_unbound: bool = False) -> dict:
+        return self._post(f"/projects/{pid}/stages/{stage}",
+                          {"pipelines": list(pipelines), "workspace_id": workspace_id, "with_children": with_children,
+                           "allow_unbound": allow_unbound})
+
+    def jobs(self, project_id: Optional[str] = None) -> list[dict]:
+        return self._get("/jobs", project_id=project_id)["jobs"]
+
+    def job(self, job_id: str, since: int = 0) -> dict:
+        return self._get(f"/jobs/{job_id}", since=since)
+
+    def wait_job(self, job: dict, on_event: Optional[Callable[[dict], None]] = None, interval: float = 1.0,
+                 timeout: float = 1800) -> dict:
+        """Poll a job until it finishes, passing each new log event to ``on_event``. Returns the final job."""
+        since, end = 0, time.time() + timeout
+        while True:
+            current = self.job(job["id"], since)
+            for event in current.get("events", []):
+                if on_event:
+                    on_event(event)
+            since = current.get("next_event", since)
+            if current["state"] in TERMINAL:
+                return current
+            if time.time() > end:
+                raise ApiError(0, f"The '{job.get('kind')}' job is still running after {int(timeout)} s.",
+                               ["Check the Jobs page later."])
+            time.sleep(interval)

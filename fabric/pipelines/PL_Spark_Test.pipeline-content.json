@@ -1,0 +1,45 @@
+{
+  "properties": {
+    "activities": [
+      {
+        "name": "Generate_CSV_And_Parquet",
+        "type": "TridentNotebook",
+        "dependsOn": [],
+        "policy": {
+          "timeout": "0.12:00:00",
+          "retry": 0,
+          "retryIntervalInSeconds": 30,
+          "secureOutput": false,
+          "secureInput": false
+        },
+        "typeProperties": {
+          "notebookId": "a43d5c2c-7e9e-4c0f-9176-cc94bb47e659",
+          "workspaceId": "53d67e72-8124-4ca3-ae55-c4b266935faa"
+        }
+      },
+      {
+        "name": "Transform_Parquet",
+        "type": "TridentNotebook",
+        "dependsOn": [
+          {
+            "activity": "Generate_CSV_And_Parquet",
+            "dependencyConditions": [
+              "Succeeded"
+            ]
+          }
+        ],
+        "policy": {
+          "timeout": "0.12:00:00",
+          "retry": 0,
+          "retryIntervalInSeconds": 30,
+          "secureOutput": false,
+          "secureInput": false
+        },
+        "typeProperties": {
+          "notebookId": "7db8ed6a-676f-4f5d-be6e-b85b8e7d88e1",
+          "workspaceId": "53d67e72-8124-4ca3-ae55-c4b266935faa"
+        }
+      }
+    ]
+  }
+}

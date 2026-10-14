@@ -225,6 +225,9 @@ def convert_execute_pipeline(cx: ActivityBuilder) -> None:
                               + ("" if known else " (NOT among the discovered pipelines - it must already exist)")),
         "workspaceId": cx.workspace(),
         "waitOnCompletion": wait_v,
+        # Required by Fabric: without it, creating the pipeline fails (HTTP 400, "Object reference not set ...").
+        # The child is always a Fabric pipeline here, which the Fabric editor writes as "InvokeFabricPipeline".
+        "operationType": "InvokeFabricPipeline",
     }
     if params:
         tp["parameters"] = params
@@ -240,10 +243,11 @@ def convert_execute_pipeline(cx: ActivityBuilder) -> None:
     name = cx.add(cx.envelope(a.name, "InvokePipeline", tp, connection=conn))
     cx.cover(Op.orchestrate, name)
     cx.strategy = ConversionStrategy.transformed
-    cx.manual_steps.append("Open the Invoke pipeline activity in Fabric once and confirm it targets a Fabric pipeline "
-                           "(the activity's operation type is not set by this tool).")
-    cx.info("invoke_pipeline_operation_type", "The InvokePipeline 'operationType' is not set: its permitted values "
-            "are not documented.", "Confirm the invoke type in the Fabric UI.")
+    cx.manual_steps.append("Open the Invoke pipeline activity in Fabric once and confirm it targets the right Fabric "
+                           "pipeline.")
+    cx.info("invoke_pipeline_operation_type", "The InvokePipeline 'operationType' is set to 'InvokeFabricPipeline' "
+            "(the value the Fabric editor writes for a Fabric child pipeline; not in the public docs).",
+            "Confirm the invoke type in the Fabric UI.")
     cx.output_notes.append("InvokePipeline output differs from ExecutePipeline (e.g. pipelineRunId); verify "
                            "expressions that read it.")
     if not known:

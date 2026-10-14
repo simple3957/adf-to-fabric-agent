@@ -38,6 +38,12 @@ api = [
     "httpx>=0.27",
 ]
 
+# Streamlit front end (ui/). It only calls the API above; install together with the `api` extra.
+ui = [
+    "streamlit>=1.44",
+    "requests>=2.31",
+]
+
 [project.scripts]
 adf2fabric = "adf2fabric.cli:cli"
 

@@ -162,11 +162,17 @@ def create_app(settings: Optional[Settings] = None, live: Optional[Container] = 
     @app.post("/auth/{provider}/login", dependencies=dep)
     def auth_login(provider: str, body: S.LoginBody, ctx: Ctx = Depends()):
         p = _provider_for(ctx, provider)
-        if provider == "azure_cli":
-            attempt = p.start_login(tenant=body.tenant_id, device_code=body.device_code)
-        else:
-            attempt = p.start_login(body.method, tenant=body.tenant_id, client_id=body.client_id,
-                                    certificate_path=body.certificate_path)
+        try:
+            if provider == "azure_cli":
+                attempt = p.start_login(tenant=body.tenant_id, device_code=body.device_code)
+            else:
+                attempt = p.start_login(body.method, tenant=body.tenant_id, client_id=body.client_id,
+                                        certificate_path=body.certificate_path)
+        except RuntimeError as exc:  # a sign-in is already running: a conflict, not a server fault
+            return _err(409, str(exc), ["Finish the sign-in already open in the browser, or wait up to 5 minutes "
+                                        "for it to time out, then try again."])
+        except ValueError as exc:  # e.g. an unknown fab sign-in method
+            return _err(422, str(exc))
         return attempt.public()
 
     @app.get("/auth/{provider}/login/{attempt_id}", dependencies=dep)

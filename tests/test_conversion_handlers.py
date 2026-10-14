@@ -382,6 +382,7 @@ def test_execute_pipeline_becomes_invoke_pipeline_with_bound_references():
     assert inv["type"] == "InvokePipeline"
     assert inv["typeProperties"] == {
         "pipelineId": "<item:pipeline:Child>", "workspaceId": "<workspace-id>", "waitOnCompletion": True,
+        "operationType": "InvokeFabricPipeline",  # required by Fabric: without it the create call fails with HTTP 400
         "parameters": {"p": {"value": "@pipeline().parameters.src", "type": "Expression"}}}
     assert inv["externalReferences"] == {"connection": "<connection:invoke-pipeline>"}
     a = by_name(rec)["Run"]
