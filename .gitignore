@@ -9,6 +9,9 @@ dist/
 # Secrets: never commit tokens or local environment files.
 .env
 *.env
+*.pfx
+*.pem
+*.key
 
 # Per-engagement state: config and secrets pointers only, never commit real
 # client data. Keep the folder tracked but ignore its contents.

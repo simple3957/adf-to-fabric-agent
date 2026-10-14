@@ -20,9 +20,10 @@ SECRET = "S3cr3t-Value-ZZ9"
 
 
 @pytest.fixture()
-def client(monkeypatch):
+def client(monkeypatch, tmp_path):
     monkeypatch.delenv("ADF2FABRIC_API_TOKEN", raising=False)
     demo = build_demo_container()
+    demo.upload_dir = tmp_path
     app = create_app(Settings(), live=demo, demo=demo)
     c = TestClient(app, raise_server_exceptions=False)
     c.headers["X-Session-Id"] = "t1"
@@ -164,10 +165,12 @@ def test_zip_slip_rejected_over_api(client):
     uid = client.put("/uploads/zip", content=buf.getvalue()).json()["upload_id"]
     j = wait(client, client.post("/projects", json={"project_name": "Bad", "source": {"kind": "zip", "upload_id": uid}}).json())
     assert j["state"] == "failed"
+    assert not list(client.app.state.containers["demo"].upload_dir.glob("*.zip"))  # the archive is not kept
 
 
-def test_upload_cap_and_empty(monkeypatch):
+def test_upload_cap_and_empty(monkeypatch, tmp_path):
     demo = build_demo_container()
+    demo.upload_dir = tmp_path
     c = TestClient(create_app(Settings(max_upload_bytes=100), live=demo, demo=demo), raise_server_exceptions=False)
     assert c.put("/uploads/zip", content=b"x" * 500).status_code == 413
     assert c.put("/uploads/zip", content=b"").status_code == 422
