@@ -360,6 +360,23 @@ switches that session to Demo mode (canned providers, real parsing on a bundled 
 `ADF2FABRIC_ALLOWED_ORIGINS` sets the CORS origins (default the local Streamlit ports). Route list and the
 implemented / not-implemented matrix: [`docs/connections.md`](docs/connections.md).
 
+### Run the UI
+
+```bash
+pip install -e ".[api,ui]"
+python -m adf2fabric.api            # terminal 1: the API on 127.0.0.1:8765
+streamlit run ui/app.py             # terminal 2: the UI on http://localhost:8501
+```
+
+The UI (`ui/`, "ADF → Fabric Studio") holds no migration logic: every page calls the API through `ui/api_client.py`.
+It follows the same process as the Synapse → Fabric Migration Accelerator, with its own look: a **Connections** page
+(choose the route, connect the ADF source and the Fabric workspace, start) and a **Migration** page with a vertical
+stepper (Discover → Connect → Convert → Deploy). A step opens once the one before it is confirmed. There is also an
+**Activity** page with job history.
+Turn on **Demo** in the top bar, or open `http://localhost:8501/?demo=1&project=demo-estate`, to walk the whole flow
+on the bundled sample without Azure.
+Set `ADF2FABRIC_API_URL` if the API is not on the default address. Plan and screen-to-endpoint map: [`docs/ui-plan.md`](docs/ui-plan.md).
+
 ---
 
 ## Project layout

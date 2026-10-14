@@ -7,6 +7,7 @@ External CLIs and services are faked; the CLI output formats below are copied fr
 from __future__ import annotations
 
 import json
+from pathlib import Path
 import time
 
 import pytest
@@ -287,7 +288,9 @@ def test_subscriptions_and_login_arguments():
     captured = {}
     p.logins = LoginManager(popen=lambda argv, **k: captured.setdefault("argv", argv) and FakeProc([]))
     p.start_login(tenant="t1", device_code=True)
-    assert captured["argv"] == ["az", "login", "--allow-no-subscriptions", "--tenant", "t1", "--use-device-code"]
+    # The program is resolved on PATH (on Windows 'az' is az.cmd), so compare its name, then the arguments.
+    assert Path(captured["argv"][0]).stem.lower() == "az"
+    assert captured["argv"][1:] == ["login", "--allow-no-subscriptions", "--tenant", "t1", "--use-device-code"]
     with pytest.raises(ProviderError):
         az({"az --version": MISSING}).start_login()
 
