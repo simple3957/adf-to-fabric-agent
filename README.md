@@ -347,6 +347,33 @@ override them.
 
 ---
 
+## Compute assessment (Fabric capacity sizing)
+
+Estimates how much Fabric compute the pipelines need and which F capacity fits. ADF bills per run (Copy DIU-hours,
+activity runs, Data Flow cores); Fabric draws everything from a capacity bought up front, measured in capacity units (CU).
+
+```bash
+adf2fabric assess-compute --project "Acme Orders"                       # from pipeline definitions only
+adf2fabric assess-compute --project "Acme Orders" --history \
+  --subscription <sub-id> --resource-group <rg> --factory <factory>     # plus measured durations/DIUs from ADF runs
+```
+
+Writes `projects/<id>/assessment/compute-report.{md,json}`. For each activity it shows:
+- how ADF bills it, and the resources it is configured with (DIUs, parallel copies, Data Flow cores);
+- its Fabric equivalent: Copy throughput (ITO), Spark vCores, or an orchestration run;
+- the CU-seconds per pipeline run.
+
+Per pipeline, runs per day come from the triggers and flow down to the pipelines they invoke. Pipelines without a
+trigger use `--runs-per-day` (default 1). The recommended SKU is the smallest F capacity that covers daily CU-hours ÷ 24
+plus 25% headroom: Fabric smooths background jobs such as pipelines over 24 hours.
+
+The rates are in `agent/assessment/compute_rates.py`, each with its Microsoft Learn source and the date it was checked.
+Every number in the report says whether it was measured (ADF run history) or assumed (a stated default). Copy is billed
+per started minute; this was confirmed in both ADF's and Fabric's run output for `PL_Compute_Test`. The API exposes the
+same estimate as the `compute` stage.
+
+---
+
 ## API and Demo mode
 
 ```bash

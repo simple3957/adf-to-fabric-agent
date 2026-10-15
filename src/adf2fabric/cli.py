@@ -906,5 +906,72 @@ def deploy_cmd(project_name: str, workspace_id: str, pipelines: tuple[str, ...],
         sys.exit(2)
 
 
+
+@cli.command(name="assess-compute")
+@click.option("--project", "project_name", required=True,
+              help="Project/engagement name (discovery and semantic must have run).")
+@click.option("--runs-per-day", "runs_per_day", type=float, default=1.0, show_default=True,
+              help="Runs per day assumed for pipelines that have no trigger.")
+@click.option("--skip-stopped-triggers", is_flag=True, help="Ignore triggers that are Stopped in ADF.")
+@click.option("--history/--no-history", "use_history", default=False,
+              help="Read measured durations and DIUs from the factory's run history (read-only ARM calls).")
+@click.option("--subscription", "subscription_id", default=None, help="Azure subscription id (for --history).")
+@click.option("--resource-group", "resource_group", default=None, help="Resource group of the factory (for --history).")
+@click.option("--factory", "factory_name", default=None, help="Data Factory name (for --history).")
+@click.option("--days", type=int, default=30, show_default=True, help="How far back to read run history.")
+@azure_auth_options()
+def assess_compute(project_name: str, runs_per_day: float, skip_stopped_triggers: bool, use_history: bool,
+                   subscription_id: str | None, resource_group: str | None, factory_name: str | None, days: int,
+                   auth: str, **auth_env: str | None) -> None:
+    """Estimate the Fabric compute (CU) the pipelines need and the capacity size that fits (deterministic)."""
+    from adf2fabric.agent.assessment.agent import ComputeAgent, ComputeRequest
+
+    store = ProjectStore(projects_root(load_config()))
+    fetcher = None
+    if use_history:
+        if not (subscription_id and resource_group and factory_name):
+            click.secho("--history needs --subscription, --resource-group and --factory.", fg="red", err=True)
+            sys.exit(2)
+        from adf2fabric.agent.assessment import adf_history
+        from adf2fabric.agent.discovery.adf.arm import ARM_SCOPE, default_transport
+        from adf2fabric.connectivity._azure import CredentialUnavailable, build_credential
+
+        try:
+            if auth == "azure_cli":
+                # Token for the factory's subscription: the CLI picks the signed-in account that owns it, even when
+                # another account (for example the Fabric one) is the current default.
+                from adf2fabric.connections.providers.azure_cli import AzureCliProvider, ProviderError
+
+                try:
+                    token = AzureCliProvider().token(subscription=subscription_id)
+                except ProviderError as exc:
+                    click.secho(f"Cannot get an Azure token for subscription {subscription_id}: {exc}", fg="red", err=True)
+                    sys.exit(1)
+            else:
+                credential, _secret = build_credential(credential_from(auth, **auth_env))
+                token = credential.get_token(ARM_SCOPE).token
+        except CredentialUnavailable as exc:
+            click.secho(f"Cannot sign in to Azure: {exc.detail}", fg="red", err=True)
+            sys.exit(1)
+
+        def fetcher(names):
+            return adf_history.fetch(default_transport(), token, subscription_id, resource_group, factory_name, names,
+                                     days=days, log=lambda m: click.echo(f"  history: {m}"))
+
+    result = ComputeAgent(store).run(ComputeRequest(project_name=project_name, default_runs_per_day=runs_per_day,
+                                                    include_stopped_triggers=not skip_stopped_triggers),
+                                     history_fetcher=fetcher, log=lambda m: click.echo(f"  {m}"))
+    if not result.success:
+        click.secho(f"Compute assessment failed: {result.error}", fg="red", err=True)
+        sys.exit(1)
+    a = result.assessment
+    click.secho("COMPUTE ASSESSMENT", fg="green")
+    click.echo(f"  pipelines:          {len(a.pipelines)}   run history: {'yes' if a.history_used else 'no'}")
+    click.echo(f"  Fabric CU-hours/day: {a.cu_hours_per_day:g}   average CU: {a.average_cu_needed:g}")
+    click.echo(f"  recommended:        {a.recommended_sku}")
+    for p in a.pipelines:
+        click.echo(f"    {p.pipeline:<34} {p.cu_seconds_per_run:>10g} CU-s/run  x {p.runs_per_day:g}/day")
+    click.echo(f"  report: {result.report_markdown}")
+
 if __name__ == "__main__":
     cli()

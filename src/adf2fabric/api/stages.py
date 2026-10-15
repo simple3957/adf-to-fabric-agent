@@ -19,7 +19,7 @@ from adf2fabric.agent.reconstruction.models import ReconstructionRequest
 from adf2fabric.api.container import FABRIC_RESOURCE, Container, Session
 from adf2fabric.project.store import ProjectStore
 
-STAGES = ("discovery", "semantic", "reconstruct", "convert", "deploy_dry_run", "deploy_apply")
+STAGES = ("discovery", "semantic", "reconstruct", "convert", "compute", "deploy_dry_run", "deploy_apply")
 Log = Callable[[str], None]
 
 
@@ -92,6 +92,23 @@ def run_stage(c: Container, session: Session, pid: str, stage: str, log: Log, op
                                "runtime_ready": p.runtime_ready} for p in conv.pipelines],
                    unbound=[q.name for q in [*conv.connections, *conv.workspace_items] if not q.bound],
                    compatibility_findings=len(conv.compatibility), resolutions_used=res.exists())
+    if stage == "compute":
+        from adf2fabric.agent.assessment.agent import ComputeAgent, ComputeRequest
+
+        src = session.source or {}
+        fetcher = None
+        if src.get("kind") == "azure" and src.get("subscription_id") and src.get("resource_group") and src.get("factory_name"):
+            from adf2fabric.agent.assessment import adf_history
+            from adf2fabric.agent.discovery.adf.arm import default_transport
+
+            def fetcher(names):  # run history from the live factory this project came from (read-only)
+                token = c.azure.token(subscription=src["subscription_id"])
+                return adf_history.fetch(default_transport(), token, src["subscription_id"], src["resource_group"],
+                                         src["factory_name"], names, log=log)
+        r = ComputeAgent(c.store).run(ComputeRequest(project_name=pid), history_fetcher=fetcher, log=log)
+        a = r.assessment
+        return _ok(r, recommended_sku=a.recommended_sku if a else None, cu_hours_per_day=a.cu_hours_per_day if a else None,
+                   history_used=a.history_used if a else False, report=r.report_markdown)
     # deploy
     dest = session.destination
     if dest.get("provider", "azure_cli") != "azure_cli":
