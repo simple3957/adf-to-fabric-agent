@@ -103,32 +103,110 @@ def run_job(start: Callable[[], dict], label: str) -> Optional[dict]:
     return final
 
 
-def sign_in(provider: str, label: str, key: str, device_option: bool = True, button: Optional[str] = None) -> None:
-    """Start a CLI sign-in on the API machine and follow it until it ends. No password field, ever."""
+def identity(provider: str, label: str, key: str, *, purpose: str, device_option: bool = True) -> Optional[dict]:
+    """Who this card works as. Nobody is assumed: the user signs in, or confirms the account already on this machine.
+
+    Returns the sign-in status once an account is confirmed for this browser session, otherwise renders the sign-in
+    choices and returns None. Sign-in itself runs on the API machine (``az login`` / ``fab auth login``); this browser
+    never sees a password or token.
+    """
+    api = client()
+    ids = st.session_state.setdefault("confirmed_ids", {})
+    mode_key = f"{key}-mode"
+    status = call(api.auth_status, provider) or {}
+    account = status.get("account") if status.get("authenticated") else None
+    if ids.get(key) and ids[key] != account:  # the machine's account changed underneath this session
+        ids.pop(key)
+
+    if ids.get(key) and st.session_state.get(mode_key) != "signin":
+        st.markdown(f"Signed in as **{account}**")
+        st.caption(f"Tenant {status.get('tenant_id') or '-'}")
+        a, b, _ = st.columns([1.3, 1, 1.7])
+        if a.button("Switch account", key=f"{key}-switch", width="stretch"):
+            st.session_state[mode_key] = "signin"
+            st.rerun()
+        if b.button("Sign out", key=f"{key}-out", width="stretch"):
+            _sign_out(provider, account, key)
+        return status
+
+    if st.session_state.get(mode_key) != "signin":
+        if not status.get("available"):
+            st.error(status.get("error") or f"{label} is not installed on the machine running the accelerator.")
+            for x in status.get("actions", []):
+                st.caption(x)
+            return None
+        if account:
+            st.markdown(f"This computer is signed in to {label} as **{account}**. {purpose}")
+            a, b, c = st.columns([1.1, 1.4, 1])
+            if a.button("Continue", key=f"{key}-continue", type="primary", width="stretch",
+                        help=f"Use {account} for this session."):
+                ids[key] = account
+                st.rerun()
+            if b.button("Another account", key=f"{key}-other", width="stretch"):
+                st.session_state[mode_key] = "signin"
+                st.rerun()
+            if c.button("Sign out", key=f"{key}-out0", width="stretch"):
+                _sign_out(provider, account, key)
+        else:
+            st.markdown(f"Not signed in. {purpose}")
+            if st.button(f"Sign in with {label}", key=f"{key}-start", type="primary"):
+                st.session_state[mode_key] = "signin"
+                st.rerun()
+        return None
+
+    # ---- the sign-in form ----------------------------------------------------------------------------------------
     import time
 
-    with st.popover(button or f"Sign in with {label}"):
-        if button:
-            st.caption("A new sign-in replaces the current account on the machine running the accelerator.")
-        tenant = st.text_input("Tenant ID (optional)", key=f"{key}-tenant")
-        device = st.checkbox("Use a device code", key=f"{key}-device",
-                             help="Sign in from another browser with a code.") if device_option else False
-        if not st.button("Start sign-in", key=f"{key}-go", type="primary"):
-            return
-        api = client()
-        attempt = call(api.start_login, provider, tenant_id=tenant or None, device_code=device)
-        if not attempt:
-            return
-        out = st.empty()
-        deadline = time.time() + 300
-        while attempt["state"] == "running" and time.time() < deadline:
-            out.code("\n".join(attempt.get("output", [])) or "Waiting for the sign-in window…")
-            time.sleep(2)
-            attempt = call(api.login_state, provider, attempt["id"]) or {"state": "failed", "output": []}
-        if attempt["state"] == "succeeded":
+    with st.container(border=True):
+        st.markdown(f"**Sign in with {label}**")
+        st.caption("You get a short code and a link here. Open the link on any device, enter the code, then sign in and "
+                   "approve with Authenticator. Untick the device code to sign in through a browser tab on the machine "
+                   "running the accelerator instead.")
+        tenant = st.text_input("Tenant ID (needed if the account belongs to several directories)", key=f"{key}-tenant",
+                               placeholder="e.g. 1680abbe-1a01-4cb0-99e9-452fe05bf615")
+        device = st.checkbox("Use a device code (recommended)", key=f"{key}-device", value=True,
+                             help="Shows a code to enter at microsoft.com/devicelogin from any device.") if device_option else False
+        a, b = st.columns([1, 1])
+        go = a.button("Start sign-in", key=f"{key}-go", type="primary", width="stretch")
+        if b.button("Cancel", key=f"{key}-cancel", width="stretch"):
+            st.session_state.pop(mode_key, None)
             st.rerun()
-        out.code("\n".join(attempt.get("output", [])) or "(no output)")
-        st.error(f"Sign-in {attempt['state']}.")
+        if not go:
+            return None
+        attempt = call(api.start_login, provider, tenant_id=tenant.strip() or None, device_code=device)
+        if not attempt:
+            return None
+        with st.status("Waiting for you to finish signing in…", expanded=True) as box:
+            out = st.empty()
+            deadline = time.time() + 300
+            if not device:
+                st.info("A Microsoft sign-in page has opened in the browser on the machine running the accelerator. "
+                        "Check your browser tabs (it may be behind other windows).")
+            while attempt["state"] == "running" and time.time() < deadline:
+                out.code("\n".join(attempt.get("output", [])) or "Starting the sign-in…")
+                time.sleep(2)
+                attempt = call(api.login_state, provider, attempt["id"]) or {"state": "failed", "output": []}
+            out.code("\n".join(attempt.get("output", [])) or "(no output)")
+            if attempt["state"] != "succeeded":
+                box.update(label=f"Sign-in {attempt['state'].replace('_', ' ')}", state="error")
+                st.error("The sign-in did not complete. The message from Azure is shown above.")
+                return None
+            box.update(label="Signed in", state="complete")
+        new = call(api.auth_status, provider) or {}
+        if new.get("authenticated"):
+            ids[key] = new.get("account")
+            st.session_state.pop(mode_key, None)
+            if new.get("tenant_id"):
+                st.session_state[f"{key}-tenant-id"] = new["tenant_id"]
+        st.rerun()
+
+
+def _sign_out(provider: str, account: Optional[str], key: str) -> None:
+    api = client()
+    if call(api.logout, provider, account) is not None:
+        st.session_state.setdefault("confirmed_ids", {}).pop(key, None)
+        st.session_state.pop(f"{key}-mode", None)
+        st.rerun()
 
 
 def current_project() -> Optional[str]:

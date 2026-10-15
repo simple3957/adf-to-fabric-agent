@@ -19,6 +19,10 @@ class LoginBody(_In):
     certificate_path: Optional[str] = None
 
 
+class LogoutBody(_In):
+    account: Optional[str] = None  # azure_cli only: the account to sign out (default: the current one)
+
+
 class SourceSelection(_In):
     kind: str  # azure | git | zip
     subscription_id: Optional[str] = None

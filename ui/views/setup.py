@@ -4,7 +4,7 @@ import streamlit as st
 
 import theme
 from api_client import ApiError
-from components import call, client, run_job, show_error, sign_in, test_report
+from components import call, client, identity, run_job, show_error, test_report
 from journey import STEPS
 
 api = client()
@@ -75,12 +75,6 @@ def pipelines_field(key: str, known: list[str] | None = None) -> list[str]:
 
 
 def source_body() -> None:
-    az = call(api.auth_status, "azure_cli") or {}
-    if az.get("authenticated"):
-        a, b = st.columns([3, 2], vertical_alignment="center")
-        a.caption(f"Signed in as **{az.get('account') or '?'}** · tenant `{(az.get('tenant_id') or '-')[:8]}…`")
-        with b:
-            sign_in("azure_cli", "Azure CLI", "src-switch", button="Switch account")
     if pid:
         info = call(api.project, pid) or {}
         src = info.get("source") or {}
@@ -90,9 +84,7 @@ def source_body() -> None:
     method = st.segmented_control("How do we reach the ADF source?", ["Azure factory", "Git repository", "ZIP export"],
                                   default="Azure factory", key="src-method")
     if method == "Azure factory":
-        if not az.get("authenticated"):
-            st.caption("Sign in to Azure to list your data factories.")
-            sign_in("azure_cli", "Azure CLI", "src-az")
+        if not identity("azure_cli", "Azure", "src", purpose="Signing in lists the data factories this account can read."):
             return
         subs = call(api.subscriptions) or []
         if not subs:
@@ -174,30 +166,30 @@ def destination_body() -> None:
     provider = st.segmented_control("Sign-in used for Fabric", ["azure_cli", "fabric_cli"], key="dst-provider",
                                     default=dest.get("provider") or "azure_cli",
                                     format_func={"azure_cli": "Azure CLI", "fabric_cli": "Fabric CLI"}.get) or "azure_cli"
-    status = call(api.auth_status, provider) or {}
-    if not status.get("authenticated"):
-        st.caption("Sign in so the accelerator can reach your Fabric workspaces.")
-        sign_in(provider, "Azure CLI" if provider == "azure_cli" else "Fabric CLI", "dst-login",
-                device_option=provider == "azure_cli")
+    label = "Azure" if provider == "azure_cli" else "the Fabric CLI"
+    status = identity(provider, label, f"dst-{provider}", device_option=provider == "azure_cli",
+                      purpose="Use the account that has Fabric access.")
+    if not status:
         return
-    label = "Azure CLI" if provider == "azure_cli" else "Fabric CLI"
-    st.caption(f"Signed in as **{status.get('account') or '?'}**")
+    # Fabric calls use the token of the confirmed account's tenant, so the ADF side may use a different account.
+    tenant = status.get("tenant_id")
+    if provider == "azure_cli" and dest.get("tenant_id") != tenant:
+        call(api.set_destination, provider, dest.get("workspace_id"), tenant)
     try:
         workspaces = api.workspaces(provider)
     except ApiError as err:
-        st.error(f"{err.message}")
+        st.error(err.message)
         st.markdown(f"**{status.get('account') or 'This account'}** can't use Fabric. Usually this means:\n"
                     "- the account has **no Fabric licence** (Fabric answers *User is not licensed*), or\n"
                     "- it is signed in to a **different tenant** from the Fabric workspace, or\n"
                     "- it has **no access** to any Fabric workspace.\n\n"
-                    "Sign in with the account that has Fabric access (set its tenant ID if it has several).")
+                    "Use **Switch account** above to sign in with the account that has Fabric access.")
         for a in err.actions:
             st.info(a)
-        sign_in(provider, label, "dst-switch", device_option=provider == "azure_cli", button="Sign in with a different account")
         return
     if not workspaces:
-        st.info("No Fabric workspaces for this sign-in. The account needs a Fabric licence and workspace access.")
-        sign_in(provider, label, "dst-switch", device_option=provider == "azure_cli", button="Sign in with a different account")
+        st.info("No Fabric workspaces for this account. It needs a Fabric licence and access to a workspace. "
+                "Use **Switch account** above to try another account.")
         return
     ids = [w["id"] for w in workspaces]
     by_id = {w["id"]: w for w in workspaces}
@@ -207,7 +199,7 @@ def destination_body() -> None:
     if not has_capacity:
         st.warning("This workspace has no capacity. Migration needs one.")
     if st.button("Test connection", key="dst-test", type="primary"):
-        call(api.set_destination, provider, ws_id)
+        call(api.set_destination, provider, ws_id, tenant if provider == "azure_cli" else None)
         rep = call(api.test_destination, provider, ws_id)
         st.session_state.dest_caps[ws_id] = has_capacity
         st.session_state.dest_report = rep

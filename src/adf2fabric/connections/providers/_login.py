@@ -7,13 +7,14 @@ displayed to explain what to do (for example a device code and its URL).
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 import threading
 import time
 import uuid
 from dataclasses import dataclass, field
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 from adf2fabric.connections.redaction import redact
 
@@ -33,20 +34,43 @@ class LoginAttempt:
         return {"id": self.id, "command": self.command, "state": self.state, "output": list(self.lines)}
 
 
+def _kill_tree(proc) -> None:
+    """Stop a sign-in process and its children. On Windows ``az`` is a .cmd wrapper around python, and killing only
+    the wrapper left the real sign-in running (and still waiting for the browser)."""
+    if proc is None:
+        return
+    pid = getattr(proc, "pid", None)
+    if os.name == "nt" and isinstance(pid, int):
+        try:
+            subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"], capture_output=True, timeout=15)
+        except Exception:  # noqa: BLE001
+            pass
+    try:
+        proc.kill()
+    except Exception:  # noqa: BLE001
+        pass
+
+
 class LoginManager:
     def __init__(self, popen: Callable[..., subprocess.Popen] = subprocess.Popen, timeout: float = 300):
         self._popen = popen
         self._timeout = timeout
         self._attempts: dict[str, LoginAttempt] = {}
         self._active: Optional[str] = None
+        self._procs: dict[str, Any] = {}
         self._lock = threading.Lock()
 
     def start(self, argv: list[str], *, env_extra: Optional[dict[str, str]] = None) -> LoginAttempt:
         import os
 
         with self._lock:
+            # One sign-in at a time, and the newest wins: a sign-in nobody finished (a browser tab left open, an
+            # unused device code) must not block the next one. The old one is stopped and marked failed.
             if self._active and self._attempts[self._active].state == RUNNING:
-                raise RuntimeError("A sign-in is already in progress; finish or wait for it first.")
+                old = self._attempts[self._active]
+                old.state = FAILED
+                old.lines.append("Replaced by a newer sign-in.")
+                _kill_tree(self._procs.pop(old.id, None))
             attempt = LoginAttempt(id=uuid.uuid4().hex[:12], command=argv[0])
             self._attempts[attempt.id] = attempt
             self._active = attempt.id
@@ -60,6 +84,7 @@ class LoginManager:
             attempt.state = FAILED
             attempt.lines.append(redact(f"Could not start '{argv[0]}' ({type(exc).__name__})."))
             return attempt
+        self._procs[attempt.id] = proc
         threading.Thread(target=self._pump, args=(attempt, proc), daemon=True).start()
         return attempt
 
@@ -74,10 +99,7 @@ class LoginManager:
                 time.sleep(0.5)
             if attempt.state == RUNNING:
                 attempt.state = TIMED_OUT
-                try:
-                    proc.kill()
-                except Exception:  # noqa: BLE001
-                    pass
+                _kill_tree(proc)
 
         threading.Thread(target=watchdog, daemon=True).start()
         try:

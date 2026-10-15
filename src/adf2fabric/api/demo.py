@@ -142,6 +142,9 @@ class DemoAzure:
         self.logins._a[a.id] = a
         return a
 
+    def logout(self, username=None):
+        return self.status()  # demo: nothing to sign out of
+
     def subscriptions(self):
         return [Subscription(id=DEMO_SUB, name="Contoso Demo", tenant_id=DEMO_TENANT, state="Enabled", is_default=True, user=DEMO_ACCOUNT)]
 
@@ -235,6 +238,9 @@ class DemoFabricCli:
         a.lines.append("Demo mode: no sign-in is performed.")
         self.logins._a[a.id] = a
         return a
+
+    def logout(self):
+        return self.status()  # demo: nothing to sign out of
 
     def capabilities(self):
         return {"auth": True, "api": True}
