@@ -327,6 +327,13 @@ def create_app(settings: Optional[Settings] = None, live: Optional[Container] = 
         token = src.token  # held by this closure for the fetch only
 
         def work(log) -> dict[str, Any]:
+            try:
+                return _import(log)
+            finally:  # an uploaded archive is not kept, whether the import worked or not
+                if zip_path is not None:
+                    zip_path.unlink(missing_ok=True)
+
+        def _import(log) -> dict[str, Any]:
             log(f"importing from {src.kind}")
             if src.kind == "azure":
                 r = IntakeAgent(c.store).run_azure(AzureIntakeRequest(
@@ -342,8 +349,6 @@ def create_app(settings: Optional[Settings] = None, live: Optional[Container] = 
             if not r.success:
                 raise StageError(r.error or "The import failed.")
             log("import complete")
-            if src.kind == "zip":
-                zip_path.unlink(missing_ok=True)
             return {"project_id": r.project.id, "message": r.message}
 
         return c.jobs.submit("import", slugify(body.project_name), work).public()
