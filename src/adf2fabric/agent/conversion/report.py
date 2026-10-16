@@ -125,6 +125,14 @@ def render_report(c: ProjectConversion) -> str:
             out.append(f"- Source: <{f.source_url}>")
     if c.compute_plan is not None:
         out += render_compute_section(c.compute_plan)
+    if c.connector_coverage:
+        counts = {lvl: sum(1 for x in c.connector_coverage if x.level == lvl) for lvl in ("created", "manual", "unsupported", "unlisted")}
+        out += ["", "## Connector coverage", "",
+                f"{len(c.connector_coverage)} linked service(s): **{counts['created']}** can be created in Fabric by this tool, "
+                f"**{counts['manual']}** have a Fabric connector but are created by hand, **{counts['unsupported']}** have no Fabric "
+                f"connector, **{counts['unlisted']}** are not named in the Fabric connector documentation consulted (verify them).", "",
+                "| Linked service | ADF type | Level | Note |", "| --- | --- | --- | --- |"]
+        out += [f"| `{x.linked_service}` | {_cell(x.adf_type or '?')} | {x.level} | {_cell(x.note)} |" for x in c.connector_coverage]
     out += ["", "## Prerequisites (all pipelines)", ""]
     out += _prereq_lines([*c.connections, *c.workspace_items]) or ["None."]
     out += ["", "## Schema provenance", "",

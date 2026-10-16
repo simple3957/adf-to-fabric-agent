@@ -20,6 +20,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from adf2fabric.agent.conversion import compatibility as compat
 from adf2fabric.agent.conversion.compute_plan import ComputeSources, build_compute_plan, load_sources
+from adf2fabric.agent.conversion.connectors import coverage as connector_coverage
 from adf2fabric.agent.conversion.context import ProjectContext, Resolutions
 from adf2fabric.agent.conversion.engine import ConversionEngine
 from adf2fabric.agent.conversion.fabric_schema import INFERRED
@@ -227,6 +228,7 @@ class ConversionAgent:
             workspace_items=[q for q in ordered if q.kind not in ("connection", "gateway", "credential")],
             schema_notes=notes, detail=detail, provenance=dict(_PROVENANCE),
             compatibility=compat.scan(d, {p.source_pipeline for p in pipelines}),
+            connector_coverage=connector_coverage(d.linked_services),
             compute_plan=build_compute_plan(d, {p.source_pipeline.lower() for p in pipelines}, compute_sources))
         if self.store.has_conversion(pid):
             try:

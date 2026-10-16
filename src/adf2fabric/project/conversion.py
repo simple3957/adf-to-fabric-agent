@@ -197,6 +197,15 @@ class TriggerNote(_Strict):
     details: list[str] = Field(default_factory=list)  # what to recreate by hand: event settings, parameter values
 
 
+class ConnectorCoverage(_Strict):
+    """How far the tool goes for one linked service's connector type."""
+
+    linked_service: str
+    adf_type: Optional[str] = None
+    level: str  # created | manual | unsupported | unlisted
+    note: str = ""
+
+
 class PipelineConversion(_Strict):
     source_pipeline: str
     source_path: str
@@ -264,6 +273,7 @@ class ProjectConversion(_Strict):
     reconstruction_applied: list[str] = Field(default_factory=list)  # proposal ids that entered this output
     reconstruction_open: list[str] = Field(default_factory=list)  # blocker ids still unresolved
     compatibility: list[CompatibilityFinding] = Field(default_factory=list)  # retired/deprecated/preview components
+    connector_coverage: list[ConnectorCoverage] = Field(default_factory=list)  # per linked service, see connectors.coverage
     compute_plan: Optional[ComputePlan] = None  # external Spark compute in use and the Fabric compute that would replace it
     detail: str = ""
     provenance: dict[str, str] = Field(default_factory=dict)

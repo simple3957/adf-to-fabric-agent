@@ -60,3 +60,30 @@ def verdict(ls_type: Optional[str]) -> tuple[str, str]:
     if key in SUPPORTED:
         return "supported", SUPPORTED[key]
     return "unlisted", f"'{ls_type}' is not named in the Fabric connector documentation consulted"
+
+
+# Levels, best first. ``created``: this tool can create the Fabric connection. ``manual``: Fabric has a connector, but the
+# connection is created by hand. ``unsupported``: no Fabric connector (retired source). ``unlisted``: not named in the Fabric
+# connector documentation consulted, so check it; it is not a refusal.
+LEVELS = ("created", "manual", "unsupported", "unlisted")
+
+
+def coverage(linked_services: list) -> list:
+    """One :class:`ConnectorCoverage` per linked service, from its ADF type. Sorted by name."""
+    from adf2fabric.connections.catalog import connector_for
+    from adf2fabric.project.conversion import ConnectorCoverage
+
+    out = []
+    for ls in sorted(linked_services, key=lambda x: x.name.lower()):
+        kind, why = verdict(ls.type)
+        if connector_for((ls.type or "").lower()) is not None:
+            level, note = "created", "the tool can create this Fabric connection"
+        elif kind == "supported":
+            level, note = "manual", "Fabric has a connector for it; create the connection in Fabric and bind it"
+        elif (ls.type or "").lower() == "azuresynapseartifacts":
+            level, note = "unlisted", ("used by Synapse notebook and Spark job activities, which become Fabric items, so no "
+                                       "connection is created for it")
+        else:
+            level, note = kind, why
+        out.append(ConnectorCoverage(linked_service=ls.name, adf_type=ls.type, level=level, note=note))
+    return out

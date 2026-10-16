@@ -329,3 +329,30 @@ def test_existing_stages_are_untouched_by_the_new_stage(project):
     assert store.adf_semantic_discovery_path(pid).read_bytes() == sem_before
     assert store.repository_discovery_path(pid).read_bytes() == repo_before
     assert DiscoveryAgent(store).discover_repository(DiscoveryRequest(project_name="test-proj")).success
+
+
+def test_connector_coverage_says_which_linked_services_the_tool_can_create():
+    from types import SimpleNamespace as NS
+
+    from adf2fabric.agent.conversion.connectors import coverage
+
+    got = {c.linked_service: (c.level, c.adf_type) for c in coverage([
+        NS(name="Lake", type="AzureBlobFS"), NS(name="Sql", type="AzureSqlDW"), NS(name="Dbx", type="AzureDatabricks"),
+        NS(name="Pg", type="PostgreSql"), NS(name="Gen1", type="AzureDataLakeStore"), NS(name="Odd", type="SomethingNew"),
+        NS(name="None", type=None)])}
+    assert got == {"Lake": ("created", "AzureBlobFS"), "Sql": ("created", "AzureSqlDW"), "Dbx": ("created", "AzureDatabricks"),
+                   "Pg": ("manual", "PostgreSql"), "Gen1": ("unsupported", "AzureDataLakeStore"),
+                   "Odd": ("unlisted", "SomethingNew"), "None": ("unlisted", None)}
+
+
+def test_the_report_has_a_connector_coverage_section_with_counts(tmp_path):
+    from adf2fabric.agent.conversion.report import render_report
+
+    store, pid = _make_project(tmp_path, FILES)
+    AdfSemanticDiscoverer(store).run(AdfSemanticDiscoveryRequest(project_name="test-proj"))
+    r = ConversionAgent(store).run(ConversionRequest(project_name="test-proj"))
+    assert r.success and r.conversion.connector_coverage
+    text = render_report(r.conversion)
+    assert "## Connector coverage" in text and "can be created in Fabric by this tool" in text
+    assert text.index("## Connector coverage") < text.index("## Prerequisites (all pipelines)")
+    assert all(x.level in ("created", "manual", "unsupported", "unlisted") for x in r.conversion.connector_coverage)
