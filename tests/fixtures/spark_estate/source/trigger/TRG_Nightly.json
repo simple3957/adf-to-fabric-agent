@@ -1,0 +1,23 @@
+{
+  "name": "TRG_Nightly",
+  "properties": {
+    "type": "ScheduleTrigger",
+    "runtimeState": "Started",
+    "pipelines": [
+      {
+        "pipelineReference": {
+          "referenceName": "PL_Master",
+          "type": "PipelineReference"
+        }
+      }
+    ],
+    "typeProperties": {
+      "recurrence": {
+        "frequency": "Day",
+        "interval": 1,
+        "startTime": "2024-01-01T00:00:00Z",
+        "timeZone": "UTC"
+      }
+    }
+  }
+}

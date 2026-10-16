@@ -1,0 +1,19 @@
+{
+  "name": "PL_Master",
+  "properties": {
+    "activities": [
+      {
+        "name": "Run_ETL",
+        "type": "ExecutePipeline",
+        "dependsOn": [],
+        "typeProperties": {
+          "pipeline": {
+            "referenceName": "PL_Nightly_ETL",
+            "type": "PipelineReference"
+          },
+          "waitOnCompletion": true
+        }
+      }
+    ]
+  }
+}

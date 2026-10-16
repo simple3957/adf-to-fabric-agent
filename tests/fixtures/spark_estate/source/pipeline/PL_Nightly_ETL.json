@@ -1,0 +1,94 @@
+{
+  "name": "PL_Nightly_ETL",
+  "properties": {
+    "activities": [
+      {
+        "name": "Ingest_Raw",
+        "type": "DatabricksNotebook",
+        "dependsOn": [],
+        "typeProperties": {
+          "notebookPath": "/Shared/etl/ingest",
+          "libraries": [
+            {
+              "pypi": {
+                "package": "requests==2.31.0"
+              }
+            }
+          ]
+        },
+        "linkedServiceName": {
+          "referenceName": "LS_DBX_ETL",
+          "type": "LinkedServiceReference"
+        }
+      },
+      {
+        "name": "Transform",
+        "type": "DatabricksNotebook",
+        "dependsOn": [
+          {
+            "activity": "Ingest_Raw",
+            "dependencyConditions": [
+              "Succeeded"
+            ]
+          }
+        ],
+        "typeProperties": {
+          "notebookPath": "/Shared/etl/transform",
+          "libraries": [
+            {
+              "jar": "dbfs:/libs/custom-udf.jar"
+            }
+          ]
+        },
+        "linkedServiceName": {
+          "referenceName": "LS_DBX_ETL",
+          "type": "LinkedServiceReference"
+        }
+      },
+      {
+        "name": "Score_Model",
+        "type": "DatabricksNotebook",
+        "dependsOn": [
+          {
+            "activity": "Transform",
+            "dependencyConditions": [
+              "Succeeded"
+            ]
+          }
+        ],
+        "typeProperties": {
+          "notebookPath": "/Shared/ml/score"
+        },
+        "linkedServiceName": {
+          "referenceName": "LS_DBX_ML",
+          "type": "LinkedServiceReference"
+        }
+      },
+      {
+        "name": "Aggregate_Synapse",
+        "type": "SynapseNotebook",
+        "dependsOn": [
+          {
+            "activity": "Score_Model",
+            "dependencyConditions": [
+              "Succeeded"
+            ]
+          }
+        ],
+        "typeProperties": {
+          "notebook": {
+            "referenceName": "nb_aggregate",
+            "type": "NotebookReference"
+          },
+          "sparkPool": {
+            "referenceName": "sparkpool01",
+            "type": "BigDataPoolReference"
+          },
+          "executorSize": "Medium",
+          "driverSize": "Medium",
+          "numExecutors": 4
+        }
+      }
+    ]
+  }
+}

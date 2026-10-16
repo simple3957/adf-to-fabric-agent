@@ -1,0 +1,32 @@
+{
+  "databricks_clusters": {
+    "0912-101500-abc123": {
+      "cluster_id": "0912-101500-abc123",
+      "node_type_id": "Standard_E16ds_v5",
+      "driver_node_type_id": "Standard_E16ds_v5",
+      "autoscale": {
+        "min_workers": 2,
+        "max_workers": 8
+      },
+      "spark_version": "15.4.x-photon-scala2.12",
+      "runtime_engine": "PHOTON",
+      "spark_conf": {
+        "spark.sql.adaptive.enabled": "true"
+      }
+    }
+  },
+  "synapse_spark_pools": {
+    "sparkpool01": {
+      "properties": {
+        "nodeSize": "Medium",
+        "nodeSizeFamily": "MemoryOptimized",
+        "sparkVersion": "3.4",
+        "autoScale": {
+          "enabled": true,
+          "minNodeCount": 3,
+          "maxNodeCount": 10
+        }
+      }
+    }
+  }
+}

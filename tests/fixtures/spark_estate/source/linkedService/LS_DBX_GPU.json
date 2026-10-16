@@ -1,0 +1,12 @@
+{
+  "name": "LS_DBX_GPU",
+  "properties": {
+    "type": "AzureDatabricks",
+    "typeProperties": {
+      "domain": "https://adb-1234567890123456.7.azuredatabricks.net",
+      "newClusterNodeType": "Standard_NC6s_v3",
+      "newClusterNumOfWorker": "2",
+      "newClusterVersion": "14.3.x-gpu-ml-scala2.12"
+    }
+  }
+}

@@ -1,0 +1,29 @@
+{
+  "name": "LS_DBX_ETL",
+  "properties": {
+    "type": "AzureDatabricks",
+    "typeProperties": {
+      "domain": "https://adb-1234567890123456.7.azuredatabricks.net",
+      "newClusterNodeType": "Standard_DS4_v2",
+      "newClusterNumOfWorker": "2:6",
+      "newClusterVersion": "14.3.x-scala2.12",
+      "newClusterDriverNodeType": "Standard_DS4_v2",
+      "newClusterSparkConf": {
+        "spark.sql.shuffle.partitions": "64",
+        "spark.databricks.delta.autoCompact.enabled": "true",
+        "spark.hadoop.fs.azure.account.key.lake.dfs.core.windows.net": "{{secrets/kv/lake-key}}"
+      },
+      "newClusterInitScripts": [
+        "dbfs:/init/install-odbc.sh"
+      ],
+      "accessToken": {
+        "type": "AzureKeyVaultSecret",
+        "store": {
+          "referenceName": "LS_AKV",
+          "type": "LinkedServiceReference"
+        },
+        "secretName": "dbx-token"
+      }
+    }
+  }
+}

@@ -712,14 +712,19 @@ def discovery_adf_semantic(project_name: str) -> None:
     help="Convert the completed pipelines (original + SAFE inferred proposals from `reconstruct`); "
          "every inferred element is marked. Off by default.",
 )
+@click.option(
+    "--compute-sources", "compute_sources_path", type=click.Path(exists=True, dir_okay=False), default=None,
+    help="JSON file describing Spark compute ADF only references (Databricks clusters by id, Synapse Spark pools by "
+         "name) so the Spark compute plan can size it. See docs/compute-plan.md.",
+)
 def convert(project_name: str, pipelines: tuple[str, ...], resolutions_path: str | None,
-            apply_reconstruction: bool) -> None:
+            apply_reconstruction: bool, compute_sources_path: str | None) -> None:
     """Convert the discovered ADF pipelines to Fabric pipeline definitions (deterministic, no LLM)."""
     config = load_config()
     store = ProjectStore(projects_root(config))
     result = ConversionAgent(store).run(
         ConversionRequest(project_name=project_name, pipelines=list(pipelines), resolutions_path=resolutions_path,
-                          apply_reconstruction=apply_reconstruction)
+                          apply_reconstruction=apply_reconstruction, compute_sources_path=compute_sources_path)
     )
     if not result.success:
         click.secho(f"Conversion failed: {result.error}", fg="red", err=True)
@@ -753,6 +758,18 @@ def convert(project_name: str, pipelines: tuple[str, ...], resolutions_path: str
             by_status[f.status] = by_status.get(f.status, 0) + 1
         click.secho("  compatibility: " + ", ".join(f"{n} {k}" for k, n in sorted(by_status.items()))
                     + " component(s) retired/deprecated/preview/unavailable; see the report.", fg="yellow")
+    plan = c.compute_plan
+    if plan is not None:
+        proposed = [p for p in plan.pools if p.status == "proposed"]
+        click.echo(f"  spark compute: {len(plan.inventory)} in use -> {len(proposed)} Fabric pool(s) proposed, "
+                   f"largest {plan.max_single_pool_vcores} Spark vCores at peak")
+        for p in plan.pools:
+            click.secho(f"    {p.name}: {p.status}" + (f" ({p.min_nodes}-{p.max_nodes} x {p.node_size})" if p.node_size else ""),
+                        fg="green" if p.status == "proposed" else "yellow")
+        if plan.gaps:
+            click.secho(f"    {len(plan.gaps)} item(s) need a person; see the report.", fg="yellow")
+        for prob in plan.sources_problems:
+            click.secho(f"    compute sources file: {prob}", fg="yellow")
     unbound = [q for q in [*c.connections, *c.workspace_items] if not q.bound]
     if unbound:
         click.secho(f"  {len(unbound)} binding(s) still to supply before anything can run; see the report.", fg="yellow")
@@ -903,6 +920,93 @@ def deploy_cmd(project_name: str, workspace_id: str, pipelines: tuple[str, ...],
                             f" - {r.detail}", fg=scolours[r.action])
             failed_schedules = any(r.action == "failed" for r in sres)
     if failed_schedules or any(r.action in ("refused", "failed") for r in results):
+        sys.exit(2)
+
+
+@cli.command(name="compute-deploy")
+@click.option("--project", "project_name", required=True, help="Project name (`convert` must have run).")
+@click.option("--workspace-id", "workspace_id", required=True, help="Target Fabric workspace id (GUID).")
+@click.option("--pool", "pools", multiple=True, help="Approve this proposed pool by name. Repeatable.")
+@click.option("--environment", "environments", multiple=True, help="Approve this proposed environment by name. Repeatable.")
+@click.option("--all", "all_", is_flag=True, help="Approve every proposed pool and environment.")
+@click.option("--reuse", "reuse", is_flag=True,
+              help="Reuse an existing pool with the same node size whose node range covers the proposal's, instead of "
+                   "creating one. Pools with identical settings are always reused.")
+@click.option("--publish", "publish", is_flag=True,
+              help="Also publish the environments created in this run. Publishing runs as a Spark job and uses capacity.")
+@azure_auth_options()
+@click.option("--apply", "apply_", is_flag=True,
+              help="Actually create what you approved. Without it this is a dry run (read-only). Requires --pool, "
+                   "--environment or --all: nothing is created that you did not name.")
+def compute_deploy_cmd(project_name: str, workspace_id: str, pools: tuple[str, ...], environments: tuple[str, ...],
+                       all_: bool, reuse: bool, publish: bool, apply_: bool, auth: str, **auth_env: str | None) -> None:
+    """Create the Fabric Spark pools and environments the compute plan proposes (dry run unless --apply)."""
+    from adf2fabric.agent.deployment.compute_deploy import deploy_compute
+    from adf2fabric.agent.deployment.fabric_deploy import FABRIC_SCOPE, DeployError, FabricClient
+    from adf2fabric.connectivity._azure import CredentialUnavailable, build_credential
+    from adf2fabric.project.compute import ComputePlan
+
+    store = ProjectStore(projects_root(load_config()))
+    plan_file = store.conversion_dir(project_name) / "compute-plan.json"
+    try:
+        if plan_file.exists():
+            plan = ComputePlan.model_validate_json(plan_file.read_text(encoding="utf-8"))
+        else:
+            plan = store.load_conversion(project_name).compute_plan
+    except Exception as exc:  # noqa: BLE001
+        click.secho(f"Compute deploy failed: {exc}", fg="red", err=True)
+        sys.exit(1)
+    if plan is None or not plan.pools:
+        click.secho("Nothing to create: the conversion found no external Spark compute (run `convert` first).", fg="yellow")
+        sys.exit(1)
+    known_pools = {p.name.lower() for p in plan.pools}
+    known_envs = {e.name.lower() for e in plan.environments}
+    unknown = [n for n in pools if n.lower() not in known_pools] + [n for n in environments if n.lower() not in known_envs]
+    if unknown:
+        click.secho(f"Compute deploy failed: not in the plan: {', '.join(unknown)}. Pools: "
+                    f"{', '.join(p.name for p in plan.pools if p.status == 'proposed') or '(none)'}; environments: "
+                    f"{', '.join(e.name for e in plan.environments) or '(none)'}.", fg="red", err=True)
+        sys.exit(1)
+    selected = bool(pools or environments or all_)
+    if apply_ and not selected:
+        click.secho("Nothing was created. --apply needs you to approve what to create: --pool NAME, --environment NAME "
+                    "or --all. Run without --apply to see the proposals.", fg="red", err=True)
+        sys.exit(1)
+    try:
+        credential, _ = build_credential(credential_from(auth, **auth_env))
+        client = FabricClient(credential.get_token(FABRIC_SCOPE).token)
+        results = deploy_compute(client, workspace_id, plan, apply=apply_,
+                                 pools=None if (all_ or not selected) else set(pools),
+                                 environments=None if (all_ or not selected) else set(environments), publish=publish,
+                                 reuse_compatible=reuse)
+    except (DeployError, CredentialUnavailable) as exc:
+        click.secho(f"Compute deploy failed: {getattr(exc, 'detail', None) or exc}", fg="red", err=True)
+        sys.exit(1)
+    except Exception as exc:  # noqa: BLE001 - e.g. az login missing/expired; message carries no token
+        click.secho(f"Compute deploy failed: could not get a Fabric token or reach Fabric ({type(exc).__name__}). "
+                    "Check `az login` with an account that is an Admin of the workspace.", fg="red", err=True)
+        sys.exit(1)
+    click.echo(("SPARK COMPUTE IN FABRIC" if apply_ else "SPARK COMPUTE IN FABRIC (dry run - nothing changed; approve with "
+                "--pool/--environment/--all and --apply)") + f"  workspace: {workspace_id}")
+    colours = {"create": "green", "publish": "green", "reuse": "green", "exists": "yellow", "conflict": "red", "not_selected": None,
+               "skipped": "yellow", "refused": "red", "failed": "red"}
+    for r in results:
+        click.secho(f"  - {r.kind} {r.name}: {r.action}{f' [{r.item_id}]' if r.item_id else ''} - {r.detail}",
+                    fg=colours[r.action])
+    if apply_:  # keep a record: Fabric ids, and each activity's provisioning status, beside the plan
+        import json as _json
+        from datetime import datetime, timezone
+
+        from adf2fabric.agent.deployment.compute_deploy import record_results
+
+        updated = record_results(plan, results)
+        base = store.conversion_dir(project_name)
+        (base / "compute-plan.json").write_text(updated.model_dump_json(indent=2) + "\n", encoding="utf-8")
+        (base / "compute-provisioning.json").write_text(_json.dumps({
+            "workspace_id": workspace_id, "applied_at": datetime.now(timezone.utc).isoformat(),
+            "results": [r.__dict__ for r in results]}, indent=2) + "\n", encoding="utf-8")
+        click.echo(f"  record: {base / 'compute-provisioning.json'} (plan updated with Fabric ids and statuses)")
+    if any(r.action in ("refused", "failed", "conflict") for r in results):
         sys.exit(2)
 
 
