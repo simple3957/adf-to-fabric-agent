@@ -94,6 +94,10 @@ class ApiClient:
             body["method"] = method
         return self._post(f"/auth/{provider}/login", body)
 
+    def logout(self, provider: str, account: Optional[str] = None) -> dict:
+        """Sign out on the API machine; returns the new sign-in status."""
+        return self._post(f"/auth/{provider}/logout", {"account": account} if provider == "azure_cli" else {})
+
     def login_state(self, provider: str, attempt_id: str) -> dict:
         return self._get(f"/auth/{provider}/login/{attempt_id}")
 

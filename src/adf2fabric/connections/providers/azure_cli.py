@@ -128,6 +128,19 @@ class AzureCliProvider:
         # hangs unseen. Use the browser sign-in instead (still supports Microsoft Authenticator / MFA).
         return self.logins.start(argv, env_extra={"AZURE_CORE_ENABLE_BROKER_ON_WINDOWS": "false"})
 
+    def logout(self, username: Optional[str] = None) -> ProviderStatus:
+        """Sign ``username`` (default: the current account) out of the Azure CLI on this machine.
+
+        Other signed-in accounts stay signed in; the CLI then falls back to one of them, which ``status()`` reports.
+        """
+        argv = ["az", "logout"] + (["--username", username] if username else [])
+        r = self._run(argv, timeout=60)
+        if not r.found:
+            raise ProviderError("The Azure CLI is not installed.", [INSTALL_HINT])
+        if not r.ok and "no account" not in r.text.lower() and "please run 'az login'" not in r.text.lower():
+            raise ProviderError(f"Sign-out failed: {redact(r.text)[:300]}")
+        return self.status()
+
     # ---- tokens (internal only; never returned by any API) ---------------------------------------------------
     def token(self, subscription: Optional[str] = None, tenant: Optional[str] = None, resource: str = ARM_RESOURCE) -> str:
         argv = ["az", "account", "get-access-token", "--resource", resource, "--query", "accessToken", "-o", "tsv"]

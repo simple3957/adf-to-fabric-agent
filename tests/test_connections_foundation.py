@@ -225,12 +225,13 @@ def test_login_failure_single_flight_and_timeout():
     a = mgr.start(["az", "login"])
     wait_for(a, RUNNING)
     assert a.state == FAILED
-    hang = LoginManager(popen=lambda *a, **k: FakeProc([], hang=True), timeout=0.2)
+    procs = []
+    hang = LoginManager(popen=lambda *a, **k: procs.append(FakeProc([], hang=True)) or procs[-1], timeout=0.2)
     b = hang.start(["az", "login"])
-    with pytest.raises(RuntimeError):
-        hang.start(["az", "login"])  # one sign-in at a time
-    wait_for(b, RUNNING, 5)
-    assert b.state == TIMED_OUT
+    c = hang.start(["az", "login"])  # one sign-in at a time: the newest replaces an unfinished one
+    assert b.state == FAILED and "Replaced by a newer sign-in." in b.lines and procs[0].killed
+    wait_for(c, RUNNING, 5)
+    assert c.state == TIMED_OUT and procs[1].killed
 
 
 def test_login_that_cannot_start_is_a_failed_attempt_not_a_crash():
@@ -293,6 +294,17 @@ def test_subscriptions_and_login_arguments():
     assert captured["argv"][1:] == ["login", "--allow-no-subscriptions", "--tenant", "t1", "--use-device-code"]
     with pytest.raises(ProviderError):
         az({"az --version": MISSING}).start_login()
+
+
+def test_logout_signs_out_one_account_and_reports_the_new_state():
+    r = FakeRunner({"az logout": ok(""), "az version": ok('{"azure-cli": "2.90"}'), "az account show": bad("Please run 'az login'")})
+    st = AzureCliProvider(runner=r).logout("someone@contoso.example")
+    assert r.calls[0][0] == ["az", "logout", "--username", "someone@contoso.example"]
+    assert st.authenticated is False  # no account left: the UI asks the user to sign in again
+    with pytest.raises(ProviderError):
+        az({"az logout": bad("boom")}).logout()
+    with pytest.raises(ProviderError):
+        az({"az logout": MISSING}).logout()
 
 
 def test_token_is_fetched_raw_for_local_use_and_failures_are_actionable():

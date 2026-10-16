@@ -175,6 +175,15 @@ def create_app(settings: Optional[Settings] = None, live: Optional[Container] = 
             return _err(422, str(exc))
         return attempt.public()
 
+    @app.post("/auth/{provider}/logout", dependencies=dep)
+    def auth_logout(provider: str, body: S.LogoutBody, ctx: Ctx = Depends()):
+        p = _provider_for(ctx, provider)
+        try:
+            st = p.logout(body.account) if provider == "azure_cli" else p.logout()
+        except ValueError as exc:
+            return _err(422, str(exc))
+        return S.dump(st)
+
     @app.get("/auth/{provider}/login/{attempt_id}", dependencies=dep)
     def auth_login_state(provider: str, attempt_id: str, ctx: Ctx = Depends()):
         a = _provider_for(ctx, provider).logins.get(attempt_id)

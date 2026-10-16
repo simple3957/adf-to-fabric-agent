@@ -107,6 +107,15 @@ class FabricCliProvider:
         st.authenticated, st.state = True, ConnectionState.authenticated
         return st
 
+    def logout(self) -> ProviderStatus:
+        """Sign the Fabric CLI out on this machine (``fab auth logout``)."""
+        r = self._fab(["auth", "logout"], 60)
+        if not r.found:
+            raise ValueError("The Fabric CLI is not installed. " + INSTALL_HINT)
+        if not r.ok:
+            raise ValueError(f"Sign-out failed: {redact(r.text)[:300]}")
+        return self.status()
+
     # ---- sign-in ---------------------------------------------------------------------------------------------
     def start_login(self, method: str = "interactive", *, tenant: Optional[str] = None, client_id: Optional[str] = None,
                     certificate_path: Optional[str] = None) -> LoginAttempt:

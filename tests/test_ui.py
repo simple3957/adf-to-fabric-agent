@@ -136,6 +136,23 @@ def test_discover_then_confirm_opens_connect(api):
     assert at.button(key="open-convert").disabled  # still locked until Connect is confirmed
 
 
+def test_sign_in_is_asked_not_assumed_then_switch_and_sign_out(api):
+    at = _app(api)
+    at.run()
+    assert not at.exception, at.exception
+    # Nobody is assumed: the Fabric card offers "Continue as ..." and lists no workspaces yet.
+    assert at.button(key="dst-azure_cli-continue") and not [s for s in at.selectbox if s.key == "dst-ws"]
+    at.button(key="dst-azure_cli-continue").click().run()
+    assert at.session_state["confirmed_ids"]["dst-azure_cli"] == "demo.user@contoso.example"
+    assert [s for s in at.selectbox if s.key == "dst-ws"]  # workspaces appear once the account is confirmed
+    at.button(key="dst-azure_cli-switch").click().run()  # switch opens the sign-in form
+    assert at.button(key="dst-azure_cli-go") and at.button(key="dst-azure_cli-cancel")
+    at.button(key="dst-azure_cli-cancel").click().run()
+    at.button(key="dst-azure_cli-out").click().run()  # sign out forgets the confirmation
+    assert "dst-azure_cli" not in at.session_state["confirmed_ids"]
+    assert not at.exception, at.exception
+
+
 def test_journey_rules():
     f = {"discover": journey.StepFacts(complete=True, metric="x"), "connect": journey.StepFacts(attention="1 need attention")}
     s = journey.statuses(f, set())

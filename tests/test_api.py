@@ -54,6 +54,12 @@ def test_auth_status_and_subscriptions_demo(client):
     assert found["factories"][0]["name"] == "contoso-adf"
 
 
+def test_logout_demo(client):
+    assert client.post("/auth/azure_cli/logout", json={"account": "x@y.example"}).json()["provider"] == "azure_cli"
+    assert client.post("/auth/fabric_cli/logout", json={}).status_code == 200
+    assert client.post("/auth/nope/logout", json={}).status_code == 404
+
+
 def test_login_flow_demo(client):
     a = client.post("/auth/azure_cli/login", json={}).json()
     assert client.get(f"/auth/azure_cli/login/{a['id']}").json()["state"] == "succeeded"
