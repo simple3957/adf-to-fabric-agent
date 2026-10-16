@@ -445,6 +445,7 @@ def _databricks_compute(tp: dict) -> AdfSparkCompute:
         mode = "unspecified"
     return AdfSparkCompute(
         mode=mode, workspace=lit("domain"), existing_cluster_id=existing, instance_pool_id=pool,
+        workspace_resource_id=lit("workspaceResourceId"),
         policy_id=lit("policyId"), node_type=node, driver_node_type=lit("newClusterDriverNodeType"),
         min_workers=lo, max_workers=hi, runtime_version=lit("newClusterVersion"), spark_conf=conf,
         spark_env_var_names=sorted(str(k) for k in env) if isinstance(env, dict) else [],

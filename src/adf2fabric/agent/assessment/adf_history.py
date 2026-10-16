@@ -36,7 +36,11 @@ def _window(days: int) -> dict:
 
 def fetch(transport: Any, token: str, subscription_id: str, resource_group: str, factory: str, pipelines: list[str],
           days: int = 30, runs_per_pipeline: int = 10, log: Optional[Callable[[str], None]] = None) -> dict[str, PipelineHistory]:
-    """Run history keyed by lower-case pipeline name. Pipelines with no successful run in the window are left out."""
+    """Run history keyed by lower-case pipeline name. Pipelines with no successful run in the window are left out.
+
+    Runs are read newest first. An activity whose type changed (e.g. a Wait placeholder later replaced by a Databricks
+    notebook) only counts the runs with its newest type, so old runs of the placeholder never skew the numbers.
+    """
     base = factory_base_url(subscription_id, resource_group, factory)
     out: dict[str, PipelineHistory] = {}
     for name in pipelines:
@@ -56,14 +60,17 @@ def fetch(transport: Any, token: str, subscription_id: str, resource_group: str,
         dius: dict[str, list[float]] = {}
         copies: dict[str, list[float]] = {}
         billed: dict[str, float] = {}
+        appeared: dict[str, int] = {}  # runs in which the activity ran with its newest type
         for run in runs:
             acts = _post(transport, f"{base}/pipelineruns/{run['runId']}/queryActivityruns?api-version={API_VERSION}", token,
                          _window(days)).get("value", [])
             per_run: dict[str, int] = {}
             for a in acts:
                 n = a.get("activityName") or "?"
+                types.setdefault(n, a.get("activityType"))  # the newest run's type
+                if a.get("activityType") != types[n]:
+                    continue
                 per_run[n] = per_run.get(n, 0) + 1
-                types[n] = a.get("activityType") or types.get(n)
                 durations.setdefault(n, []).append((a.get("durationInMs") or 0) / 1000)
                 o = a.get("output") or {}
                 if isinstance(o.get("usedDataIntegrationUnits"), (int, float)):
@@ -76,12 +83,13 @@ def fetch(transport: Any, token: str, subscription_id: str, resource_group: str,
                     billed[key] = billed.get(key, 0.0) + float(b.get("duration") or 0)
             for n, c in per_run.items():
                 counts.setdefault(n, []).append(c)
+                appeared[n] = appeared.get(n, 0) + 1
         k = len(runs)
         out[name.lower()] = PipelineHistory(
             pipeline=name, runs_sampled=k,
             median_duration_s=round(statistics.median((r.get("durationInMs") or 0) / 1000 for r in runs), 1),
             activities={n: ActivityHistory(
-                activity_type=types.get(n), runs_per_pipeline_run=round(sum(counts.get(n, [1])) / k, 2),
+                activity_type=types.get(n), runs_per_pipeline_run=round(sum(counts.get(n, [1])) / max(1, appeared.get(n, k)), 2),
                 median_duration_s=round(statistics.median(durations[n]), 1),
                 used_diu=statistics.median(dius[n]) if dius.get(n) else None,
                 used_parallel_copies=statistics.median(copies[n]) if copies.get(n) else None) for n in durations},

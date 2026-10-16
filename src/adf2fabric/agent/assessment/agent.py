@@ -8,11 +8,12 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 from pydantic import BaseModel
 
 from adf2fabric.agent.assessment.compute import ComputeAssessment, PipelineHistory, estimate, render_markdown
+from adf2fabric.project.discovery import AdfSemanticDiscovery
 from adf2fabric.project.store import ProjectStore, slugify
 
 
@@ -32,6 +33,7 @@ class ComputeResult(BaseModel):
 
 
 HistoryFetcher = Callable[[list[str]], dict[str, PipelineHistory]]
+DefinitionsLoader = Callable[[], AdfSemanticDiscovery]  # e.g. the live factory instead of the stored Git record
 
 
 def assessment_dir(store: ProjectStore, project_id: str) -> Path:
@@ -43,13 +45,22 @@ class ComputeAgent:
         self.store = store
 
     def run(self, request: ComputeRequest, history_fetcher: Optional[HistoryFetcher] = None,
-            log: Callable[[str], None] = lambda _m: None) -> ComputeResult:
+            log: Callable[[str], None] = lambda _m: None,
+            definitions_loader: Optional[DefinitionsLoader] = None, prices: Any = None,
+            databricks_workspace: Optional[Callable[[str], Any]] = None) -> ComputeResult:
         pid = slugify(request.project_name)
         if not self.store.exists(pid):
             return ComputeResult(success=False, error=f"Project '{request.project_name}' does not exist.")
-        if not self.store.adf_semantic_discovery_path(pid).exists():
+        if definitions_loader:
+            log("reading pipeline definitions from the live factory")
+            try:
+                d = definitions_loader()
+            except Exception as exc:  # noqa: BLE001 - reported to the user
+                return ComputeResult(success=False, error=f"Could not read the live factory: {exc}")
+        elif not self.store.adf_semantic_discovery_path(pid).exists():
             return ComputeResult(success=False, error="Run the 'discovery' then 'semantic' stages first.")
-        d = self.store.load_adf_semantic_discovery(pid)
+        else:
+            d = self.store.load_adf_semantic_discovery(pid)
         history = None
         if history_fetcher:
             log("reading ADF run history")
@@ -59,7 +70,8 @@ class ComputeAgent:
                 return ComputeResult(success=False, error=f"Could not read ADF run history: {exc}")
             log(f"run history found for {len(history)} of {len(d.pipelines)} pipeline(s)")
         a = estimate(d, history, default_runs_per_day=request.default_runs_per_day,
-                     include_stopped_triggers=request.include_stopped_triggers)
+                     include_stopped_triggers=request.include_stopped_triggers, prices=prices,
+                     databricks_workspace=databricks_workspace)
         out = assessment_dir(self.store, pid)
         out.mkdir(parents=True, exist_ok=True)
         jpath, mpath = out / "compute-report.json", out / "compute-report.md"

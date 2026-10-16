@@ -799,6 +799,7 @@ class AdfSparkCompute(_Strict):
     platform: str = "databricks"
     mode: str = "unspecified"  # existing_cluster | new_cluster | instance_pool | unspecified
     workspace: Optional[str] = None  # the workspace domain (a URL, not a credential)
+    workspace_resource_id: Optional[str] = None  # ARM id of the workspace (region and pricing tier are read from it)
     existing_cluster_id: Optional[str] = None
     instance_pool_id: Optional[str] = None
     policy_id: Optional[str] = None

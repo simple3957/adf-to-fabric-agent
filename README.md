@@ -368,10 +368,41 @@ Per pipeline, runs per day come from the triggers and flow down to the pipelines
 trigger use `--runs-per-day` (default 1). The recommended SKU is the smallest F capacity that covers daily CU-hours ÷ 24
 plus 25% headroom: Fabric smooths background jobs such as pipelines over 24 hours.
 
+`--live` reads the pipeline definitions from the live factory instead of the stored Git record (needs the same
+`--subscription/--resource-group/--factory`).
+
+**Azure Databricks activities** (Databricks Notebook, Jar, Python) are external compute: Fabric counts only their
+orchestration run. The Spark cost is billed by Databricks and shown in a separate report section:
+- **Formula:** nodes × cluster hours × (DBUs per node-hour × DBU price + VM price per hour).
+- **Cluster size:** read from the activity's linked service (node type, workers).
+- **Prices:** come from the Azure Retail Prices API.
+
+Databricks prices are read live from the Azure Retail Prices API for the workspace's region and tier. Use
+`--prices recorded` to use the table in `compute_rates.py` instead. Full description, Databricks setup and measured costs:
+[docs/compute-and-databricks.md](docs/compute-and-databricks.md).
+
 The rates are in `agent/assessment/compute_rates.py`, each with its Microsoft Learn source and the date it was checked.
 Every number in the report says whether it was measured (ADF run history) or assumed (a stated default). Copy is billed
 per started minute; this was confirmed in both ADF's and Fabric's run output for `PL_Compute_Test`. The API exposes the
 same estimate as the `compute` stage.
+
+## Warehouse migration (source warehouse → Fabric Warehouse)
+
+Migrates a source warehouse into a Fabric Warehouse. It discovers the source, reads ADF from both the live factory
+and Git, keeps the objects ADF relates to (plus their dependencies), creates and loads them, validates, and reports.
+Source adapters plug in; the only one today is a Synapse dedicated SQL pool, read offline from its Git DDL plus a
+Parquet export.
+
+```bash
+adf2fabric warehouse-assess  --config projects/<name>/warehouse-migration.yaml   # read-only check of an existing Warehouse
+adf2fabric warehouse-migrate --config projects/<name>/warehouse-migrate.yaml     # dry run
+adf2fabric warehouse-migrate --config ... --apply [--create-warehouse]           # create + load + validate
+```
+
+Config: `config/warehouse-migration.example.yaml`. Nothing is written without `--apply` and `target.read_only: false`;
+existing tables are never overwritten. Writes `projects/<project>/warehouse/report.{md,json}`, `catalog.json`,
+`ddl-dry-run.sql`, `dependency-graph.json` and a `rollback-<time>.sql` for any run that created objects.
+Architecture, rules, status and limits: [ARCHITECTURE_AND_MIGRATION.md](ARCHITECTURE_AND_MIGRATION.md).
 
 ---
 
