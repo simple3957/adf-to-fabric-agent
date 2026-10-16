@@ -50,3 +50,22 @@ ADF linked service. The UI is a thin client of the FastAPI backend (`python -m a
 
 Headers: `X-Session-Id` (scopes secrets and selections), optional `Authorization: Bearer` when `ADF2FABRIC_API_TOKEN` is set.
 CORS allows `ADF2FABRIC_ALLOWED_ORIGINS` (default the local Streamlit origins). Long work (import, stages) is a job; poll `/jobs/{id}`.
+
+## Coverage today and what the next connectors need
+
+The conversion report has a **Connector coverage** section: for each linked service, whether this tool can create the Fabric connection (`created`), Fabric has a connector but the connection is made by hand (`manual`), there is no Fabric connector (`unsupported`), or the type is not named in the Fabric documentation consulted (`unlisted`, so verify it). The tool creates 5 connector types (SQL/Synapse SQL, ADLS Gen2, Blob, REST, Azure Databricks) covering 9 ADF types, and recognises 53 more as supported by Fabric.
+
+Fabric's own list of connection types (`GET /v1/connections/supportedConnectionTypes`, 287 types, read on 2026-10-16) gives the exact creation method, required parameters and credential types. For the likely next connectors:
+
+| Fabric type | Creation method | Required parameters | Credential types |
+|---|---|---|---|
+| `PostgreSQL` | `PostgreSql` | server, database | Basic, OAuth2 |
+| `MySql` | `MySql` | server, database | Basic |
+| `Oracle` | `Oracle` | server | Basic, OAuth2 |
+| `Snowflake` | `Snowflake.Databases` | server, warehouse | Basic, OAuth2, KeyPair, ServicePrincipal, WorkspaceIdentity |
+| `AmazonS3` | `AmazonS3.Storage` | none (url and roleArn optional) | Basic, OAuth2, ServicePrincipal |
+| `SFTP` | `SFTP.Contents` | server | Basic, KeyPair |
+| `Web` | `Web` | url | Anonymous, Basic, OAuth2, ServicePrincipal, WorkspaceIdentity |
+| `CosmosDB` | `CosmosDB.Contents` | host | Key, OAuth2, WorkspaceIdentity |
+
+Not yet verified for these: how an ADF linked service's properties map onto the parameters (for example whether Fabric's `server` carries the port, and how an Oracle connection string becomes `server`), and creation against a real system. Those need a live target for each. ADF types with no obvious Fabric name in that list (Teradata, ODBC, file server) are not assumed unsupported.
