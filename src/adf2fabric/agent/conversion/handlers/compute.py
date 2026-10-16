@@ -272,8 +272,10 @@ def convert_synapse_notebook(cx: ActivityBuilder) -> None:
     for k, v in (raw.get("parameters") or {}).items():
         params[k] = cx.tree(v, f"typeProperties.parameters.{k}", f"typeProperties.parameters.{k}")
         cx.mapping(f"typeProperties.parameters.{k}", f"typeProperties.parameters.{k}", "passthrough")
+    notebook_id = cx.item("notebook", nb, f"The Fabric notebook migrated from Synapse notebook '{nb}'.")
+    bound = not notebook_id.startswith("<")  # a real id came from the resolutions file: the notebook is already in Fabric
     tp: dict[str, Any] = {
-        "notebookId": cx.item("notebook", nb, f"The Fabric notebook migrated from Synapse notebook '{nb}'."),
+        "notebookId": notebook_id,
         "workspaceId": cx.workspace(),
     }
     if params:
@@ -286,6 +288,10 @@ def convert_synapse_notebook(cx: ActivityBuilder) -> None:
     cx.cover(Op.external_execution, name)
     cx.strategy = ConversionStrategy.alternative
     cx.disposition = "replace"
+    if bound:
+        cx.summary = (f"SynapseNotebook '{a.name}' -> Fabric Notebook activity bound to the deployed notebook "
+                      f"{notebook_id}; check its content, lakehouse and environment.")
+        return
     cx.manual("synapse_notebook_migrate", f"Synapse notebook '{nb}' must be migrated to a Fabric notebook.",
               f"Import '{nb}' into the Fabric workspace, attach a lakehouse/environment, then bind its item id.")
     cx.alternative("Run the notebook content as a Spark job definition if it is a packaged job.")

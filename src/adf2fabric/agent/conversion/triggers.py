@@ -8,7 +8,7 @@ schedules``, "Create Item Schedule"; verified 2026-10-13). A schedule is one of 
 * ``Weekly``  - ``weekdays`` + ``times``
 * ``Monthly`` - ``recurrence`` (1..12 months) + ``occurrence`` (DayOfMonth or OrdinalWeekday) + ``times``
 
-each with ``startDateTime``, ``endDateTime`` and ``localTimeZoneId`` (a Windows time zone name, which is also what ADF
+each with ``startDateTime``, ``endDateTime`` (REQUIRED by the live API though the reference table does not say so) and ``localTimeZoneId`` (a Windows time zone name, which is also what ADF
 trigger ``timeZone`` uses). An item may have at most 20 schedules.
 
 This module only produces definitions, and only where the ADF recurrence maps EXACTLY. When it does not (for example a
@@ -23,12 +23,13 @@ Statuses: ``generated`` | ``generated_with_differences`` | ``manual`` | ``not_su
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional
 
 from adf2fabric.project.discovery import AdfRecurrence, AdfTrigger
 
 MAX_SCHEDULES_PER_ITEM = 20
+DEFAULT_END_DAYS = 3650  # ten years: Fabric requires an end time, ADF triggers often have none
 MAX_TIMES = 100
 _WEEK_INDEX = {1: "First", 2: "Second", 3: "Third", 4: "Fourth", 5: "Fifth"}
 _DAYS = {"monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"}
@@ -99,6 +100,15 @@ def build_schedules(t: AdfTrigger) -> TriggerSchedule:
     differences = False
     if rec.start_time and start is None:
         return TriggerSchedule("manual", notes=[f"Could not read the start time '{rec.start_time}'."])
+    if rec.end_time and end is None:
+        return TriggerSchedule("manual", notes=[f"Could not read the end time '{rec.end_time}'."])
+    if end is None:
+        # Verified live 2026-10-16: Fabric rejects a schedule without endDateTime ("The EndDateTime field is required").
+        today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)  # midnight: stable between runs
+        end = (start if start and start > today else today) + timedelta(days=DEFAULT_END_DAYS)
+        differences = True
+        notes.append(f"The ADF trigger has no end time but Fabric requires one; it was set to {_stamp(end)} (ten years out). "
+                     "Move it later, or recreate the schedule, before then.")
     if (rec.time_zone or "UTC").lower() != "utc":
         notes.append(f"Time zone '{rec.time_zone}': ADF and Fabric both use Windows time zone names; confirm the first "
                      "run time after creating the schedule.")

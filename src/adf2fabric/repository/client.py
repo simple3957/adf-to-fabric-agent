@@ -33,6 +33,24 @@ class RepositoryClient:
     def _redact(self, text: str) -> str:
         return authentication.redact(text, self.token)
 
+    def resolve_branch(self, repository_url: str, branch: str | None) -> str:
+        """``branch`` as given, or the repository's own default branch when none was named."""
+        if branch:
+            return branch
+        clean_url = self.provider.normalize_url(repository_url)
+        auth_url = self.provider.authenticated_url(clean_url, self.token)
+        try:
+            detected = git.default_branch(auth_url)
+        except git.GitError as exc:
+            raise RepositoryAccessError(
+                f"Could not access repository '{clean_url}': {self._redact(str(exc))}"
+            ) from None
+        if not detected:
+            raise RepositoryAccessError(
+                f"Could not tell the default branch of '{clean_url}'. Name the branch to fetch."
+            )
+        return detected
+
     def validate(self, repository_url: str, branch: str) -> None:
         """Confirm the repo is reachable and the branch exists, or raise."""
         clean_url = self.provider.normalize_url(repository_url)
@@ -48,12 +66,14 @@ class RepositoryClient:
                 f"Branch '{branch}' was not found in repository '{clean_url}'."
             )
 
-    def fetch(self, repository_url: str, branch: str, dest: Path) -> RepositoryMetadata:
+    def fetch(self, repository_url: str, branch: str | None, dest: Path) -> RepositoryMetadata:
         """Validate, clone into ``dest``, scrub the token, and return metadata.
 
         ``dest`` must not already exist as a populated clone; the caller
         (IntakeAgent) decides on reuse vs. fresh clone before calling this.
+        A ``branch`` of None means the repository's default branch.
         """
+        branch = self.resolve_branch(repository_url, branch)
         clean_url = self.provider.normalize_url(repository_url)
         auth_url = self.provider.authenticated_url(clean_url, self.token)
 

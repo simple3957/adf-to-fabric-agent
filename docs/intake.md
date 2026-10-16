@@ -73,6 +73,12 @@ repository:
 
 `local_source_path` is the canonical source consumed by subsequent stages.
 
+## Branch and `adf_publish` sources
+
+With no `--branch` (and no `default_branch` in `config/config.yaml`), intake fetches the repository's own default branch. Name a branch to override it.
+
+An `adf_publish` branch holds `ARMTemplateForFactory.json` (and `linkedTemplates/`) instead of `pipeline/`, `dataset/` and so on. Intake extracts those resources into the Git layout in `_adf_publish_extracted/` beside the template and uses that folder as the source root. The cloned files are not changed. A value that is exactly `[parameters('x')]` takes the template's default when it has one; secure parameters and other ARM expressions stay as written and are reported in the manifest findings.
+
 ## Reuse behavior
 
 - **Same project + repo + branch, already fetched** → reused (no clone, no token needed).

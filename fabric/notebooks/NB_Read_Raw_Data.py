@@ -2,7 +2,10 @@
 # Generates the migration-test source data. Writes through the LH_Migration shortcut to
 # migrationcontainer (storage datamigrationadftofabric), under migration-test/spark-test/ so the
 # Copy pipelines' files in migration-test/csv and /parquet are never overwritten.
-storage = "abfss://53d67e72-8124-4ca3-ae55-c4b266935faa@onelake.dfs.fabric.microsoft.com/f33fe93b-9b37-42aa-ba41-762247bb43a5/Files/migrationcontainer/migration-test/spark-test"
+# Set these two for your workspace and Lakehouse (the GUIDs in their Fabric URLs).
+WORKSPACE_ID = "<workspace-id>"
+LAKEHOUSE_ID = "<lakehouse-id>"
+storage = f"abfss://{WORKSPACE_ID}@onelake.dfs.fabric.microsoft.com/{LAKEHOUSE_ID}/Files/migrationcontainer/migration-test/spark-test"
 
 customers = [
     ("C001", "Asha", "Hyderabad"),

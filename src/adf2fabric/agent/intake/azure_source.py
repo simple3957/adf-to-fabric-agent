@@ -32,6 +32,7 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 from urllib.parse import urlparse
 
+from adf2fabric import cloud
 from adf2fabric.agent.discovery.adf import arm
 from adf2fabric.agent.discovery.repository.artifacts import _SECRET_KEY_HINTS
 from adf2fabric.agent.intake import source_validation as sv
@@ -68,7 +69,7 @@ CDC_KIND = AdfArtifactKind.change_data_capture
 CDC_SEGMENT = "adfcdcs"  # Microsoft.DataFactory/factories/adfcdcs (ARM reference)
 KIND_CHOICES = [k.value for k, _ in arm.ARTIFACT_COLLECTIONS] + [FACTORY_KIND.value, CDC_KIND.value]
 
-_ALLOWED_HOST = "management.azure.com"
+_ALLOWED_HOST = cloud.ARM_HOST
 _RETRY_STATUSES = frozenset({429, 502, 503, 504})
 _MAX_BACKOFF_SECONDS = 60
 _FILENAME_UNSAFE = re.compile(r"[^A-Za-z0-9._ -]")
@@ -268,7 +269,8 @@ def default_token_provider(cred: AzureCredentialRef) -> tuple[str, str]:
         ):
             # No azure-identity: ask the Azure CLI directly for an ARM token.
             token = _run_az(
-                ["account", "get-access-token", "--resource", "https://management.azure.com/",
+                ["account", "get-access-token", "--resource", cloud.ARM_RESOURCE,
+                 *(["--subscription", cred.subscription_id] if cred.subscription_id else []),
                  "--query", "accessToken", "-o", "tsv"]
             )
             if not token:
@@ -485,7 +487,11 @@ class AzureSourceIntake:
         project_id = slugify(request.project_name)
         kinds = _resolve_kinds(request.artifact_kinds)
 
-        token, secret = self.token_provider(request.credential)
+        credential_ref = request.credential
+        if (request.subscription_id or "").strip() and not credential_ref.subscription_id:
+            # Several accounts can be signed in: use the one that owns this subscription.
+            credential_ref = credential_ref.model_copy(update={"subscription_id": request.subscription_id.strip()})
+        token, secret = self.token_provider(credential_ref)
         try:
             subscription = (request.subscription_id or "").strip() or self.subscription_resolver()
             try:

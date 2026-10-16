@@ -105,10 +105,11 @@ def analyze_source(base: Path, subdirectory: Optional[str] = None) -> SourceSumm
             raise ValueError(f"The subdirectory '{subdirectory}' does not exist in the source.")
     else:
         root, notes = detect_root(base)
+    original = sv.load_source(root)
+    root, loaded, extraction = sv.with_arm_extraction(root, original)  # an adf_publish source becomes Git layout
     rel = root.relative_to(base).as_posix() if root != base else ""
-    loaded = sv.load_source(root)
     findings = [FindingView(severity=f.severity.value, code=f.code, message=f.message, artifact=f.artifact, action=f.action)
-                for f in sv.validate_source(loaded)]
+                for f in sv.extraction_findings(extraction) + sv.validate_source(loaded)]
     findings += [FindingView(severity="warning", code="root_choice", message=n) for n in notes]
     counts: dict[str, int] = {}
     for a in loaded.artifacts:
@@ -133,6 +134,6 @@ def analyze_source(base: Path, subdirectory: Optional[str] = None) -> SourceSumm
     flavor = "synapse" if extras or any(d in dirs for d in ("sqlpool", "bigdatapool")) else ("adf" if layout_ok else "unknown")
     unresolved = sum(1 for f in findings if f.code == "missing_reference")
     return SourceSummary(root=rel, flavor=flavor, layout_ok=layout_ok, counts=dict(sorted(counts.items())), synapse_only=extras,
-                         pipelines=pipelines, arm_templates=loaded.arm_templates, findings=findings,
+                         pipelines=pipelines, arm_templates=original.arm_templates, findings=findings,
                          unresolved_references=unresolved,
                          complete=not any(f.severity == FindingSeverity.error.value for f in findings))

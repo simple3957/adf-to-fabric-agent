@@ -13,8 +13,8 @@
           "secureInput": false
         },
         "typeProperties": {
-          "notebookId": "a43d5c2c-7e9e-4c0f-9176-cc94bb47e659",
-          "workspaceId": "53d67e72-8124-4ca3-ae55-c4b266935faa"
+          "notebookId": "<item:notebook:NB_Read_Raw_Data>",
+          "workspaceId": "<workspace-id>"
         }
       },
       {
@@ -36,8 +36,8 @@
           "secureInput": false
         },
         "typeProperties": {
-          "notebookId": "7db8ed6a-676f-4f5d-be6e-b85b8e7d88e1",
-          "workspaceId": "53d67e72-8124-4ca3-ae55-c4b266935faa"
+          "notebookId": "<item:notebook:NB_Transform_Cab_Data>",
+          "workspaceId": "<workspace-id>"
         }
       }
     ]

@@ -561,6 +561,18 @@ def test_synapse_notebook_is_a_scaffold_that_needs_the_notebook_migrated():
     assert any(m.source == "typeProperties.sparkPool" and not m.preserved for m in a.property_mappings)
 
 
+def test_a_synapse_notebook_already_deployed_to_fabric_is_bound_not_scaffolded():
+    nb = act("Syn", "SynapseNotebook", {"notebook": ref("Notebook", "Clean"), "sparkPool": ref("BigDataPool", "pool")})
+    ws, item = "53d67e72-8124-4ca3-ae55-c4b266935faa", "6d899865-241b-4694-8232-74ec47124d24"
+    rec, content = convert_one(pipe(nb), resolutions=[{"type": "ItemToId", "key": "notebook:Clean", "value": item},
+                                                       {"type": "WorkspaceId", "key": "*", "value": ws}])
+    a = by_name(rec)["Syn"]
+    assert find(content, "Syn")["typeProperties"] == {"notebookId": item, "workspaceId": ws}
+    assert a.status is not S.manual_required and not a.manual_steps
+    assert "deployed notebook" in a.summary
+    assert any(m.source == "typeProperties.sparkPool" and not m.preserved for m in a.property_mappings)  # still reported
+
+
 def test_mapping_data_flow_becomes_a_dataflow_scaffold_with_alternatives():
     df = act("Df", "ExecuteDataFlow", {"dataflow": {"referenceName": "MDF1", "type": "DataFlowReference",
                                                     "parameters": {"p": expr("@pipeline().parameters.x")}},

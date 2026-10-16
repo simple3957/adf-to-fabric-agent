@@ -139,7 +139,9 @@ def build_credential(cred: AzureCredentialRef | None, *, storage_ok: bool = Fals
         # Uses the identity of the current `az login` session. An optional tenant (when several tenants are
         # logged in) selects which one; the secret handling is owned entirely by the Azure CLI.
         tenant = _env(cred.tenant_id_env)
-        return (ai.AzureCliCredential(tenant_id=tenant) if tenant else ai.AzureCliCredential()), ""
+        kwargs = {k: v for k, v in (("tenant_id", tenant), ("subscription", (cred.subscription_id or "").strip() or None))
+                  if v}
+        return ai.AzureCliCredential(**kwargs), ""
 
     if auth == "client_secret":
         v = _need(auth, tenant_id_env=cred.tenant_id_env, client_id_env=cred.client_id_env,

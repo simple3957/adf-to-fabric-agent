@@ -103,6 +103,7 @@ def render_report(c: ProjectConversion) -> str:
                     where = f" - `{t.schedule_file}`" if t.schedule_file else ""
                     out.append(f"  - Fabric schedule: **{t.schedule_status}** ({len(t.schedules)} schedule(s)){where}")
                     out += [f"  - {n}" for n in t.schedule_notes]
+                out += [f"  - {d}" for d in t.details]
         if p.prerequisites:
             out += ["", "### Prerequisites for this pipeline", ""] + _prereq_lines(p.prerequisites)
 

@@ -27,12 +27,13 @@ from adf2fabric.connections.models import (
     Subscription,
     TestReport,
 )
+from adf2fabric import cloud
 from adf2fabric.connections.providers._login import LoginAttempt, LoginManager
 from adf2fabric.connections.redaction import redact
 from adf2fabric.connections.runner import CliResult, Runner, run_cli
 
-ARM = "https://management.azure.com"
-ARM_RESOURCE = "https://management.azure.com/"
+ARM = cloud.ARM_ENDPOINT
+ARM_RESOURCE = cloud.ARM_RESOURCE
 INSTALL_HINT = "Install the Azure CLI (https://aka.ms/installazurecli), then run `az login`."
 
 # Resource types the UI lists, with the label shown to the user.

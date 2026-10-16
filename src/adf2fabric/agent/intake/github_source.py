@@ -59,7 +59,9 @@ def build_manifest(
     """Inspect the fetched tree and describe it. Raises :class:`SourceSelectionError`."""
     sub = normalize_subdirectory(source_dir, subdirectory)
     root = source_dir / sub if sub else source_dir
-    loaded = sv.load_source(root)
+    root, loaded, extraction = sv.with_arm_extraction(root, sv.load_source(root))
+    if extraction is not None:  # an adf_publish source: from here on the generated Git layout is the source root
+        sub = root.relative_to(source_dir).as_posix()
 
     resolved: list[str] = []
     scope = None
@@ -79,7 +81,7 @@ def build_manifest(
         resolved = closure.paths
         scope = closure.keys
 
-    findings = sv.validate_source(loaded, scope=scope)
+    findings = sv.extraction_findings(extraction) + sv.validate_source(loaded, scope=scope)
     artifacts = sv.to_source_artifacts(loaded)
     return SourceManifest(
         project_id=project_id,

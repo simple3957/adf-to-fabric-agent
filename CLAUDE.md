@@ -1,0 +1,53 @@
+# CLAUDE.md
+
+ADF -> Microsoft Fabric migration agent. It reads an Azure Data Factory estate (Git repo, ZIP or live ARM), converts pipelines to Fabric Data Factory pipeline JSON, assesses compute, and deploys to a Fabric workspace. Deploy is a dry run unless `--apply` is passed.
+
+Start with [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the stage map and [docs/migration-capability.md](docs/migration-capability.md) for what is in and out of scope. Current gaps are in [docs/status-briefing.md](docs/status-briefing.md).
+
+## Run
+
+```bash
+pip install -e ".[api]"                 # plus dev extras for tests
+python -m pytest -q                     # ~4.5 min; offline, mocked Azure/Fabric
+python -m adf2fabric.api                # API on 127.0.0.1:8765
+streamlit run ui/app.py                 # UI on http://localhost:8501 (add ?demo=1 for the bundled sample)
+adf2fabric --help                       # CLI
+```
+
+CLI commands (`src/adf2fabric/cli.py`): `intake`, `consultation`, `discovery`, `discovery-adls`, `discovery-adls-paths`, `discovery-sql`, `discovery-sql-structural`, `discovery-adf`, `discovery-adf-semantic`, `convert`, `reconstruct`, `deploy`, `deploy-notebook`, `fetch-databricks-notebooks`, `run`, `compute-deploy`, `assess-compute`. Each takes `--project <name>`; state lives under `projects/<name>/` (see `project/store.py`).
+
+## Layout (`src/adf2fabric/`)
+
+| Path | Role |
+|---|---|
+| `cli.py`, `config.py` | Commands; loads `config/config.yaml` (default provider, branch, `projects_root`) |
+| `agent/intake/` | Source intake (GitHub/Git, ZIP, Azure), source validation, manifest |
+| `agent/consultation/` | Readiness gate |
+| `agent/discovery/` | Repository, ADF, semantic parser, ADLS, SQL discovery |
+| `agent/reconstruction/` | Incomplete-pipeline detection and proposals |
+| `agent/conversion/` | Activity handler registry (`handlers/`), expression converter, triggers, validation |
+| `agent/assessment/` | Compute and capacity assessment |
+| `agent/deployment/` | Fabric REST deploy (`fabric_deploy.py`, `compute_deploy.py`) |
+| `connections/` | Connector catalog, credential cards, Key Vault, integration-runtime analysis, providers (az, fab, git, zip) |
+| `connectivity/` | Real connectors: Azure, ADLS Gen2, SQL Server, Fabric |
+| `repository/` | Git providers, scanner, auth |
+| `api/` | FastAPI backend: routes, jobs, stages, demo mode |
+| `project/` | Persisted models and on-disk store; compute plan |
+| `ui/` (repo root) | Streamlit UI. No migration logic; it calls the API via `ui/api_client.py` |
+
+Per-agent operating instructions are in `skills/`. Per-stage references are in `docs/`.
+
+## Conventions and gotchas
+
+- Fabric has no datasets. They are inlined into each activity as `datasetSettings` (`conversion/handlers/_common.py`).
+- An unregistered activity type becomes an explicit blocker, never silently dropped. Keep it that way when adding handlers.
+- Deploy defaults to dry run. It refuses unbound placeholders (notebook, dataflow, Spark job ids) unless `--allow-unbound`.
+- Triggers are created disabled and never duplicated.
+- Secrets are referenced by env-var name, never stored in project files.
+- Connection auto-creation covers only SQL/Synapse, ADLS Gen2, Blob, REST and Databricks. Others get a verdict but are created by hand.
+- Before claiming a Fabric property is valid, check the Fabric pipeline docs. Do not guess properties.
+- Smoke-run new analysis stages on the real `projects/` sample, not only synthetic fixtures.
+- Tests are offline (local git repos, fake connectors and REST). No test touches a live Fabric workspace, so a fake can hide a rule only the live API enforces (the schedule `endDateTime` was found that way). Check a new Fabric write live, with something disabled and removable, before trusting it.
+- An `adf_publish` source (ARM template only) is extracted to `_adf_publish_extracted/` by `agent/intake/arm_template.py`; the clone itself is never modified. Intake with no `--branch` follows the repo's default branch.
+- ARM and Fabric hosts come from `src/adf2fabric/cloud.py` (`ADF2FABRIC_ARM_ENDPOINT`, `ADF2FABRIC_FABRIC_ENDPOINT`). Don't hardcode them in new code.
+- Do not commit real tenant, workspace or lakehouse GUIDs. The `fabric/` samples use placeholders; keep it that way.

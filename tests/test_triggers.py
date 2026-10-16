@@ -46,11 +46,11 @@ def test_minute_and_hour_intervals_become_cron_minutes():
 
 def test_daily_uses_the_start_time_or_explicit_hours_and_minutes():
     assert cfg(trig("Day"))[0] == {"type": "Daily", "times": ["08:30"], "startDateTime": "2099-01-01T08:30:00",
-                                   "localTimeZoneId": "UTC"}
+                                   "endDateTime": "2108-12-30T08:30:00", "localTimeZoneId": "UTC"}
     c = cfg(trig("Day", hours=[8, 20], minutes=[0, 30]))[0]
     assert c["times"] == ["08:00", "08:30", "20:00", "20:30"]
     assert cfg(trig("Day", 3))[0] == {"type": "Cron", "interval": 4320, "startDateTime": "2099-01-01T08:30:00",
-                                      "localTimeZoneId": "UTC"}
+                                      "endDateTime": "2108-12-30T08:30:00", "localTimeZoneId": "UTC"}
     assert build_schedules(trig("Day", 2, hours=[8])).status == "manual"  # Daily has no interval
 
 
@@ -165,13 +165,14 @@ def test_agent_writes_one_schedule_file_per_trigger_and_records_it(tmp_path):
     r = ConversionAgent(store).run(ConversionRequest(project_name="test-proj"))
     assert r.success
     note = next(t for p in r.conversion.pipelines for t in p.triggers if t.name == "TR_Nightly")
-    assert note.schedule_status == "generated" and note.schedule_file == "schedules/TR_Nightly.json"
+    assert note.schedule_status == "generated_with_differences" and note.schedule_file == "schedules/TR_Nightly.json"
     body = json.loads((store.conversion_dir(pid) / note.schedule_file).read_text(encoding="utf-8"))
     assert body["jobType"] == "Pipeline" and body["pipelines"] == ["PL_Main"]
     assert body["schedules"] == [{"enabled": True, "configuration": {
-        "type": "Daily", "times": ["08:30"], "startDateTime": "2099-01-01T08:30:00", "localTimeZoneId": "UTC"}}]
+        "type": "Daily", "times": ["08:30"], "startDateTime": "2099-01-01T08:30:00",
+        "endDateTime": "2108-12-30T08:30:00", "localTimeZoneId": "UTC"}}]
     text = (store.conversion_dir(pid) / "conversion-report.md").read_text(encoding="utf-8")
-    assert "Fabric schedule: **generated**" in text and "schedules/TR_Nightly.json" in text
+    assert "Fabric schedule: **generated_with_differences**" in text and "schedules/TR_Nightly.json" in text
 
 
 def test_a_trigger_that_cannot_map_writes_no_file_and_says_why(tmp_path):
@@ -189,10 +190,87 @@ def test_a_clean_estate_has_no_compatibility_section(tmp_path):
     assert "## Compatibility findings" not in render_report(r.conversion)
 
 
+# --- Fabric requires an end time (verified live 2026-10-16: "The EndDateTime field is required") --------------
+
+
+def test_every_generated_schedule_has_an_end_time_even_when_the_trigger_has_none():
+    r = build_schedules(trig("Day"))
+    assert r.schedules[0]["configuration"]["endDateTime"] == "2108-12-30T08:30:00"
+    assert r.status == "generated_with_differences"
+    assert any("no end time" in n and "ten years" in n for n in r.notes)
+
+
+def test_the_triggers_own_end_time_is_kept_and_is_not_a_difference():
+    r = build_schedules(trig("Day", end="2099-06-01T00:00:00Z"))
+    assert r.schedules[0]["configuration"]["endDateTime"] == "2099-06-01T00:00:00"
+    assert r.status == "generated" and not any("no end time" in n for n in r.notes)
+
+
+def test_a_start_in_the_past_still_gets_an_end_in_the_future():
+    cfg_ = build_schedules(trig("Day", start="2020-01-01T00:00:00Z")).schedules[0]["configuration"]
+    assert datetime.fromisoformat(cfg_["endDateTime"]) > datetime.now()
+
+
+def test_an_unreadable_end_time_is_manual_not_guessed():
+    r = build_schedules(trig("Day", end="not-a-date"))
+    assert r.status == "manual" and any("end time" in n for n in r.notes)
+
+
+# --- what a person needs to recreate by hand ---------------------------------------------------------------
+
+
+def _event_json():
+    return {"name": "TR_Nightly", "properties": {
+        "type": "BlobEventsTrigger", "runtimeState": "Started",
+        "pipelines": [{"pipelineReference": {"referenceName": "PL_Main", "type": "PipelineReference"},
+                       "parameters": {"fileName": "@triggerBody().fileName", "folder": "@triggerBody().folderPath",
+                                      "mode": "incremental", "retries": 3,
+                                      "key": "AccountKey=abcdefghijklmnop;EndpointSuffix=core.windows.net"}}],
+        "typeProperties": {"scope": "/subscriptions/s/resourceGroups/rg/providers/Microsoft.Storage/storageAccounts/acct",
+                           "events": ["Microsoft.Storage.BlobCreated"], "blobPathBeginsWith": "/landing/blobs/in/",
+                           "blobPathEndsWith": ".csv", "ignoreEmptyBlobs": True}}}
+
+
+def test_parser_keeps_event_settings_and_the_parameters_a_trigger_passes():
+    t = parser.parse_trigger(_event_json(), "trigger/T.json")
+    assert t.event.scope.endswith("storageAccounts/acct") and t.event.events == ["Microsoft.Storage.BlobCreated"]
+    assert (t.event.blob_path_begins_with, t.event.blob_path_ends_with, t.event.ignore_empty_blobs) == (
+        "/landing/blobs/in/", ".csv", True)
+    assert t.pipeline_parameters["PL_Main"] == {"fileName": "@triggerBody().fileName",
+                                                "folder": "@triggerBody().folderPath", "mode": "incremental",
+                                                "retries": "3"}  # the connection-string-shaped value is dropped
+
+
+def test_a_schedule_trigger_has_no_event_block():
+    assert parser.parse_trigger(_trigger_json(), "trigger/T.json").event is None
+
+
+def test_report_lists_event_settings_and_flags_trigger_scope_parameters(tmp_path):
+    store, pid = _project(tmp_path, _event_json())
+    r = ConversionAgent(store).run(ConversionRequest(project_name="test-proj"))
+    note = next(t for p in r.conversion.pipelines for t in p.triggers if t.name == "TR_Nightly")
+    assert note.schedule_status == "not_supported" and not note.schedules
+    text = " | ".join(note.details)
+    assert "storageAccounts/acct" in text and "Microsoft.Storage.BlobCreated" in text and ".csv" in text
+    assert "Parameter `mode` of `PL_Main` was set to `incremental`" in text
+    assert "pipeline().TriggerTime" in next(d for d in note.details if "`fileName`" in d)
+    assert "TriggerTime" not in next(d for d in note.details if "`mode`" in d)
+    assert "AccountKey" not in text
+    assert "Listens to:" in (store.conversion_dir(pid) / "conversion-report.md").read_text(encoding="utf-8")
+
+
+def test_a_schedule_trigger_without_parameters_has_nothing_to_re_enter(tmp_path):
+    store, pid = _project(tmp_path, _trigger_json())
+    r = ConversionAgent(store).run(ConversionRequest(project_name="test-proj"))
+    note = next(t for p in r.conversion.pipelines for t in p.triggers if t.name == "TR_Nightly")
+    assert note.details == [] and "re-enter" not in note.action
+
+
 # --- creating schedules in Fabric ---------------------------------------------------------------------------
 
 LS = f"/workspaces/{WS}/items/ITEM1/jobs/Pipeline/schedules"
-DAILY = {"type": "Daily", "times": ["08:30"], "startDateTime": "2099-01-01T08:30:00", "localTimeZoneId": "UTC"}
+DAILY = {"type": "Daily", "times": ["08:30"], "startDateTime": "2099-01-01T08:30:00",
+         "endDateTime": "2108-12-30T08:30:00", "localTimeZoneId": "UTC"}
 
 
 def sitem(config=DAILY, enabled=True, pipeline="PL_Main", trigger="TR"):

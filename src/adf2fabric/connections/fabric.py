@@ -17,12 +17,13 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional, Protocol
 
+from adf2fabric import cloud
 from adf2fabric.connections.models import Check, CheckStatus, ConnectionState, FabricWorkspace, TestReport
 from adf2fabric.connections.redaction import redact
 from adf2fabric.connections.runner import Runner, run_cli
 
-FABRIC_API = "https://api.fabric.microsoft.com/v1"
-FABRIC_SCOPE_RESOURCE = "https://api.fabric.microsoft.com"
+FABRIC_API = cloud.FABRIC_API
+FABRIC_SCOPE_RESOURCE = cloud.FABRIC_ENDPOINT
 
 
 @dataclass
