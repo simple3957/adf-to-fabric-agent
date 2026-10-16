@@ -143,6 +143,9 @@ class AzureCredentialRef(_Strict):
 
     auth: str = Field(description="One of the mechanisms in connectivity._azure.AUTH_MECHANISMS.")
     tenant_id_env: Optional[str] = None
+    # azure_cli only: a subscription id (not a secret). The Azure CLI then uses the signed-in account that owns it, so
+    # the factory can sit under one account and Fabric under another.
+    subscription_id: Optional[str] = None
     client_id_env: Optional[str] = None
     client_secret_env: Optional[str] = None
     certificate_path_env: Optional[str] = None  # client_certificate: path to a PEM/PFX file

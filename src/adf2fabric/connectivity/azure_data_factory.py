@@ -21,6 +21,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from adf2fabric import cloud
 from adf2fabric.connectivity._azure import CredentialUnavailable, build_credential
 from adf2fabric.connectivity.base import outcome
 from adf2fabric.project.models import (
@@ -33,7 +34,14 @@ from adf2fabric.project.models import (
 from adf2fabric.repository import authentication
 
 # The only token scope this connector requests, and the only request it makes.
-ARM_SCOPE = "https://management.azure.com/.default"
+ARM_SCOPE = cloud.ARM_SCOPE
+
+
+def _scoped(cred, subscription_id):
+    """``cred`` with the subscription set, so an azure_cli sign-in picks the account that owns the factory."""
+    if cred is not None and subscription_id and not cred.subscription_id:
+        return cred.model_copy(update={"subscription_id": subscription_id})
+    return cred
 API_VERSION = "2018-06-01"
 
 
@@ -87,7 +95,7 @@ class AdfConnector:
 
         # 3. Credential — authentication is owned entirely by the abstraction.
         try:
-            credential, secret = build_credential(access.credential)
+            credential, secret = build_credential(_scoped(access.credential, access.subscription_id))
         except CredentialUnavailable as exc:
             return outcome(AccessDomain.adf, exc.status, detail=exc.detail)
 
@@ -102,7 +110,7 @@ class AdfConnector:
 
         # 5. Exactly one ARM request: the factory-level GET. No child resources.
         url = (
-            f"https://management.azure.com/subscriptions/{access.subscription_id}"
+            f"{cloud.ARM_ENDPOINT}/subscriptions/{access.subscription_id}"
             f"/resourceGroups/{access.resource_group}"
             f"/providers/Microsoft.DataFactory/factories/{access.factory_name}"
             f"?api-version={API_VERSION}"

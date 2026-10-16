@@ -31,8 +31,10 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
 
-FABRIC_API = "https://api.fabric.microsoft.com/v1"
-FABRIC_SCOPE = "https://api.fabric.microsoft.com/.default"
+from adf2fabric import cloud
+
+FABRIC_API = cloud.FABRIC_API
+FABRIC_SCOPE = cloud.FABRIC_SCOPE
 _PLACEHOLDER = re.compile(r"<(connection|gateway|item|workspace-id|database)[:>][^\"]*>")
 _CHILD = re.compile(r"<item:pipeline:([^>\"]+)>")
 _GUID = re.compile(r"^[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$")
@@ -152,6 +154,22 @@ def _error_text(resp: Any) -> str:
         return (getattr(resp, "text", "") or "")[:200]
 
 
+def _operation_url(headers: Any) -> str:
+    """The long-running-operation address on the Fabric API host, or "" when there is none.
+
+    Fabric sometimes answers with a ``Location`` on a regional host (seen live on 2026-10-16: a notebook update returned
+    ``wabi-...-redirect.analysis.windows.net``). The bearer token only ever goes to the Fabric API host, so a foreign host
+    is never followed: the operation id (``x-ms-operation-id``, or the last part of ``Location``) is used with the
+    documented ``/v1/operations/{id}`` address instead.
+    """
+    location = headers.get("Location") or ""
+    if location.startswith(FABRIC_API + "/"):
+        return location
+    op_id = headers.get("x-ms-operation-id") or (
+        location.split("?", 1)[0].rstrip("/").rsplit("/", 1)[-1] if "/operations/" in location else "")
+    return f"{FABRIC_API}/operations/{op_id}" if _GUID.match(op_id or "") else ""
+
+
 class FabricClient:
     def __init__(self, token: str, session: Any = None, sleep: Callable[[float], None] = time.sleep):
         if session is None:
@@ -195,7 +213,9 @@ class FabricClient:
             return resp.json() if resp.content else {}
         if resp.status_code != 202:
             raise DeployError(f"{what} failed (HTTP {resp.status_code}): {_error_text(resp)}")
-        op = resp.headers.get("Location") or f"{FABRIC_API}/operations/{resp.headers.get('x-ms-operation-id', '')}"
+        op = _operation_url(resp.headers)
+        if not op:
+            raise DeployError(f"{what} was accepted but Fabric returned no usable operation address; check the workspace.")
         wait = float(resp.headers.get("Retry-After", 5))
         for _ in range(_MAX_POLLS):
             self._sleep(wait)

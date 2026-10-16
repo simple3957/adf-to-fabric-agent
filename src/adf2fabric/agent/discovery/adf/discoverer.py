@@ -33,6 +33,7 @@ from adf2fabric.agent.discovery.adf.models import (
     AdfDiscoveryResult,
 )
 from adf2fabric.connectivity._azure import CredentialUnavailable, build_credential
+from adf2fabric.connectivity.azure_data_factory import _scoped
 from adf2fabric.project.discovery import (
     AdfArtifact,
     AdfArtifactKind,
@@ -112,7 +113,7 @@ class AdfDiscoverer:
 
             # 2. Credential — owned entirely by the abstraction; secret only for redaction.
             try:
-                credential, secret = self.credential_builder(access.credential)
+                credential, secret = self.credential_builder(_scoped(access.credential, subscription))
             except CredentialUnavailable as exc:
                 status = _CRED_STATUS_MAP.get(
                     exc.status, AdfDiscoveryStatus.missing_config

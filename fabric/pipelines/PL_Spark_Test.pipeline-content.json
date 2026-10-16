@@ -29,7 +29,7 @@
           }
         },
         "externalReferences": {
-          "connection": "3f664c75-6e19-4d59-bfdb-96a80594ef28"
+          "connection": "<connection:Databricks_dbw_adf_migration>"
         }
       },
       {
@@ -67,7 +67,7 @@
           }
         },
         "externalReferences": {
-          "connection": "3f664c75-6e19-4d59-bfdb-96a80594ef28"
+          "connection": "<connection:Databricks_dbw_adf_migration>"
         }
       }
     ]

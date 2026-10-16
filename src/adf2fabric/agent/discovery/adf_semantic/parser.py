@@ -36,6 +36,7 @@ from adf2fabric.project.discovery import (
     AdfPipeline,
     AdfRecurrence,
     AdfSparkCompute,
+    AdfEventTrigger,
     AdfTrigger,
     AdfVariable,
     ExternalReference,
@@ -528,16 +529,53 @@ def parse_integration_runtime(data: dict, path: str) -> AdfIntegrationRuntime:
 # --- triggers ---------------------------------------------------------------
 
 
+def _trigger_parameters(raw: Any) -> dict[str, str]:
+    """Parameter name -> literal or expression text. A value that looks like secret material is left out."""
+    out: dict[str, str] = {}
+    if not isinstance(raw, dict):
+        return out
+    for key, value in raw.items():
+        if isinstance(value, dict) and value.get("type") == "Expression":
+            value = value.get("value")
+        text = safe_scalar(value)
+        if text is not None:
+            out[str(key)] = text
+    return out
+
+
+def _event_trigger(trigger_type: Any, tp: dict) -> Optional[AdfEventTrigger]:
+    if not isinstance(trigger_type, str) or "event" not in trigger_type.lower():
+        return None
+
+    def text(key: str) -> Optional[str]:
+        return tp.get(key) if isinstance(tp.get(key), str) else None
+
+    ignore = tp.get("ignoreEmptyBlobs")
+    return AdfEventTrigger(
+        scope=text("scope"),
+        events=[e for e in (tp.get("events") or []) if isinstance(e, str)],
+        blob_path_begins_with=text("blobPathBeginsWith"),
+        blob_path_ends_with=text("blobPathEndsWith"),
+        ignore_empty_blobs=ignore if isinstance(ignore, bool) else None,
+        subject_begins_with=text("subjectBeginsWith"),
+        subject_ends_with=text("subjectEndsWith"),
+    )
+
+
 def parse_trigger(data: dict, path: str) -> AdfTrigger:
     props = data.get("properties") if isinstance(data.get("properties"), dict) else {}
     tp = props.get("typeProperties") if isinstance(props.get("typeProperties"), dict) else {}
 
     pipeline_refs: list[str] = []
+    pipeline_parameters: dict[str, dict[str, str]] = {}
     for pl in props.get("pipelines", []) or []:
         if isinstance(pl, dict):
             name = _ref_name(pl.get("pipelineReference"))
             if name:
                 pipeline_refs.append(name)
+                params = _trigger_parameters(pl.get("parameters"))
+                if params:
+                    pipeline_parameters.setdefault(name, {}).update(params)
 
     recurrence = None
     rec = tp.get("recurrence")
@@ -571,6 +609,8 @@ def parse_trigger(data: dict, path: str) -> AdfTrigger:
             props.get("runtimeState") if isinstance(props.get("runtimeState"), str) else None
         ),
         pipeline_refs=sorted(set(pipeline_refs)),
+        pipeline_parameters=pipeline_parameters,
+        event=_event_trigger(props.get("type"), tp),
         recurrence=recurrence,
     )
 

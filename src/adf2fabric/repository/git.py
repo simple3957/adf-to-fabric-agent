@@ -58,6 +58,20 @@ def ls_remote(url: str, branch: str) -> bool:
     return bool(proc.stdout.strip())
 
 
+def default_branch(url: str) -> str | None:
+    """Return the branch the remote's ``HEAD`` points at (its default branch), or None if it cannot be told.
+
+    ``url`` may carry credentials. A detached or empty remote has no symbolic ``HEAD``, so the answer is None.
+    """
+    proc = _run(["ls-remote", "--symref", url, "HEAD"])
+    for line in proc.stdout.splitlines():
+        if line.startswith("ref:"):
+            ref = line[len("ref:"):].split("\t", 1)[0].strip()
+            if ref.startswith("refs/heads/"):
+                return ref[len("refs/heads/"):]
+    return None
+
+
 def clone(url: str, dest: Path, branch: str) -> None:
     """Clone ``branch`` from ``url`` into ``dest`` (single-branch, shallowish).
 

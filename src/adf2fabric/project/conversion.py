@@ -194,6 +194,7 @@ class TriggerNote(_Strict):
     schedules: list[dict[str, Any]] = Field(default_factory=list)  # Create Item Schedule bodies
     schedule_notes: list[str] = Field(default_factory=list)
     schedule_file: Optional[str] = None  # relative to conversion/, when a definition file was written
+    details: list[str] = Field(default_factory=list)  # what to recreate by hand: event settings, parameter values
 
 
 class PipelineConversion(_Strict):

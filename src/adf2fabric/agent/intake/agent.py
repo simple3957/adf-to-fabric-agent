@@ -79,10 +79,11 @@ class IntakeAgent:
             # --- Idempotent reuse: does a matching local source already exist? ---
             if git.is_git_repo(dest) and not request.refresh:
                 if self._matches(dest, clean_url, request.branch):
+                    branch = request.branch or git.current_branch(dest)  # no branch named: keep what is cloned
                     metadata = RepositoryMetadata(
                         provider=provider.name,
                         repository_url=clean_url,
-                        branch=request.branch,
+                        branch=branch,
                         commit_sha=git.head_sha(dest),
                         fetched_at=datetime.now(timezone.utc),
                         local_source_path=str(dest),
@@ -99,7 +100,7 @@ class IntakeAgent:
                         reused=True,
                         message=(
                             f"Reused existing local source for '{project_id}' "
-                            f"({request.branch} @ {metadata.commit_sha[:8]})."
+                            f"({branch} @ {metadata.commit_sha[:8]})."
                         ),
                     )
                 # Different repo/branch already occupies this project's source dir.
@@ -123,7 +124,7 @@ class IntakeAgent:
                 manifest=manifest,
                 reused=False,
                 message=(
-                    f"Fetched '{clean_url}' ({request.branch} @ "
+                    f"Fetched '{clean_url}' ({metadata.branch} @ "
                     f"{metadata.commit_sha[:8]}) into {dest}."
                 ),
             )
@@ -131,12 +132,12 @@ class IntakeAgent:
             message = authentication.redact(str(exc), token) if token else str(exc)
             return IntakeResult(success=False, error=message, message="Intake failed.")
 
-    def _matches(self, dest, clean_url: str, branch: str) -> bool:
-        """True if the existing local source is the requested repo + branch."""
+    def _matches(self, dest, clean_url: str, branch: str | None) -> bool:
+        """True if the existing local source is the requested repo + branch (any branch when none was named)."""
         try:
             return (
                 git.get_remote_url(dest) == clean_url
-                and git.current_branch(dest) == branch
+                and (not branch or git.current_branch(dest) == branch)
             )
         except git.GitError:
             return False

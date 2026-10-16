@@ -26,6 +26,7 @@ from adf2fabric.agent.discovery.repository.artifacts import (
     _ADF_DIR_KIND,
     _kind_from_type,
 )
+from adf2fabric.agent.intake.arm_template import EXTRACT_DIR, ArmExtraction, extract as extract_arm_template
 from adf2fabric.project.discovery import AdfArtifactKind
 from adf2fabric.project.source import (
     FindingSeverity,
@@ -88,7 +89,7 @@ def load_source(root: Path) -> LoadedSource:
     """Read every ADF-layout artifact under ``root`` (deterministic order)."""
     loaded = LoadedSource()
     for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = sorted(d for d in dirnames if d != ".git")
+        dirnames[:] = sorted(d for d in dirnames if d not in (".git", EXTRACT_DIR))  # the extract is derived, never source
         here = Path(dirpath)
         kind = _ADF_DIR_KIND.get(here.name.lower())
         for fname in sorted(filenames):
@@ -102,6 +103,44 @@ def load_source(root: Path) -> LoadedSource:
     loaded.artifacts.sort(key=lambda a: a.path)
     loaded.arm_templates.sort()
     return loaded
+
+
+def with_arm_extraction(
+    root: Path, loaded: LoadedSource
+) -> tuple[Path, LoadedSource, Optional[ArmExtraction]]:
+    """If ``loaded`` holds only an ``adf_publish`` ARM template, write its Git layout and load that instead.
+
+    Returns ``(root, loaded, None)`` unchanged when there is nothing to extract.
+    """
+    if loaded.artifacts or not loaded.arm_templates:
+        return root, loaded, None
+    extraction = extract_arm_template(root, loaded.arm_templates)
+    if extraction is None:
+        return root, loaded, None
+    return extraction.root, load_source(extraction.root), extraction
+
+
+def extraction_findings(extraction: Optional[ArmExtraction]) -> list[SourceFinding]:
+    """Say, in the manifest, that the artifacts came from an ARM template and what could not be carried over."""
+    if extraction is None:
+        return []
+    parts = [f"{n} {kind}" for kind, n in extraction.counts.items()]
+    message = f"Extracted {extraction.total} artifact(s) from the ARM template {extraction.template} ({', '.join(parts)})."
+    notes = []
+    if extraction.unresolved_expressions:
+        notes.append(f"{extraction.unresolved_expressions} ARM expression(s) stay unresolved, for example secure "
+                     "parameters, so connection details come from the linked service cards, not the template")
+    if extraction.skipped:
+        shown = ", ".join(extraction.skipped[:5]) + (" ..." if len(extraction.skipped) > 5 else "")
+        notes.append(f"skipped: {shown}")
+    if extraction.other_templates:
+        notes.append(f"other templates were not used: {', '.join(extraction.other_templates)}")
+    return [SourceFinding(
+        severity=FindingSeverity.warning,
+        code="arm_template_extracted",
+        message=message + (" " + "; ".join(notes) + "." if notes else ""),
+        action="Check the counts against the factory. Pick a collaboration-branch subdirectory if you need the original JSON.",
+    )]
 
 
 def _load_one(full: Path, rel: str, dir_kind: AdfArtifactKind) -> LoadedArtifact:
@@ -272,10 +311,10 @@ def validate_source(
                     message=(
                         "Only an ARM template export was found "
                         f"({', '.join(source.arm_templates)}); no pipeline/dataset/... "
-                        "folders. Pipelines inside an ARM template are not parsed yet."
+                        "folders, and the template holds no Data Factory resources that could be extracted."
                     ),
-                    action="Point Intake at the collaboration branch (or a subdirectory) "
-                    "that holds the ADF JSON folders, not the adf_publish branch.",
+                    action="Check the template is the factory's ARMTemplateForFactory.json, or point Intake at the "
+                    "collaboration branch (or a subdirectory) that holds the ADF JSON folders.",
                 )
             )
         else:

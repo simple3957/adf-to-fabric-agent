@@ -160,7 +160,7 @@ def intake(
             IntakeRequest(
                 project_name=project_name,
                 repository_url=repository_url,
-                branch=branch or config["default_branch"],
+                branch=branch or config["default_branch"],  # None: the repository's own default branch
                 provider=provider or config["default_provider"],
                 refresh=refresh,
                 subdirectory=subdirectory,
@@ -824,6 +824,9 @@ def reconstruct(project_name: str) -> None:
               help="Push even with <connection:...> placeholders left (bind them in Fabric afterwards).")
 @click.option("--schedules", "schedules", is_flag=True,
               help="Also create the Fabric schedules generated from ADF triggers (created DISABLED; never duplicated).")
+@click.option("--schedules-only", "schedules_only", is_flag=True,
+              help="Only create schedules, for pipelines that are already in the workspace. No pipeline is created or "
+                   "overwritten. Implies --schedules.")
 @click.option("--enable-schedules", "enable_schedules", is_flag=True,
               help="With --schedules: create schedules enabled when the ADF trigger was started. A start time in the "
                    "past makes Fabric run the pipeline immediately.")
@@ -831,10 +834,12 @@ def reconstruct(project_name: str) -> None:
 @click.option("--apply", "apply_", is_flag=True,
               help="Actually create/overwrite pipelines in Fabric. Without it this is a dry run (read-only).")
 def deploy_cmd(project_name: str, workspace_id: str, pipelines: tuple[str, ...], with_children: bool,
-               allow_unbound: bool, schedules: bool, enable_schedules: bool, apply_: bool, auth: str,
-               **auth_env: str | None) -> None:
+               allow_unbound: bool, schedules: bool, schedules_only: bool, enable_schedules: bool, apply_: bool,
+               auth: str, **auth_env: str | None) -> None:
     """Deploy converted pipelines to a Fabric workspace (dry run unless --apply)."""
     import json as _json
+
+    schedules = schedules or schedules_only
 
     from adf2fabric.agent.deployment.fabric_deploy import (
         DeployError, DeployItem, FabricClient, child_refs, deploy,
@@ -880,7 +885,7 @@ def deploy_cmd(project_name: str, workspace_id: str, pipelines: tuple[str, ...],
         credential, _ = build_credential(credential_from(auth, **auth_env))
         from adf2fabric.agent.deployment.fabric_deploy import FABRIC_SCOPE
         client = FabricClient(credential.get_token(FABRIC_SCOPE).token)
-        results = deploy(client, workspace_id, items, apply=apply_, allow_unbound=allow_unbound)
+        results = [] if schedules_only else deploy(client, workspace_id, items, apply=apply_, allow_unbound=allow_unbound)
     except (DeployError, CredentialUnavailable) as exc:
         click.secho(f"Deploy failed: {getattr(exc, 'detail', None) or exc}", fg="red", err=True)
         sys.exit(1)
@@ -888,8 +893,12 @@ def deploy_cmd(project_name: str, workspace_id: str, pipelines: tuple[str, ...],
         click.secho(f"Deploy failed: could not get a Fabric token or reach Fabric ({type(exc).__name__}). "
                     "Check `az login` with an account that has access to the workspace.", fg="red", err=True)
         sys.exit(1)
-    click.echo(("DEPLOY TO FABRIC" if apply_ else "DEPLOY TO FABRIC (dry run - nothing changed; add --apply)")
-               + f"  workspace: {workspace_id}")
+    if schedules_only:
+        click.echo(("SCHEDULES ONLY - no pipeline is created or changed" if apply_ else
+                    "SCHEDULES ONLY (dry run - nothing changed; add --apply)") + f"  workspace: {workspace_id}")
+    else:
+        click.echo(("DEPLOY TO FABRIC" if apply_ else "DEPLOY TO FABRIC (dry run - nothing changed; add --apply)")
+                   + f"  workspace: {workspace_id}")
     colours = {"create": "green", "update": "yellow", "refused": "red", "failed": "red"}
     for r in results:
         click.secho(f"  - {r.name}: {r.action}{f' [{r.item_id}]' if r.item_id else ''} - {r.detail}", fg=colours[r.action])
@@ -899,7 +908,8 @@ def deploy_cmd(project_name: str, workspace_id: str, pipelines: tuple[str, ...],
     if schedules:
         from adf2fabric.agent.deployment.fabric_deploy import ScheduleItem, deploy_schedules, list_pipelines_by_name
 
-        deployed = {r.name for r in results if r.action in ("create", "update")}
+        deployed = ({i.name for i in items} if schedules_only
+                    else {r.name for r in results if r.action in ("create", "update")})
         sched_items = [
             ScheduleItem(p.fabric_pipeline_name, t.name, body)
             for p in conversion.pipelines if p.fabric_pipeline_name in deployed
@@ -921,6 +931,209 @@ def deploy_cmd(project_name: str, workspace_id: str, pipelines: tuple[str, ...],
             failed_schedules = any(r.action == "failed" for r in sres)
     if failed_schedules or any(r.action in ("refused", "failed") for r in results):
         sys.exit(2)
+
+
+@cli.command(name="fetch-databricks-notebooks")
+@click.option("--project", "project_name", required=True, help="Project name (`discovery-adf-semantic` must have run).")
+@click.option("--linked-service", "linked_service", default=None,
+              help="Name of the ADF Databricks linked service in the project source; its 'domain' is the workspace URL.")
+@click.option("--workspace-url", "workspace_url", default=None, help="The workspace URL, if you do not name a linked service.")
+@click.option("--token-env", "token_env", default=None,
+              help="NAME of the env var holding a Databricks personal access token, or an Entra token for the Azure "
+                   "Databricks resource. Never the value itself. Without it, only the linked service is inspected.")
+@click.option("--path", "paths", multiple=True,
+              help="Fetch this notebook path instead of the ones the pipelines use. Repeatable.")
+def fetch_databricks_notebooks_cmd(project_name: str, linked_service: str | None, workspace_url: str | None,
+                                   token_env: str | None, paths: tuple[str, ...]) -> None:
+    """Export the Databricks notebooks the pipelines run (read-only), and report what Fabric will need changed."""
+    import json as _json
+    import os
+
+    from adf2fabric.agent.discovery.databricks_notebooks import (
+        DatabricksClient, DatabricksError, fetch_notebooks, inspect_linked_service, notebook_paths_in_pipelines,
+        results_to_json,
+    )
+
+    store = ProjectStore(projects_root(load_config()))
+    try:
+        info = None
+        if linked_service:
+            ls_file = next((p for p in (store.source_root(project_name) / "linkedService").glob("*.json")
+                            if p.stem.lower() == linked_service.lower()), None)
+            if ls_file is None:
+                raise DatabricksError("linked_service_not_found", f"No linked service '{linked_service}' in the project source.",
+                                      ["Check the name, or pass --workspace-url."])
+            info = inspect_linked_service(_json.loads(ls_file.read_text(encoding="utf-8-sig")))
+            click.echo("DATABRICKS LINKED SERVICE")
+            click.echo(f"  name:           {info.name or linked_service}")
+            click.echo(f"  workspace url:  {info.workspace_url or '(none)'}")
+            click.echo(f"  authentication: {info.authentication}")
+            click.echo(f"  cluster:        {info.cluster}" + (f" ({info.existing_cluster_id})" if info.existing_cluster_id else ""))
+            for n in info.notes:
+                click.echo(f"  note: {n}")
+        url = workspace_url or (info.workspace_url if info else None)
+        found: list[tuple[str, str, str]] = []
+        skipped: list[str] = []
+        if not paths:
+            found, skipped = notebook_paths_in_pipelines(store.load_adf_semantic_discovery(project_name).pipelines)
+        wanted = list(paths) or [p for _, _, p in found]
+        used_by: dict[str, list[str]] = {}
+        for pl, act, p in found:
+            used_by.setdefault(p, []).append(f"{pl}/{act}")
+        click.echo(f"NOTEBOOKS THE PIPELINES RUN: {len(set(wanted))}")
+        for p in sorted(set(wanted)):
+            click.echo(f"  - {p}" + (f"   used by {', '.join(sorted(used_by[p]))}" if p in used_by else ""))
+        for s in skipped:
+            click.secho(f"  skipped: {s}", fg="yellow")
+        if not token_env:
+            click.echo("No --token-env given: nothing was fetched.")
+            return
+        if not url:
+            raise DatabricksError("bad_workspace_url", "No workspace URL: pass --linked-service or --workspace-url.")
+        token = os.environ.get(token_env, "")
+        if not token:
+            raise DatabricksError("no_token", f"The environment variable {token_env} is empty or not set.")
+        out = store.project_dir(project_name) / "databricks" / "notebooks"
+        results = fetch_notebooks(DatabricksClient(url, token), wanted, out, used_by)
+    except DatabricksError as exc:
+        click.secho(f"Databricks retrieval failed [{exc.code}]: {exc}", fg="red", err=True)
+        for a in exc.actions:
+            click.echo(f"  - {a}", err=True)
+        sys.exit(1)
+    (out.parent / "retrieval.json").write_text(results_to_json(results, url), encoding="utf-8")
+    failed = False
+    for r in results:
+        if r.status == "ok":
+            counts = {s: sum(1 for f in r.findings if f.severity == s) for s in ("rewrite", "review")}
+            click.secho(f"  ok     {r.workspace_path} -> {r.local_file}  ({counts['rewrite']} rewrite, "
+                        f"{counts['review']} review)", fg="green")
+            for f in r.findings[:8]:
+                click.echo(f"           line {f.line}: [{f.severity}] {f.why}")
+            if len(r.findings) > 8:
+                click.echo(f"           ... {len(r.findings) - 8} more in retrieval.json")
+        else:
+            failed = True
+            click.secho(f"  FAILED {r.workspace_path} [{r.error['code']}]: {r.error['message']}", fg="red")
+            for a in r.error["actions"]:
+                click.echo(f"           - {a}")
+    click.echo(f"  notebooks: {out}")
+    click.echo(f"  record:    {out.parent / 'retrieval.json'}")
+    if failed:
+        sys.exit(2)
+
+
+@cli.command(name="deploy-notebook")
+@click.option("--workspace-id", "workspace_id", required=True, help="Target Fabric workspace id (GUID).")
+@click.option("--file", "file_path", required=True, type=click.Path(exists=True, dir_okay=False),
+              help="The notebook to deploy: a .py file (one code cell) or an .ipynb file.")
+@click.option("--name", "name", required=True, help="Display name of the notebook in Fabric. An existing notebook with "
+                                                    "this name has its content replaced; nothing is ever deleted.")
+@click.option("--source-name", "source_name", default=None,
+              help="The notebook name the ADF/Synapse activity refers to (default: --name). Used for the binding.")
+@click.option("--resolutions", "resolutions_path", type=click.Path(dir_okay=False), default=None,
+              help="With --apply: record the new notebook id (and the workspace id) in this resolutions file, so the next "
+                   "`convert --resolutions` binds the pipeline's notebook activity to it.")
+@azure_auth_options()
+@click.option("--apply", "apply_", is_flag=True,
+              help="Actually create or update the notebook. Without it this only checks (read-only).")
+def deploy_notebook_cmd(workspace_id: str, file_path: str, name: str, source_name: str | None,
+                        resolutions_path: str | None, apply_: bool, auth: str, **auth_env: str | None) -> None:
+    """Create or update a Fabric notebook from a local file (dry run unless --apply)."""
+    from pathlib import Path
+
+    from adf2fabric.agent.deployment.fabric_deploy import FABRIC_SCOPE, DeployError, FabricClient
+    from adf2fabric.agent.deployment.notebook_deploy import bind_resolutions, build_definition, deploy_notebook
+    from adf2fabric.connectivity._azure import CredentialUnavailable, build_credential
+
+    try:
+        definition = build_definition(Path(file_path))
+        credential, _ = build_credential(credential_from(auth, **auth_env))
+        client = FabricClient(credential.get_token(FABRIC_SCOPE).token)
+        result = deploy_notebook(client, workspace_id, name, definition, apply=apply_)
+        changes = (bind_resolutions(Path(resolutions_path), source_name or name, result.item_id, workspace_id)
+                   if apply_ and resolutions_path and result.item_id else [])
+    except (DeployError, CredentialUnavailable) as exc:
+        click.secho(f"Notebook deploy failed: {getattr(exc, 'detail', None) or exc}", fg="red", err=True)
+        sys.exit(1)
+    except Exception as exc:  # noqa: BLE001 - e.g. az login missing/expired; message carries no token
+        click.secho(f"Notebook deploy failed: could not get a Fabric token or reach Fabric ({type(exc).__name__}). "
+                    "Check `az login` with an account that has access to the workspace.", fg="red", err=True)
+        sys.exit(1)
+    click.echo(("DEPLOY NOTEBOOK" if apply_ else "DEPLOY NOTEBOOK (dry run - nothing changed; add --apply)")
+               + f"  workspace: {workspace_id}")
+    click.secho(f"  - {result.name}: {result.action}{f' [{result.item_id}]' if result.item_id else ''} - {result.detail}",
+                fg="green" if apply_ else None)
+    for c in changes:
+        click.echo(f"  resolutions: {c}")
+    if apply_ and not resolutions_path:
+        click.echo("  (pass --resolutions <file> to record this id for `convert`)")
+
+
+@cli.command(name="run")
+@click.option("--workspace-id", "workspace_id", required=True, help="Fabric workspace id (GUID) that holds the pipeline.")
+@click.option("--pipeline", "pipelines", multiple=True, required=True, help="Pipeline to run, by its Fabric name. Repeatable (run one after another).")
+@click.option("--param", "params", multiple=True, help="Pipeline parameter as name=value (the value may be JSON, e.g. an array). Repeatable.")
+@click.option("--no-wait", "no_wait", is_flag=True, help="Start the run and return without waiting for the result.")
+@click.option("--timeout", "timeout_seconds", type=int, default=1800, show_default=True, help="Seconds to wait for each run.")
+@azure_auth_options()
+@click.option("--apply", "apply_", is_flag=True,
+              help="Actually run the pipeline(s). A run executes the pipeline and uses capacity. Without it this only "
+                   "checks the pipelines exist (read-only).")
+def run_cmd(workspace_id: str, pipelines: tuple[str, ...], params: tuple[str, ...], no_wait: bool, timeout_seconds: int,
+            apply_: bool, auth: str, **auth_env: str | None) -> None:
+    """Run deployed pipelines on demand and report each result (dry run unless --apply)."""
+    import json as _json
+
+    from adf2fabric.agent.deployment.fabric_deploy import FABRIC_SCOPE, DeployError, FabricClient
+    from adf2fabric.agent.deployment.fabric_run import run_pipeline
+    from adf2fabric.connectivity._azure import CredentialUnavailable, build_credential
+
+    parameters: dict = {}
+    for item in params:
+        key, sep, raw = item.partition("=")
+        if not sep or not key.strip():
+            raise click.UsageError(f"--param must look like name=value, got '{item}'.")
+        try:
+            parameters[key.strip()] = _json.loads(raw)
+        except ValueError:
+            parameters[key.strip()] = raw
+    failed = False
+    try:
+        credential, _ = build_credential(credential_from(auth, **auth_env))
+        client = FabricClient(credential.get_token(FABRIC_SCOPE).token)
+        existing = client.list_pipelines(workspace_id)
+        missing = [n for n in pipelines if n.lower() not in existing]
+        if missing:
+            click.secho(f"Run failed: no pipeline named {', '.join(missing)} in the workspace. "
+                        f"Present: {', '.join(sorted(existing)) or '(none)'}.", fg="red", err=True)
+            sys.exit(1)
+        if not apply_:
+            click.echo(f"RUN IN FABRIC (dry run - nothing started; add --apply)  workspace: {workspace_id}")
+            for n in pipelines:
+                click.echo(f"  - {n}: would run" + (f" with {', '.join(sorted(parameters))}" if parameters else ""))
+            return
+        click.echo(f"RUN IN FABRIC  workspace: {workspace_id}")
+        for n in pipelines:
+            r = run_pipeline(client, workspace_id, n, parameters=parameters or None, wait=not no_wait,
+                             timeout_seconds=timeout_seconds)
+            colour = "green" if r.ok else ("yellow" if r.status in ("InProgress", "Timeout") else "red")
+            click.secho(f"  - {n}: {r.status} [job {r.job_id}]" + (f" - {r.detail}" if r.detail else ""), fg=colour)
+            if r.started or r.ended:
+                click.echo(f"      started {r.started or '?'}   ended {r.ended or '?'}")
+            if r.failure:
+                click.secho(f"      failure: {r.failure}", fg="red")
+            for a in r.activities:
+                click.echo(f"      {a.status or '?':<10} {a.name} ({a.type})" + (f" - {a.error}" if a.error else ""))
+            failed = failed or r.status not in ("Completed", "InProgress")
+    except (DeployError, CredentialUnavailable) as exc:
+        click.secho(f"Run failed: {getattr(exc, 'detail', None) or exc}", fg="red", err=True)
+        sys.exit(1)
+    except Exception as exc:  # noqa: BLE001 - e.g. az login missing/expired; message carries no token
+        click.secho(f"Run failed: could not get a Fabric token or reach Fabric ({type(exc).__name__}). "
+                    "Check `az login` with an account that has access to the workspace.", fg="red", err=True)
+        sys.exit(1)
+    if failed:
+        sys.exit(1)
 
 
 @cli.command(name="compute-deploy")

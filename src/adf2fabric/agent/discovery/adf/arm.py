@@ -18,6 +18,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from adf2fabric import cloud
 from adf2fabric.connectivity.azure_data_factory import API_VERSION, ARM_SCOPE
 from adf2fabric.project.discovery import AdfArtifact, AdfArtifactKind
 
@@ -75,7 +76,7 @@ def default_transport() -> Any:
 def factory_base_url(subscription_id: str, resource_group: str, factory_name: str) -> str:
     """The ARM resource id (URL) of the factory. Child collections hang off this."""
     return (
-        f"https://management.azure.com/subscriptions/{subscription_id}"
+        f"{cloud.ARM_ENDPOINT}/subscriptions/{subscription_id}"
         f"/resourceGroups/{resource_group}"
         f"/providers/Microsoft.DataFactory/factories/{factory_name}"
     )

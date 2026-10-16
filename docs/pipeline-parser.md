@@ -1,6 +1,6 @@
 # Pipeline parser (activity-level semantic representation)
 
-`adf_semantic/parser_pipelines.py` turns an ADF pipeline definition into the semantic
+`src/adf2fabric/agent/discovery/adf_semantic/parser_pipelines.py` turns an ADF pipeline definition into the semantic
 representation a deterministic converter consumes. It **describes** what the pipeline does;
 it contains no Fabric knowledge and uses no LLM — every field is a fixed function of the JSON.
 

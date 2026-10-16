@@ -17,10 +17,11 @@ from adf2fabric.project.models import (
     FabricAccess,
     Project,
 )
+from adf2fabric import cloud
 from adf2fabric.repository import authentication
 
-FABRIC_SCOPE = "https://api.fabric.microsoft.com/.default"
-FABRIC_API = "https://api.fabric.microsoft.com/v1"
+FABRIC_SCOPE = cloud.FABRIC_SCOPE
+FABRIC_API = cloud.FABRIC_API
 
 
 class FabricConnector:

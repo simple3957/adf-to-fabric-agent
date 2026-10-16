@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Optional
 
+from adf2fabric import cloud
 from adf2fabric.api.jobs import JobRegistry
 from adf2fabric.config import load_config, projects_root
 from adf2fabric.connections.fabric import RestFabricApi, FabricService
@@ -25,7 +26,7 @@ from adf2fabric.connections.service import ConnectionService
 from adf2fabric.connections.testing import ConnectorTester
 from adf2fabric.project.store import ProjectStore
 
-FABRIC_RESOURCE = "https://api.fabric.microsoft.com"
+FABRIC_RESOURCE = cloud.FABRIC_ENDPOINT
 MODES = ("live", "demo")
 
 

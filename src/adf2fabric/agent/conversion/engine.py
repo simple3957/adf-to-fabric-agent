@@ -490,5 +490,39 @@ def _trigger_note(t: AdfTrigger) -> TriggerNote:
     return TriggerNote(
         name=t.name, trigger_type=t.type, runtime_state=t.runtime_state, pipelines=sorted(t.pipeline_refs),
         summary=f"{t.type or 'Trigger'} {when}".strip() + (f"; state {t.runtime_state}" if t.runtime_state else ""),
-        action=action + " Trigger-to-pipeline parameter mappings are not part of the semantic record; re-enter them.",
+        action=action, details=_trigger_details(t),
         schedule_status=sched.status, schedules=sched.schedules, schedule_notes=sched.notes)
+
+
+_TRIGGER_SCOPE_VALUES = ("@trigger(", "@triggerbody(", "@triggeroutputs(")
+
+
+def _shown(value: str, limit: int = 120) -> str:
+    return value if len(value) <= limit else value[:limit] + "..."
+
+
+def _trigger_details(t: AdfTrigger) -> list[str]:
+    """What a person needs to recreate this trigger in Fabric: event settings and the parameters it passed."""
+    out: list[str] = []
+    e = t.event
+    if e is not None:
+        if e.scope:
+            out.append(f"Listens to: `{e.scope}`")
+        if e.events:
+            out.append("Events: " + ", ".join(e.events))
+        for label, value in (("Blob path begins with", e.blob_path_begins_with),
+                             ("Blob path ends with", e.blob_path_ends_with),
+                             ("Subject begins with", e.subject_begins_with),
+                             ("Subject ends with", e.subject_ends_with)):
+            if value:
+                out.append(f"{label}: `{value}`")
+        if e.ignore_empty_blobs is not None:
+            out.append(f"Ignore empty blobs: {e.ignore_empty_blobs}")
+    for pipeline, params in sorted(t.pipeline_parameters.items()):
+        for name, value in sorted(params.items()):
+            line = f"Parameter `{name}` of `{pipeline}` was set to `{_shown(value)}`"
+            if value.lower().startswith(_TRIGGER_SCOPE_VALUES):
+                line += (". Trigger-scope expressions have no Fabric equivalent; Fabric offers the system variables "
+                         "pipeline().TriggerTime and pipeline().TriggerName, which may cover it")
+            out.append(line)
+    return out

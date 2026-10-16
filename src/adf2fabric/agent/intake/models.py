@@ -19,7 +19,9 @@ class IntakeRequest(BaseModel):
 
     project_name: str = Field(description="Human-readable name for the engagement.")
     repository_url: str = Field(description="Source repository URL.")
-    branch: str = Field(default="main", description="Branch to fetch.")
+    branch: Optional[str] = Field(
+        default=None, description="Branch to fetch. Empty means the repository's own default branch."
+    )
     provider: str = Field(default="github", description="Source provider.")
     refresh: bool = Field(
         default=False,

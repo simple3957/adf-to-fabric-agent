@@ -734,3 +734,24 @@ def test_cdc_is_not_requested_when_the_artifact_kinds_are_restricted(store, slee
     wanted = FakeArm(ok_routes())
     run_azure(store, wanted, sleeps, artifact_kinds=["pipeline", "changeDataCapture"])
     assert any(u.split("?")[0].endswith("/adfcdcs") for u in wanted.gets)
+
+
+def test_the_token_is_requested_for_the_subscription_that_was_named(store, tmp_path):
+    seen = []
+
+    def provider(cred):
+        seen.append(cred.subscription_id)
+        return TOKEN, ""
+
+    sleeps = []
+    azure_agent(store, FakeArm(ok_routes()), sleeps, token_provider=provider).run_azure(azure_request())
+    assert seen == [SUB]  # so a different signed-in account than the default can be used
+
+
+def test_an_explicit_credential_subscription_is_not_overridden(store):
+    from adf2fabric.project.models import AzureCredentialRef
+
+    seen = []
+    azure_agent(store, FakeArm(ok_routes()), [], token_provider=lambda c: (seen.append(c.subscription_id) or TOKEN, "")
+                ).run_azure(azure_request(credential=AzureCredentialRef(auth="azure_cli", subscription_id="mine")))
+    assert seen == ["mine"]

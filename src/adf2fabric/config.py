@@ -15,7 +15,7 @@ DEFAULT_CONFIG_PATH = REPO_ROOT / "config" / "config.yaml"
 
 _DEFAULTS = {
     "default_provider": "github",
-    "default_branch": "main",
+    "default_branch": None,  # None: use the repository's own default branch
     "projects_root": "projects",
     "github_token_env": "GITHUB_TOKEN",
 }

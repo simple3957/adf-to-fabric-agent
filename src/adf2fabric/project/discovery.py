@@ -841,12 +841,27 @@ class AdfLinkedService(_Strict):
     parameters: list["AdfParameter"] = Field(default_factory=list)  # the linked service's own parameters
 
 
+class AdfEventTrigger(_Strict):
+    """What an event trigger listens to, so someone can recreate it as a Fabric Activator rule. Descriptive only."""
+
+    scope: Optional[str] = None  # storage account or Event Grid topic resource id
+    events: list[str] = Field(default_factory=list)  # e.g. Microsoft.Storage.BlobCreated
+    blob_path_begins_with: Optional[str] = None
+    blob_path_ends_with: Optional[str] = None
+    ignore_empty_blobs: Optional[bool] = None
+    subject_begins_with: Optional[str] = None  # custom events
+    subject_ends_with: Optional[str] = None
+
+
 class AdfTrigger(_Strict):
     name: str
     path: str
     type: Optional[str] = None
     runtime_state: Optional[str] = None
     pipeline_refs: list[str] = Field(default_factory=list)
+    # pipeline name -> {parameter: value or expression text}, as the trigger passes them (secret-shaped values dropped).
+    pipeline_parameters: dict[str, dict[str, str]] = Field(default_factory=dict)
+    event: Optional[AdfEventTrigger] = None
     recurrence: Optional[AdfRecurrence] = None
     parse_status: DiscoveryStatus = DiscoveryStatus.discovered
     note: str = ""

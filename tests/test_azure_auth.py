@@ -48,6 +48,13 @@ def test_mechanism_sets_are_consistent():
     assert not set(ENTRA_MECHANISMS) & set(STORAGE_ONLY_MECHANISMS)
 
 
+def test_azure_cli_can_be_scoped_to_the_account_that_owns_a_subscription(fake_identity):
+    # ADF under one signed-in account and Fabric under another: the subscription picks the account.
+    scoped, _ = build_credential(ref("azure_cli", subscription_id=" sub-1 "))
+    assert scoped.kwargs == {"subscription": "sub-1"}
+    assert build_credential(ref("azure_cli", subscription_id="  "))[0].kwargs == {}
+
+
 def test_azure_cli_with_and_without_tenant(fake_identity):
     plain, _ = build_credential(ref("azure_cli"))
     assert plain.kwargs == {}

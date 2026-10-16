@@ -2,7 +2,9 @@
 # CLI flags override the provider/branch defaults below.
 
 default_provider: github
-default_branch: main
+# Leave default_branch unset to use each repository's own default branch.
+# Set it (for example `default_branch: adf_publish`) to override that for every intake.
+# default_branch: main
 
 # Where cloned source repositories and project records are stored.
 # Relative paths are resolved against the repository root.
