@@ -36,6 +36,28 @@ COPY_BILLING_GRANULARITY_SECONDS = 60
 # Fabric documents custom Copy throughput values of 4-256 (the converter warns on lower DIUs).
 ITO_MINIMUM = 4
 
+# ---- Azure Databricks (external compute: billed by Databricks + Azure VMs, not Fabric CU) ----------------------------
+# Prices from the Azure Retail Prices API, region centralindia, Linux pay-as-you-go, read on DATABRICKS_VERIFIED_ON.
+DATABRICKS_VERIFIED_ON = "2026-10-16"
+AZURE_RETAIL_PRICES = "https://prices.azure.com/api/retail/prices"
+DATABRICKS_REGION = "centralindia"
+# Price per DBU-hour by (tier, workload). Job clusters started by ADF/Fabric activities are "Jobs Compute".
+DATABRICKS_DBU_PRICE = {
+    ("premium", "jobs"): {"USD": 0.30, "INR": 28.7968},
+    ("premium", "all_purpose"): {"USD": 0.55, "INR": 52.7942},
+}
+# VM price per node-hour (Linux).
+DATABRICKS_VM_PRICE = {
+    "Standard_D4ds_v5": {"USD": 0.244, "INR": 23.4214},
+}
+# DBUs each node consumes per hour. ASSUMED until confirmed from the Azure bill (usage appears within ~24 h):
+# not in the retail price API, and the Databricks pricing page could not be read automatically.
+DATABRICKS_DBU_PER_NODE_HOUR = {
+    "Standard_D4ds_v5": 1.0,
+}
+DATABRICKS_DBU_RATE_CONFIRMED = False
+DATABRICKS_DBU_RATE_SOURCE = ""  # where the confirmation came from, once confirmed
+
 SOURCES = [
     {"what": "Pipeline data movement and orchestration rates", "url": PIPELINES_PRICING, "verified_on": VERIFIED_ON},
     {"what": "Spark vCores per CU and node sizes", "url": SPARK_COMPUTE, "verified_on": VERIFIED_ON},
@@ -44,4 +66,6 @@ SOURCES = [
     {"what": "Copy billed per started minute (observed in ADF and Fabric activity-run billingReference)",
      "url": "measured: PL_Compute_Test run output in adf-data-migration-7593 and adf-migration-test", "verified_on": VERIFIED_ON},
     {"what": "24-hour smoothing of background operations; F SKU CU", "url": THROTTLING, "verified_on": VERIFIED_ON},
+    {"what": "Azure Databricks DBU prices and VM prices (Central India, Linux, pay-as-you-go)",
+     "url": AZURE_RETAIL_PRICES, "verified_on": DATABRICKS_VERIFIED_ON},
 ]

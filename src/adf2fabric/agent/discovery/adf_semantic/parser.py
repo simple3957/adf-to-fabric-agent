@@ -379,6 +379,18 @@ def _connection_parts(tp: dict) -> AdfLinkedConnection:
         parameterized_fields=dynamic)
 
 
+# Non-secret compute settings of an Azure Databricks linked service (cluster size), kept for the compute assessment.
+_DATABRICKS_COMPUTE_KEYS = ("newClusterNodeType", "newClusterDriverNodeType", "newClusterNumOfWorker",
+                            "newClusterVersion", "existingClusterId", "instancePoolId", "policyId",
+                            "workspaceResourceId", "domain")
+
+
+def _compute_settings(kind: Optional[str], tp: dict) -> dict:
+    if kind != "AzureDatabricks":
+        return {}
+    return {k: v for k in _DATABRICKS_COMPUTE_KEYS if (v := safe_scalar(tp.get(k))) is not None}
+
+
 def parse_linked_service(data: dict, path: str) -> AdfLinkedService:
     props = data.get("properties") if isinstance(data.get("properties"), dict) else {}
     tp = props.get("typeProperties") if isinstance(props.get("typeProperties"), dict) else {}
@@ -407,6 +419,7 @@ def parse_linked_service(data: dict, path: str) -> AdfLinkedService:
         parameters=_parse_param_map(props.get("parameters")),
         connector_version=(str(tp.get("version")).strip() if isinstance(tp.get("version"), (str, int, float))
                            and not isinstance(tp.get("version"), bool) and str(tp.get("version")).strip() else None),
+        compute=_compute_settings(props.get("type") if isinstance(props.get("type"), str) else None, tp),
     )
 
 

@@ -915,23 +915,52 @@ def deploy_cmd(project_name: str, workspace_id: str, pipelines: tuple[str, ...],
 @click.option("--skip-stopped-triggers", is_flag=True, help="Ignore triggers that are Stopped in ADF.")
 @click.option("--history/--no-history", "use_history", default=False,
               help="Read measured durations and DIUs from the factory's run history (read-only ARM calls).")
+@click.option("--live", "use_live", is_flag=True,
+              help="Read the pipeline definitions from the live factory instead of the stored Git record.")
+@click.option("--prices", "price_mode", type=click.Choice(["live", "recorded"]), default="live", show_default=True,
+              help="Databricks prices: live from the Azure Retail Prices API, or the table recorded in compute_rates.")
 @click.option("--subscription", "subscription_id", default=None, help="Azure subscription id (for --history).")
 @click.option("--resource-group", "resource_group", default=None, help="Resource group of the factory (for --history).")
 @click.option("--factory", "factory_name", default=None, help="Data Factory name (for --history).")
 @click.option("--days", type=int, default=30, show_default=True, help="How far back to read run history.")
 @azure_auth_options()
 def assess_compute(project_name: str, runs_per_day: float, skip_stopped_triggers: bool, use_history: bool,
-                   subscription_id: str | None, resource_group: str | None, factory_name: str | None, days: int,
-                   auth: str, **auth_env: str | None) -> None:
+                   use_live: bool, price_mode: str, subscription_id: str | None, resource_group: str | None,
+                   factory_name: str | None, days: int, auth: str, **auth_env: str | None) -> None:
     """Estimate the Fabric compute (CU) the pipelines need and the capacity size that fits (deterministic)."""
     from adf2fabric.agent.assessment.agent import ComputeAgent, ComputeRequest
 
     store = ProjectStore(projects_root(load_config()))
-    fetcher = None
+    fetcher = loader = None
+    if (use_history or use_live) and not (subscription_id and resource_group and factory_name):
+        click.secho("--history and --live need --subscription, --resource-group and --factory.", fg="red", err=True)
+        sys.exit(2)
+    prices = workspace = None
+    if price_mode == "live":
+        import requests
+
+        from adf2fabric.agent.assessment.azure_prices import LivePrices
+
+        prices = LivePrices(requests)
+    if subscription_id:
+        def workspace(resource_id: str):
+            import requests
+
+            from adf2fabric.agent.assessment.azure_prices import workspace_info
+            from adf2fabric.connections.providers.azure_cli import AzureCliProvider
+
+            return workspace_info(requests, AzureCliProvider().token(subscription=subscription_id), resource_id)
+    if use_live:
+        def loader():
+            import requests
+
+            from adf2fabric.agent.warehouse.adf_sources import fetch_live, to_semantic
+            from adf2fabric.connections.providers.azure_cli import AzureCliProvider
+
+            raw = fetch_live(requests, subscription_id, resource_group, factory_name,
+                             AzureCliProvider().token(subscription=subscription_id))
+            return to_semantic(raw, project_name, f"live:{factory_name}")
     if use_history:
-        if not (subscription_id and resource_group and factory_name):
-            click.secho("--history needs --subscription, --resource-group and --factory.", fg="red", err=True)
-            sys.exit(2)
         from adf2fabric.agent.assessment import adf_history
         from adf2fabric.agent.discovery.adf.arm import ARM_SCOPE, default_transport
         from adf2fabric.connectivity._azure import CredentialUnavailable, build_credential
@@ -960,7 +989,8 @@ def assess_compute(project_name: str, runs_per_day: float, skip_stopped_triggers
 
     result = ComputeAgent(store).run(ComputeRequest(project_name=project_name, default_runs_per_day=runs_per_day,
                                                     include_stopped_triggers=not skip_stopped_triggers),
-                                     history_fetcher=fetcher, log=lambda m: click.echo(f"  {m}"))
+                                     history_fetcher=fetcher, log=lambda m: click.echo(f"  {m}"),
+                                     definitions_loader=loader, prices=prices, databricks_workspace=workspace)
     if not result.success:
         click.secho(f"Compute assessment failed: {result.error}", fg="red", err=True)
         sys.exit(1)
@@ -972,6 +1002,108 @@ def assess_compute(project_name: str, runs_per_day: float, skip_stopped_triggers
     for p in a.pipelines:
         click.echo(f"    {p.pipeline:<34} {p.cu_seconds_per_run:>10g} CU-s/run  x {p.runs_per_day:g}/day")
     click.echo(f"  report: {result.report_markdown}")
+
+
+@cli.command(name="warehouse-assess")
+@click.option("--config", "config_path", required=True, type=click.Path(exists=True, dir_okay=False),
+              help="Warehouse migration config (YAML; see config/warehouse-migration.example.yaml).")
+@click.option("--no-target", is_flag=True, help="Skip the read-only inspection of the target Warehouse.")
+def warehouse_assess(config_path: str, no_target: bool) -> None:
+    """Discover a source warehouse, map ADF usage, plan the Fabric Warehouse objects (dry-run DDL) and validate
+    an existing target. Read-only: nothing is deployed or loaded."""
+    from pathlib import Path
+
+    from adf2fabric.agent.warehouse import agent as wh_agent
+    from adf2fabric.agent.warehouse.config import load as load_wh_config
+
+    try:
+        cfg = load_wh_config(Path(config_path))
+    except ValueError as exc:
+        click.secho(f"Invalid config: {exc}", fg="red", err=True)
+        sys.exit(2)
+    root = projects_root(load_config())
+    out = root / cfg.project / "warehouse"
+    try:
+        rep = wh_agent.run(cfg, ProjectStore(root), out, inspect_target=not no_target, log=lambda m: click.echo(f"  {m}"))
+    except Exception as exc:  # noqa: BLE001 - surface any failure as a CLI error
+        click.secho(f"Warehouse assessment failed: {exc}", fg="red", err=True)
+        sys.exit(1)
+    click.secho("WAREHOUSE ASSESSMENT", fg="green")
+    for k, v in rep.catalog_summary.items():
+        click.echo(f"  {k:<32} {v}")
+    for e in rep.manifest:
+        click.echo(f"    {e.source_key:<42} {e.kind.value:<15} {e.adf_usage:<10} {e.action:<7} {e.validation}")
+    click.echo(f"  report: {out / 'report.md'}")
+
+
+@cli.command(name="warehouse-migrate")
+@click.option("--config", "config_path", required=True, type=click.Path(exists=True, dir_okay=False),
+              help="Warehouse migration config (see config/warehouse-migration.example.yaml).")
+@click.option("--apply", "apply_", is_flag=True,
+              help="Create and load in the target. Without it, everything is discovered and planned but nothing is written.")
+@click.option("--create-warehouse", is_flag=True,
+              help="Create the target Warehouse if it does not exist (also needs target.create_if_missing: true).")
+@click.option("--no-load", is_flag=True, help="Create objects only; do not load data.")
+def warehouse_migrate(config_path: str, apply_: bool, create_warehouse: bool, no_load: bool) -> None:
+    """Migrate a source warehouse into a Fabric Warehouse: discover the source, read ADF (live and Git), keep the
+    objects ADF relates to (plus their dependencies), create and load them, validate, and report."""
+    from pathlib import Path
+
+    from adf2fabric.agent.warehouse import agent as wh_agent
+    from adf2fabric.agent.warehouse.config import load as load_wh_config
+
+    try:
+        cfg = load_wh_config(Path(config_path))
+    except ValueError as exc:
+        click.secho(f"Invalid config: {exc}", fg="red", err=True)
+        sys.exit(2)
+    root = projects_root(load_config())
+    out = root / cfg.project / "warehouse"
+    try:
+        rep = wh_agent.migrate(cfg, ProjectStore(root), out, apply=apply_, create_warehouse=create_warehouse,
+                               load=not no_load, log=lambda m: click.echo(f"  {m}"))
+    except Exception as exc:  # noqa: BLE001 - surface any failure as a CLI error
+        click.secho(f"Warehouse migration failed: {exc}", fg="red", err=True)
+        sys.exit(1)
+    status = (rep.deploy or {}).get("status", "planned")
+    click.secho(f"WAREHOUSE MIGRATION ({'applied' if apply_ else 'dry run'}): {status}",
+                fg={"succeeded": "green", "planned": "yellow"}.get(status, "red"))
+    for e in rep.manifest:
+        click.echo(f"    {e.source_key:<42} {e.kind.value:<15} {e.adf_usage:<10} {e.action:<8} {e.validation}")
+    click.echo(f"  report: {out / 'report.md'}")
+    if status in ("refused", "failed"):
+        sys.exit(2)
+
+
+@cli.command(name="warehouse-repoint")
+@click.option("--config", "config_path", required=True, type=click.Path(exists=True, dir_okay=False),
+              help="Warehouse migration config with a repoint section.")
+@click.option("--apply", "apply_", is_flag=True, help="Update the pipelines. Without it, only the changes are shown.")
+def warehouse_repoint(config_path: str, apply_: bool) -> None:
+    """Point Fabric pipelines that read the old source warehouse at the migrated Fabric Warehouse.
+    Each pipeline is backed up before it is changed."""
+    from pathlib import Path
+
+    from adf2fabric.agent.warehouse import agent as wh_agent
+    from adf2fabric.agent.warehouse.config import load as load_wh_config
+
+    try:
+        cfg = load_wh_config(Path(config_path))
+    except ValueError as exc:
+        click.secho(f"Invalid config: {exc}", fg="red", err=True)
+        sys.exit(2)
+    out = projects_root(load_config()) / cfg.project / "warehouse" / "repoint"
+    try:
+        res = wh_agent.repoint_pipelines(cfg, out, apply=apply_, log=lambda m: click.echo(f"  {m}"))
+    except Exception as exc:  # noqa: BLE001 - surface any failure as a CLI error
+        click.secho(f"Repoint failed: {exc}", fg="red", err=True)
+        sys.exit(1)
+    click.secho(f"REPOINT ({'applied' if apply_ else 'dry run'}) -> {res['warehouse']}", fg="green")
+    for name, e in res["pipelines"].items():
+        click.echo(f"    {name:<34} {e['status']}")
+    if any(e["status"] == "not found" for e in res["pipelines"].values()):
+        sys.exit(2)
+
 
 if __name__ == "__main__":
     cli()

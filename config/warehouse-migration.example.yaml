@@ -1,0 +1,43 @@
+# Warehouse migration config (example). Copy it under projects/<name>/ (git-ignored) and fill in real values.
+# Used by: adf2fabric warehouse-assess (read-only) and adf2fabric warehouse-migrate (dry run unless --apply).
+# Names and paths only: secret-like keys (password, secret, token, connection string) are rejected.
+project: my-warehouse-migration          # output goes to projects/<project>/warehouse/
+
+source:
+  adapter: synapse_offline               # registered adapters: synapse_offline (the only one today)
+  database: mydedicatedpool              # flags ADF linked services that point at another database
+  options:
+    scripts_dir: C:/path/to/synapse-repo/sqlscript     # Synapse Git sqlscript/*.json (authored DDL)
+    parquet_dir: C:/path/to/parquet-export             # <schema>_<object>.parquet files (row counts + load source)
+    export_label: parquet export YYYY-MM-DD            # shown next to every exported row count
+    pools: []                                          # restrict to these Synapse pool names (empty = all dedicated)
+
+adf:                                     # what ADF uses decides the scope; set one or both
+  project: my-adf-project                # stored ADF record from the Git repo (adf2fabric discovery-adf-semantic)
+  live:                                  # the live factory, read-only (preferred when both are set)
+    subscription_id: 00000000-0000-0000-0000-000000000000
+    resource_group: my-resource-group
+    factory: my-data-factory
+
+scope:
+  mode: adf_related                      # adf_related (ADF-used objects + their dependencies) | all
+  include: []                            # schema.object; empty = no extra filter
+  exclude: []
+  schema_map: {}                         # source schema -> target schema
+
+target:
+  tenant_id: 00000000-0000-0000-0000-000000000000   # tenant of the Fabric workspace (guest access works)
+  workspace: MyWorkspace
+  warehouse: MyWarehouse
+  sql_endpoint: xxxxxxxx.datawarehouse.fabric.microsoft.com   # only needed by warehouse-assess
+  read_only: true                        # set to false (after approval) for warehouse-migrate --apply
+  create_if_missing: false               # true + --create-warehouse to create a missing Warehouse
+  # collation: Latin1_General_100_CI_AS_KS_WS_SC_UTF8   # for a NEW Warehouse; Fabric's default is case-sensitive
+
+loading:
+  method: copy_into                      # copy_into | insert_from_parquet
+  # COPY INTO source per table; {file} = <schema>_<object>.parquet. A OneLake path through a Lakehouse shortcut works:
+  source_url_template: https://onelake.dfs.fabric.microsoft.com/<workspace-id>/<lakehouse-id>/Files/<shortcut>/<folder>/{file}
+  conflict_policy: fail                  # fail (stop if anything exists) | skip (leave existing) | if_empty (load empty tables)
+
+default_varchar_length: 8000             # for inferred string columns with no known length

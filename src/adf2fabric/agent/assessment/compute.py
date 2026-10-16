@@ -14,12 +14,13 @@ from __future__ import annotations
 import math
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any, Iterable, Optional
+from typing import Any, Callable, Iterable, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from adf2fabric.agent.assessment import compute_rates as R
-from adf2fabric.project.discovery import AdfActivity, AdfPipeline, AdfSemanticDiscovery, AdfTrigger
+from adf2fabric.agent.assessment.azure_prices import PriceLookup, RecordedPrices
+from adf2fabric.project.discovery import AdfActivity, AdfLinkedService, AdfPipeline, AdfSemanticDiscovery, AdfTrigger
 
 
 class _M(BaseModel):
@@ -64,7 +65,12 @@ _ADF_METER: dict[str, AdfMeter] = {
     **{t: AdfMeter.orchestration for t in ("SetVariable", "AppendVariable", "Wait", "IfCondition", "ForEach", "Until",
                                             "Switch", "Filter", "ExecutePipeline", "Fail")},
 }
-_SPARK_TYPES = {"SynapseNotebook", "SparkJob", "DatabricksNotebook", "DatabricksSparkJar", "DatabricksSparkPython"}
+# Spark activities that become Fabric notebooks (Fabric Spark CU). Databricks activities are not here: they stay on
+# Azure Databricks as external compute, billed by Databricks (DBUs + VMs) and only orchestrated by the pipeline.
+_SPARK_TYPES = {"SynapseNotebook", "SparkJob"}
+_DATABRICKS_TYPES = {"DatabricksNotebook", "DatabricksSparkJar", "DatabricksSparkPython"}
+DEFAULT_DATABRICKS_DURATION_S = 600.0  # job cluster start (~2-7 min) + a short notebook, when there is no run history
+DEFAULT_DATABRICKS_TIER = "premium"
 
 # Stated defaults, used only when there is no run history for the activity.
 DEFAULT_DURATION_S: dict[AdfMeter, float] = {
@@ -98,6 +104,30 @@ class PipelineHistory(_M):
 
 
 # ---- result -------------------------------------------------------------------------------------------------------------
+class ExternalCompute(_M):
+    """Compute billed outside Fabric (today: Azure Databricks job clusters), per pipeline run."""
+
+    service: str = "Azure Databricks"
+    linked_service: Optional[str] = None
+    cluster: str = ""  # "job cluster" | "existing cluster" | "instance pool" | "unknown"
+    node_type: Optional[str] = None
+    workers: Optional[str] = None  # as authored: "0", "2", "1:10" (autoscale)
+    nodes: Optional[int] = None  # driver + workers (autoscale: the minimum)
+    tier: str = DEFAULT_DATABRICKS_TIER
+    region: Optional[str] = None
+    region_tier_source: str = ""  # "workspace" (read from Azure) or "assumed"
+    price_source: str = ""
+    hours: float = 0.0  # cluster hours per pipeline run (duration x runs)
+    duration_source: Source = Source.assumed
+    dbu_per_node_hour: Optional[float] = None
+    dbu_rate_confirmed: bool = False
+    dbus: Optional[float] = None
+    cost: dict[str, float] = Field(default_factory=dict)  # {"USD": .., "INR": ..}: DBUs + VMs per pipeline run
+    cost_dbu: dict[str, float] = Field(default_factory=dict)
+    cost_vm: dict[str, float] = Field(default_factory=dict)
+    notes: list[str] = Field(default_factory=list)
+
+
 class ActivityCompute(_M):
     pipeline: str
     activity: str
@@ -113,6 +143,7 @@ class ActivityCompute(_M):
     duration_source: Source = Source.assumed
     cu_seconds_per_pipeline_run: float = 0.0
     cu_seconds_by_meter: dict[str, float] = Field(default_factory=dict)  # per pipeline run
+    external: Optional[ExternalCompute] = None  # compute billed outside Fabric (Databricks)
     notes: list[str] = Field(default_factory=list)
 
 
@@ -126,6 +157,8 @@ class PipelineCompute(_M):
     cu_seconds_per_day: float = 0.0
     adf_billed_per_run: dict[str, float] = Field(default_factory=dict)  # measured in ADF (history only)
     history_runs_sampled: int = 0
+    external_cost_per_run: dict[str, float] = Field(default_factory=dict)  # Databricks, by currency
+    external_cost_per_day: dict[str, float] = Field(default_factory=dict)
     notes: list[str] = Field(default_factory=list)
 
 
@@ -143,6 +176,8 @@ class ComputeAssessment(_M):
     average_cu_needed: float = 0.0  # CU-hours per day / 24 (background smoothing)
     recommended_sku: str = ""
     sku_reason: str = ""
+    external_cost_per_day: dict[str, float] = Field(default_factory=dict)  # Databricks, all pipelines, by currency
+    external_cost_per_month: dict[str, float] = Field(default_factory=dict)  # x 30 days
     notes: list[str] = Field(default_factory=list)
 
 
@@ -158,7 +193,88 @@ def _int(v: Any) -> Optional[int]:
     return v if isinstance(v, int) and not isinstance(v, bool) else None
 
 
-def _activity(p: AdfPipeline, a: AdfActivity, nesting: tuple[str, ...], hist: Optional[PipelineHistory]) -> ActivityCompute:
+class DatabricksPricing:
+    """Where Databricks prices and the workspace region/tier come from (live when given, recorded otherwise)."""
+
+    def __init__(self, prices: Optional[PriceLookup] = None,
+                 workspace: Optional[Callable[[str], Optional[tuple[str, str]]]] = None,
+                 default_tier: str = DEFAULT_DATABRICKS_TIER, default_region: str = R.DATABRICKS_REGION):
+        self.prices = prices or RecordedPrices()
+        self.workspace = workspace
+        self.default_tier, self.default_region = default_tier, default_region
+
+    def region_tier(self, resource_id: Optional[str]) -> tuple[str, str, str]:
+        if self.workspace and resource_id:
+            try:
+                found = self.workspace(resource_id)
+            except Exception:  # noqa: BLE001 - fall back to the stated defaults
+                found = None
+            if found:
+                return found[0], found[1], "workspace"
+        return self.default_region, self.default_tier, "assumed"
+
+
+def _databricks(ac: ActivityCompute, a: AdfActivity, ls: Optional[AdfLinkedService],
+                pricing: DatabricksPricing) -> ExternalCompute:
+    """Databricks cost of one activity run: nodes x hours x (DBUs/node-hour x DBU price + VM price)."""
+    ex = ExternalCompute(linked_service=ls.name if ls else (a.linked_service_refs[0] if a.linked_service_refs else None),
+                         duration_source=ac.duration_source)
+    c = ls.compute if ls else {}
+    if not ls:
+        ex.cluster = "unknown"
+        ex.notes.append("Linked service not found in the record: cluster size unknown, cost not estimated.")
+        return ex
+    if c.get("existingClusterId"):
+        ex.cluster = "existing cluster"
+        ex.notes.append("Runs on an existing all-purpose cluster: billed for the cluster's uptime, not per run; "
+                        "not estimated here.")
+        return ex
+    ex.cluster = "instance pool" if c.get("instancePoolId") else "job cluster"
+    ex.node_type, ex.workers = c.get("newClusterNodeType"), c.get("newClusterNumOfWorker")
+    workers = str(ex.workers or "").split(":")
+    if not ex.node_type or not workers[0].isdigit():
+        ex.notes.append("Node type or worker count is not a literal value: cost not estimated.")
+        return ex
+    ex.nodes = 1 + int(workers[0])
+    if len(workers) > 1:
+        ex.notes.append(f"Autoscale {ex.workers} workers: estimated at the minimum ({workers[0]}).")
+    ex.hours = round(ac.duration_s * ac.runs_per_pipeline_run / 3600, 5)
+    ex.region, ex.tier, ex.region_tier_source = pricing.region_tier(c.get("workspaceResourceId"))
+    if ex.region_tier_source == "assumed":
+        ex.notes.append(f"Workspace region/tier not read from Azure: {ex.region} / {ex.tier} assumed.")
+    dbu_rate = R.DATABRICKS_DBU_PER_NODE_HOUR.get(ex.node_type)
+    ex.price_source = pricing.prices.source
+    try:
+        dbu_price = pricing.prices.dbu(ex.region, ex.tier, "jobs")
+        vm_price = pricing.prices.vm(ex.region, ex.node_type)
+    except Exception as exc:  # noqa: BLE001 - live prices unavailable: say so, use the recorded table
+        ex.notes.append(f"Live prices unavailable ({str(exc)[:80]}); recorded prices used where they exist.")
+        fallback = RecordedPrices()
+        ex.price_source = fallback.source
+        dbu_price, vm_price = fallback.dbu(ex.region, ex.tier, "jobs"), fallback.vm(ex.region, ex.node_type)
+    if dbu_rate is None:
+        ex.notes.append(f"DBUs per node-hour for {ex.node_type} not recorded in compute_rates: cost not estimated.")
+        return ex
+    if not dbu_price or not vm_price:
+        ex.notes.append(f"No {'DBU' if not dbu_price else 'VM'} price for {ex.node_type}, {ex.tier} tier, {ex.region}: "
+                        "cost not estimated.")
+        return ex
+    ex.dbu_per_node_hour, ex.dbu_rate_confirmed = dbu_rate, R.DATABRICKS_DBU_RATE_CONFIRMED
+    ex.dbus = round(ex.nodes * ex.hours * dbu_rate, 5)
+    for cur in sorted(set(dbu_price) & set(vm_price)):
+        ex.cost_dbu[cur] = round(ex.dbus * dbu_price[cur], 4)
+        ex.cost_vm[cur] = round(ex.nodes * ex.hours * vm_price[cur], 4)
+        ex.cost[cur] = round(ex.cost_dbu[cur] + ex.cost_vm[cur], 4)
+    if not ex.dbu_rate_confirmed:
+        ex.notes.append(f"{dbu_rate:g} DBU per node-hour for {ex.node_type} is assumed until confirmed from the Azure bill.")
+    if ac.duration_source is Source.assumed:
+        ex.notes.append(f"No run history: {DEFAULT_DATABRICKS_DURATION_S:g} s per run assumed (cluster start + notebook).")
+    return ex
+
+
+def _activity(p: AdfPipeline, a: AdfActivity, nesting: tuple[str, ...], hist: Optional[PipelineHistory],
+              linked_services: Optional[dict[str, AdfLinkedService]] = None,
+              pricing: Optional[DatabricksPricing] = None) -> ActivityCompute:
     meter = _ADF_METER.get(a.type or "", AdfMeter.orchestration)
     ac = ActivityCompute(pipeline=p.name, activity=a.name, activity_type=a.type, nesting=list(nesting), adf_meter=meter)
     if (a.type or "") not in _ADF_METER:
@@ -167,9 +283,14 @@ def _activity(p: AdfPipeline, a: AdfActivity, nesting: tuple[str, ...], hist: Op
         ac.notes.append("Runs inside a loop: assumes 1 iteration unless run history says otherwise.")
 
     h = hist.activities.get(a.name) if hist else None
+    if h and h.activity_type and a.type and h.activity_type != a.type:
+        ac.notes.append(f"Run history is for a {h.activity_type} activity, but it is now a {a.type}: history not used.")
+        h = None
     if h:
         ac.runs_per_pipeline_run, ac.runs_source = h.runs_per_pipeline_run, Source.history
         ac.duration_s, ac.duration_source = h.median_duration_s, Source.history
+    elif (a.type or "") in _DATABRICKS_TYPES:
+        ac.duration_s = DEFAULT_DATABRICKS_DURATION_S
     else:
         ac.duration_s = DEFAULT_DURATION_S[meter]
 
@@ -214,6 +335,15 @@ def _activity(p: AdfPipeline, a: AdfActivity, nesting: tuple[str, ...], hist: Op
             ac.fabric_setting = f"Fabric notebook on a Medium node ({v} vCores, {v / R.SPARK_VCORES_PER_CU:g} CU)"
             ac.notes.append("Becomes a Fabric notebook; one Medium Spark node assumed. Size it from the real job.")
             parts[FabricMeter.spark] = v / R.SPARK_VCORES_PER_CU * ac.duration_s
+        elif (a.type or "") in _DATABRICKS_TYPES:
+            ls_name = a.linked_service_refs[0] if a.linked_service_refs else None
+            ls = (linked_services or {}).get((ls_name or "").lower())
+            ac.external = _databricks(ac, a, ls, pricing or DatabricksPricing())
+            ac.adf_resources = {"engine": a.type, "cluster": ac.external.cluster}
+            if ac.external.node_type:
+                ac.adf_resources.update({"nodeType": ac.external.node_type, "workers": ac.external.workers})
+            ac.fabric_setting = ("Azure Databricks activity (orchestration run); the Spark compute is billed by "
+                                 "Databricks, not Fabric CU")
         elif meter is AdfMeter.ssis:
             ac.fabric_meters.append(FabricMeter.ssis)
             ac.fabric_setting = "Invoke SSIS package (1.35 CU-hours per vCore-hour)"
@@ -252,19 +382,26 @@ def _runs_per_day(t: AdfTrigger) -> Optional[float]:
 
 
 def estimate(d: AdfSemanticDiscovery, history: Optional[dict[str, PipelineHistory]] = None,
-             default_runs_per_day: float = 1.0, include_stopped_triggers: bool = True) -> ComputeAssessment:
+             default_runs_per_day: float = 1.0, include_stopped_triggers: bool = True,
+             databricks_tier: str = DEFAULT_DATABRICKS_TIER, prices: Optional[PriceLookup] = None,
+             databricks_workspace: Optional[Callable[[str], Optional[tuple[str, str]]]] = None) -> ComputeAssessment:
+    pricing = DatabricksPricing(prices, databricks_workspace, default_tier=databricks_tier)
     history = history or {}
     pipes = {p.name.lower(): p for p in d.pipelines}
+    linked = {ls.name.lower(): ls for ls in d.linked_services}
     out: dict[str, PipelineCompute] = {}
     for p in d.pipelines:
         hist = history.get(p.name.lower())
         pc = PipelineCompute(pipeline=p.name)
         for a, nesting in _walk(p.activities):
-            pc.activities.append(_activity(p, a, nesting, hist))
+            pc.activities.append(_activity(p, a, nesting, hist, linked, pricing))
         pc.cu_seconds_per_run = round(sum(x.cu_seconds_per_pipeline_run for x in pc.activities), 3)
         for x in pc.activities:
             for m, v in x.cu_seconds_by_meter.items():
                 pc.cu_seconds_by_meter[m] = round(pc.cu_seconds_by_meter.get(m, 0) + v, 3)
+        for x in pc.activities:
+            for cur, v in (x.external.cost if x.external else {}).items():
+                pc.external_cost_per_run[cur] = round(pc.external_cost_per_run.get(cur, 0) + v, 4)
         if hist:
             pc.adf_billed_per_run, pc.history_runs_sampled = dict(hist.adf_billed_per_run), hist.runs_sampled
         out[p.name.lower()] = pc
@@ -310,6 +447,7 @@ def estimate(d: AdfSemanticDiscovery, history: Optional[dict[str, PipelineHistor
         else:
             pc.runs_per_day, pc.runs_per_day_source = default_runs_per_day, f"assumed {default_runs_per_day:g}/day (no trigger)"
         pc.cu_seconds_per_day = round(pc.cu_seconds_per_run * pc.runs_per_day, 3)
+        pc.external_cost_per_day = {c: round(v * pc.runs_per_day, 4) for c, v in pc.external_cost_per_run.items()}
 
     a = ComputeAssessment(project_id=d.project_id, created_at=datetime.now(timezone.utc),
                           source_commit_sha=d.source_commit_sha, history_used=bool(history),
@@ -318,11 +456,21 @@ def estimate(d: AdfSemanticDiscovery, history: Optional[dict[str, PipelineHistor
                      "stopped_triggers_counted": include_stopped_triggers,
                      "default_durations_seconds": {k.value: v for k, v in DEFAULT_DURATION_S.items()},
                      "copy_auto_diu_estimated_as": DEFAULT_COPY_DIU, "data_flow_default_cores": DEFAULT_DATA_FLOW_CORES,
-                     "loop_iterations_without_history": 1, "sku_headroom": HEADROOM}
+                     "loop_iterations_without_history": 1, "sku_headroom": HEADROOM,
+                     "databricks_default_tier": databricks_tier, "databricks_default_region": R.DATABRICKS_REGION,
+                     "databricks_prices": pricing.prices.source,
+                     "databricks_default_duration_seconds": DEFAULT_DATABRICKS_DURATION_S}
     a.rates = {"data_movement_cu_per_ito_hour": R.DATA_MOVEMENT_CU_PER_ITO,
                "orchestration_cu_hours_per_activity_run": R.ORCHESTRATION_CU_HOURS_PER_RUN,
                "spark_vcores_per_cu": R.SPARK_VCORES_PER_CU, "ssis_cu_hours_per_vcore_hour": R.SSIS_CU_PER_VCORE,
                "background_smoothing_hours": R.SMOOTHING_HOURS_BACKGROUND, "verified_on": R.VERIFIED_ON}
+    for p in a.pipelines:
+        for c, v in p.external_cost_per_day.items():
+            a.external_cost_per_day[c] = round(a.external_cost_per_day.get(c, 0) + v, 4)
+    a.external_cost_per_month = {c: round(v * 30, 2) for c, v in a.external_cost_per_day.items()}
+    if any(x.external for p in a.pipelines for x in p.activities):
+        a.notes.append("Databricks activities run on Azure Databricks (external compute): their Spark cost is billed "
+                       "by Databricks and Azure VMs, shown separately; Fabric only counts their orchestration runs.")
     a.cu_hours_per_day = round(sum(p.cu_seconds_per_day for p in a.pipelines) / 3600, 4)
     a.average_cu_needed = round(a.cu_hours_per_day / R.SMOOTHING_HOURS_BACKGROUND, 4)
     need = a.average_cu_needed * (1 + HEADROOM)
@@ -367,6 +515,26 @@ def render_markdown(a: ComputeAssessment) -> str:
                      f"{res} | {x.fabric_setting} | {x.runs_per_pipeline_run:g} ({x.runs_source.value}) | "
                      f"{x.duration_s:g} ({x.duration_source.value}) | {x.cu_seconds_per_pipeline_run:g} | "
                      f"{' '.join(x.notes) or '-'} |")
+    ext = [(p, x) for p in a.pipelines for x in p.activities if x.external]
+    if ext:
+        money = lambda d: " / ".join(f"{v:,.2f} {c}" for c, v in sorted(d.items(), key=lambda kv: kv[0] != "INR")) or "-"
+        L += ["", "## External compute: Azure Databricks (billed by Databricks + Azure VMs, not Fabric CU)", "",
+              f"- **Per day:** {money(a.external_cost_per_day)}. **Per month (30 days):** {money(a.external_cost_per_month)}.",
+              "- Cost per run = nodes × cluster hours × (DBUs per node-hour × DBU price + VM price per hour). "
+              "Cluster hours are the activity's run time, including the job cluster's start-up.", "",
+              "| Pipeline | Activity | Cluster | Node type | Nodes | Region / tier | Hours/run | DBUs/run | DBU cost | VM cost | Total per run | Notes |",
+              "|---|---|---|---|---|---|---|---|---|---|---|---|"]
+        for p, x in ext:
+            e = x.external
+            L.append(f"| {p.pipeline} | {x.activity} | {e.cluster} | {e.node_type or '-'} | {e.nodes if e.nodes is not None else '-'} | "
+                     f"{e.region or '-'} / {e.tier} ({e.region_tier_source or '-'}) | "
+                     f"{e.hours:g} ({e.duration_source.value}) | {e.dbus if e.dbus is not None else '-'} | {money(e.cost_dbu)} | "
+                     f"{money(e.cost_vm)} | **{money(e.cost)}** | {' '.join(e.notes) or '-'} |")
+        L += ["", "Prices: " + "; ".join(sorted({x.external.price_source for _, x in ext if x.external.price_source}) or ["-"])
+              + ". DBUs per node-hour: "
+              + "; ".join(f"{n} {v:g}" + (" (confirmed " + R.DATABRICKS_DBU_RATE_SOURCE + ")" if R.DATABRICKS_DBU_RATE_CONFIRMED
+                                          else " (assumed, to confirm from the bill)")
+                          for n, v in R.DATABRICKS_DBU_PER_NODE_HOUR.items()) + "."]
     L += ["", "## Rates and assumptions", "",
           f"- Data movement: {R.DATA_MOVEMENT_CU_PER_ITO} CU-hours per throughput (ITO) hour of Copy run time, "
           "billed per started minute.",

@@ -165,3 +165,157 @@ def test_copy_is_billed_per_started_minute_like_the_measured_runs():
     long = {"p": PipelineHistory(pipeline="P", runs_sampled=1,
                                  activities={"Copy1": ActivityHistory(activity_type="Copy", median_duration_s=61, used_diu=4)})}
     assert by(estimate(semantic([pipe(copy(diu=4), name="P")]), long), "P").activities[0].cu_seconds_per_pipeline_run == pytest.approx(1.5 * 4 * 120)
+
+
+# ---- Azure Databricks as external compute -------------------------------------------------------------------------
+
+from tests.conversion_support import linked_service  # noqa: E402
+
+
+def _dbx_ls(name="LS_Databricks", **tp):
+    base = {"domain": "https://adb-1.1.azuredatabricks.net", "authentication": "MSI", "workspaceResourceId": "/x",
+            "newClusterNodeType": "Standard_D4ds_v5", "newClusterNumOfWorker": "0", "newClusterVersion": "15.4.x-scala2.12"}
+    base.update(tp)
+    return linked_service(name, "AzureDatabricks", {k: v for k, v in base.items() if v is not None})
+
+
+def _nb(name="NB", ls="LS_Databricks", deps=()):
+    a = act(name, "DatabricksNotebook", {"notebookPath": "/Shared/x"}, deps=list(deps))
+    a["linkedServiceName"] = ref("LinkedService", ls)
+    return a
+
+
+def test_parser_keeps_databricks_cluster_settings_but_never_secrets():
+    d = semantic([pipe(_nb(), name="P")], linked_services=[_dbx_ls(accessToken={"type": "SecureString", "value": "dapiSECRET"})])
+    ls = d.linked_services[0]
+    assert ls.compute == {"newClusterNodeType": "Standard_D4ds_v5", "newClusterNumOfWorker": "0",
+                          "newClusterVersion": "15.4.x-scala2.12", "workspaceResourceId": "/x",
+                          "domain": "https://adb-1.1.azuredatabricks.net"}
+    assert "dapiSECRET" not in d.model_dump_json()
+
+
+def test_databricks_notebook_is_external_compute_not_fabric_spark():
+    h = {"p": PipelineHistory(pipeline="P", activities={"NB": ActivityHistory(median_duration_s=491)})}
+    a = estimate(semantic([pipe(_nb(), name="P")], linked_services=[_dbx_ls()]), h)
+    x = by(a, "P").activities[0]
+    assert x.fabric_meters == [FabricMeter.orchestration] and x.cu_seconds_per_pipeline_run == pytest.approx(20.16)
+    e = x.external
+    assert (e.cluster, e.node_type, e.nodes, e.duration_source) == ("job cluster", "Standard_D4ds_v5", 1, Source.history)
+    hours = 491 / 3600
+    assert e.cost["INR"] == pytest.approx(hours * (1.0 * 28.7968 + 23.4214), abs=1e-3)
+    assert e.cost["USD"] == pytest.approx(hours * (0.30 + 0.244), abs=1e-4)
+    assert any("assumed until confirmed" in n for n in e.notes)
+    assert by(a, "P").external_cost_per_day["INR"] == pytest.approx(e.cost["INR"], abs=1e-3)
+    assert a.external_cost_per_month["INR"] == pytest.approx(round(e.cost["INR"], 4) * 30, abs=0.01)
+    assert a.recommended_sku == "F2"
+
+
+def test_databricks_autoscale_existing_cluster_and_unknown_sizes():
+    a = estimate(semantic([pipe(_nb("A", "Auto"), _nb("B", "Existing"), _nb("C", "Big"), name="P")],
+                          linked_services=[_dbx_ls("Auto", newClusterNumOfWorker="1:4"),
+                                           _dbx_ls("Existing", existingClusterId="0101-abc", newClusterNodeType=None,
+                                                   newClusterNumOfWorker=None),
+                                           _dbx_ls("Big", newClusterNodeType="Standard_E64s_v5")]))
+    xs = {x.activity: x.external for x in by(a, "P").activities}
+    assert xs["A"].nodes == 2 and any("Autoscale" in n for n in xs["A"].notes) and xs["A"].cost
+    assert xs["B"].cluster == "existing cluster" and not xs["B"].cost
+    assert not xs["C"].cost and any("not recorded in compute_rates" in n for n in xs["C"].notes)
+    assert all(x.duration_s == 600 for x in by(a, "P").activities)  # no history: stated default
+
+
+def test_report_has_a_separate_databricks_section():
+    md = render_markdown(estimate(semantic([pipe(_nb(), name="P")], linked_services=[_dbx_ls()])))
+    assert "## External compute: Azure Databricks" in md and "not Fabric CU" in md
+    assert "INR" in md and "Standard_D4ds_v5" in md and "to confirm from the bill" in md
+
+
+def test_history_uses_only_runs_with_the_activitys_current_type():
+    class Changed:
+        """Newest run: NB is a Databricks notebook (491 s). Two older runs: NB was a 1 s Wait placeholder."""
+
+        def post(self, url, headers=None, json=None, timeout=None):
+            if url.split("?")[0].endswith("/queryPipelineRuns"):
+                return _Resp({"value": [{"runId": "new", "durationInMs": 669000}, {"runId": "old1", "durationInMs": 12000},
+                                        {"runId": "old2", "durationInMs": 11000}]})
+            if "/new/" in url:
+                return _Resp({"value": [{"activityName": "NB", "activityType": "DatabricksNotebook", "durationInMs": 491000}]})
+            return _Resp({"value": [{"activityName": "NB", "activityType": "Wait", "durationInMs": 1000}]})
+
+    h = adf_history.fetch(Changed(), "tok", "sub", "rg", "fac", ["P"])
+    nb = h["p"].activities["NB"]
+    assert (nb.activity_type, nb.median_duration_s, nb.runs_per_pipeline_run) == ("DatabricksNotebook", 491, 1)
+    # and history recorded for another type is ignored by the estimate
+    stale = {"p": PipelineHistory(pipeline="P", activities={"NB": ActivityHistory(activity_type="Wait", median_duration_s=1)})}
+    x = by(estimate(semantic([pipe(_nb(), name="P")], linked_services=[_dbx_ls()]), stale), "P").activities[0]
+    assert x.duration_source is Source.assumed and any("history not used" in n for n in x.notes)
+
+
+
+# ---- live Databricks prices (Azure Retail Prices API) and workspace region/tier ----------------------------------
+
+from adf2fabric.agent.assessment import azure_prices  # noqa: E402
+
+
+class _PriceApi:
+    """Fake Retail Prices API: Premium/Standard Jobs DBU and two VM sizes in westeurope, USD and INR."""
+
+    PRICES = {("Azure Databricks", "Premium Jobs Compute"): {"USD": 0.30, "INR": 25.0},
+              ("Azure Databricks", "Standard Jobs Compute"): {"USD": 0.15, "INR": 12.5},
+              ("Virtual Machines", "Standard_D4ds_v5"): {"USD": 0.25, "INR": 21.0},
+              ("Virtual Machines", "Standard_E8ds_v5"): {"USD": 0.60, "INR": 50.0}}
+
+    def __init__(self):
+        self.calls = []
+
+    def get(self, url, params=None, timeout=None, headers=None):
+        self.calls.append(params)
+        f, cur = params["$filter"], params["currencyCode"]
+        if "westeurope" not in f:
+            return _Resp({"Items": []})
+        items = []
+        for (svc, key), pr in self.PRICES.items():
+            if f"'{svc}'" in f and f"'{key}'" in f:
+                meter = f"{key} DBU" if svc == "Azure Databricks" else "D4ds v5"
+                items.append({"retailPrice": pr[cur], "meterName": meter, "skuName": key, "productName": "Linux"})
+                if svc == "Virtual Machines":
+                    items.append({"retailPrice": 0.01, "meterName": "spot", "skuName": f"{key} Spot", "productName": "Linux"})
+        return _Resp({"Items": items})
+
+
+def test_live_prices_follow_the_workspace_region_tier_and_vm_size():
+    api = _PriceApi()
+    prices = azure_prices.LivePrices(api)
+    ws = {"/subscriptions/s/rg/ws": ("westeurope", "standard")}
+    d = semantic([pipe(_nb(), name="P")], linked_services=[_dbx_ls(workspaceResourceId="/subscriptions/s/rg/ws")])
+    e = by(estimate(d, prices=prices, databricks_workspace=ws.get), "P").activities[0].external
+    assert (e.region, e.tier, e.region_tier_source) == ("westeurope", "standard", "workspace")
+    hours = 600 / 3600
+    assert e.cost["USD"] == pytest.approx(hours * (1.0 * 0.15 + 0.25), abs=1e-4)  # spot price ignored
+    assert e.cost["INR"] == pytest.approx(hours * (12.5 + 21.0), abs=1e-3)
+    assert "Retail Prices API" in e.price_source
+    n = len(api.calls)
+    estimate(d, prices=prices, databricks_workspace=ws.get)
+    assert len(api.calls) == n  # cached
+
+
+def test_prices_missing_for_a_region_are_reported_not_guessed():
+    d = semantic([pipe(_nb(), name="P")], linked_services=[_dbx_ls(workspaceResourceId="/subscriptions/s/rg/ws")])
+    e = by(estimate(d, prices=azure_prices.LivePrices(_PriceApi()),
+                    databricks_workspace=lambda _id: ("southindia", "premium")), "P").activities[0].external
+    assert not e.cost and any("No DBU price" in n for n in e.notes)
+
+
+def test_without_azure_access_recorded_prices_and_stated_defaults_are_used():
+    e = by(estimate(semantic([pipe(_nb(), name="P")], linked_services=[_dbx_ls()])), "P").activities[0].external
+    assert (e.region, e.tier, e.region_tier_source) == ("centralindia", "premium", "assumed")
+    assert "recorded table" in e.price_source and e.cost["INR"] > 0
+
+
+def test_workspace_info_reads_region_and_tier_from_arm():
+    class Arm:
+        def get(self, url, headers=None, timeout=None):
+            assert url.startswith("https://management.azure.com/subscriptions/") and headers["Authorization"] == "Bearer t"
+            return _Resp({"location": "Central India", "sku": {"name": "premium"}})
+
+    assert azure_prices.workspace_info(Arm(), "t", "/subscriptions/s/resourceGroups/g/providers/x/ws") == ("centralindia", "premium")
+    assert azure_prices.workspace_info(Arm(), "t", "not-a-resource-id") is None
