@@ -199,11 +199,16 @@ def test_databricks_specific_constructs_are_found_with_line_numbers():
     assert ("dbutils_secrets", 2) in found and ("dbutils_widgets", 3) in found
     assert ("dbfs_path", 4) in found and ("databricks_conf", 5) in found and ("dbutils_fs", 6) in found
     assert ("magic_run", 7) in found
-    assert not any(line == 8 for _, line in found)  # plain Delta + abfss is fine
+    assert ("adls_direct_path", 8) in found  # a direct ADLS path is flagged: Fabric authenticates differently
 
 
 def test_clean_code_has_no_findings():
-    assert dn.analyze_source("df = spark.read.format('delta').load('abfss://c@a.dfs.core.windows.net/x')\n") == []
+    assert dn.analyze_source("df = spark.read.format('delta').load('Files/raw/x')\n") == []
+
+
+def test_a_direct_adls_path_is_flagged_for_review():
+    f = dn.analyze_source('storage = "abfss://migrationcontainer@datamigrationadftofabric.dfs.core.windows.net/a"\n')
+    assert [(x.code, x.line, x.severity) for x in f] == [("adls_direct_path", 1, "review")]
 
 
 # --- the command -------------------------------------------------------------------------------------------------

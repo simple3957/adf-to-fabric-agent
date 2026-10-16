@@ -573,6 +573,33 @@ def test_a_synapse_notebook_already_deployed_to_fabric_is_bound_not_scaffolded()
     assert any(m.source == "typeProperties.sparkPool" and not m.preserved for m in a.property_mappings)  # still reported
 
 
+WS_ID, NB_ID = "53d67e72-8124-4ca3-ae55-c4b266935faa", "6d899865-241b-4694-8232-74ec47124d24"
+BOUND = [{"type": "ItemToId", "key": "notebook:Clean", "value": NB_ID}, {"type": "WorkspaceId", "key": "*", "value": WS_ID}]
+
+
+def test_a_databricks_notebook_deployed_to_fabric_becomes_a_fabric_notebook_activity():
+    db = act("Dbx", "DatabricksNotebook", {"notebookPath": "/Shared/etl/Clean"}, linkedServiceName=ref("LinkedService", "LS_Dbx"))
+    rec, content = convert_one(pipe(db), linked_services=[linked_service("LS_Dbx", "AzureDatabricks")], resolutions=BOUND)
+    a = by_name(rec)["Dbx"]
+    c = find(content, "Dbx")
+    assert c["type"] == "TridentNotebook" and c["typeProperties"] == {"notebookId": NB_ID, "workspaceId": WS_ID}
+    assert a.status is not S.manual_required and a.runtime_disposition == "replace" and "deployed notebook" in a.summary
+
+
+def test_without_a_binding_it_stays_the_databricks_activity():
+    db = act("Dbx", "DatabricksNotebook", {"notebookPath": "/Shared/etl/Clean"}, linkedServiceName=ref("LinkedService", "LS_Dbx"))
+    rec, content = convert_one(pipe(db), linked_services=[linked_service("LS_Dbx", "AzureDatabricks")])
+    assert find(content, "Dbx")["type"] == "DatabricksNotebook"
+    assert not any(p.name.lower().startswith("notebook:") for p in rec.prerequisites)  # nothing registered for Fabric
+
+
+def test_a_bound_notebook_with_parameters_or_libraries_is_not_swapped_blindly():
+    db = act("Dbx", "DatabricksNotebook", {"notebookPath": "/Shared/etl/Clean", "baseParameters": {"day": "x"}},
+             linkedServiceName=ref("LinkedService", "LS_Dbx"))
+    _, content = convert_one(pipe(db), linked_services=[linked_service("LS_Dbx", "AzureDatabricks")], resolutions=BOUND)
+    assert find(content, "Dbx")["type"] == "DatabricksNotebook"  # parameter mapping is not guessed
+
+
 def test_mapping_data_flow_becomes_a_dataflow_scaffold_with_alternatives():
     df = act("Df", "ExecuteDataFlow", {"dataflow": {"referenceName": "MDF1", "type": "DataFlowReference",
                                                     "parameters": {"p": expr("@pipeline().parameters.x")}},

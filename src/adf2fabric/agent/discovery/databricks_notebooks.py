@@ -253,6 +253,10 @@ _RULES: list[tuple[str, re.Pattern, str, str]] = [
      "A Databricks mount point; recreate access as a OneLake shortcut or a direct ADLS path."),
     ("databricks_conf", re.compile(r"spark\.(conf\.set|conf\.get)?\(?[\"']?spark\.databricks\.[\w.]+"), "review",
      "A Databricks-only Spark setting; it has no effect outside Databricks."),
+    ("adls_direct_path", re.compile(r"abfss?://[^\s\"']+@[\w-]+\.dfs\.core\.windows\.net"), "review",
+     "A direct ADLS path. Databricks reached it through its own credential (a Unity Catalog external location, a secret or a "
+     "cluster setting); Fabric uses the identity that runs the notebook, so that identity needs access to the account, or the "
+     "data should be read through a OneLake shortcut. Verified live: a Fabric run of such a notebook failed with HTTP 401."),
     ("magic_run", re.compile(r"^\s*(#\s*)?(MAGIC\s+)?%run\b", re.M), "review",
      "%run chains another notebook by its Databricks path; that notebook must exist in Fabric with a path to match."),
     ("unity_catalog", re.compile(r"\b(?:USE|FROM|INTO|TABLE)\s+CATALOG\b|\bcatalog\.schema\.table\b", re.I), "review",

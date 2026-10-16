@@ -39,8 +39,41 @@ def _ls(cx: ActivityBuilder) -> Optional[str]:
 # --- Databricks ----------------------------------------------------------------------------------------------------
 
 
+def _bound_fabric_notebook(cx: ActivityBuilder) -> Optional[str]:
+    """The notebook's name when it was deployed to Fabric and bound in the resolutions file (``notebook:<name>``), where
+    ``<name>`` is the last part of the Databricks ``notebookPath``. None when it was not, so nothing is registered."""
+    path = cx.act.raw_properties.get("notebookPath")
+    name = path.rstrip("/").rsplit("/", 1)[-1] if isinstance(path, str) else ""
+    resolutions = cx.pc.project.resolutions
+    return name if name and f"notebook:{name}".lower() in resolutions.items else None
+
+
+def _databricks_notebook_as_fabric_notebook(cx: ActivityBuilder, name: str) -> None:
+    """Run the same code as a Fabric notebook instead of calling Databricks.
+
+    Only for a notebook with no ``baseParameters`` and no ``libraries``: the parameter and library settings of the two
+    activities do not map one to one, and nothing is guessed.
+    """
+    a, raw = cx.act, cx.act.raw_properties
+    tp = {"notebookId": cx.item("notebook", name, f"The Fabric notebook that runs the code of Databricks notebook '{name}'."),
+          "workspaceId": cx.workspace()}
+    cx.mapping("typeProperties.notebookPath", "typeProperties.notebookId", "notebook_bound")
+    for key in raw:
+        if key != "notebookPath":
+            cx.dropped(f"typeProperties.{key}", "a Databricks notebook setting with no Fabric notebook activity equivalent")
+    out = cx.add(cx.envelope(a.name, "TridentNotebook", tp))
+    cx.cover(Op.external_execution, out)
+    cx.strategy = ConversionStrategy.alternative
+    cx.disposition = "replace"
+    cx.summary = (f"DatabricksNotebook '{a.name}' -> Fabric Notebook activity bound to the deployed notebook {tp['notebookId']}; "
+                  "check its storage access, lakehouse and environment.")
+
+
 def convert_databricks_notebook(cx: ActivityBuilder) -> None:
     a = cx.act
+    bound = _bound_fabric_notebook(cx)
+    if bound and not cx.act.raw_properties.get("baseParameters") and not cx.act.raw_properties.get("libraries"):
+        return _databricks_notebook_as_fabric_notebook(cx, bound)
     ls = _ls(cx)
     if not ls:
         return _block(cx, "databricks_no_linked_service", "it has no Databricks linked service.",
