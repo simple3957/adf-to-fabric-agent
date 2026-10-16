@@ -35,6 +35,7 @@ from adf2fabric.project.discovery import (
     AdfParameter,
     AdfPipeline,
     AdfRecurrence,
+    AdfSparkCompute,
     AdfTrigger,
     AdfVariable,
     ExternalReference,
@@ -379,16 +380,77 @@ def _connection_parts(tp: dict) -> AdfLinkedConnection:
         parameterized_fields=dynamic)
 
 
-# Non-secret compute settings of an Azure Databricks linked service (cluster size), kept for the compute assessment.
-_DATABRICKS_COMPUTE_KEYS = ("newClusterNodeType", "newClusterDriverNodeType", "newClusterNumOfWorker",
-                            "newClusterVersion", "existingClusterId", "instancePoolId", "policyId",
-                            "workspaceResourceId", "domain")
+# Spark setting names are dotted paths (spark.hadoop.fs.azure.account.key.<acct>), so the exact-name hint set above
+# does not see them; match these fragments on the name with punctuation removed. Over-masking is the safe direction.
+_SPARK_SECRET_FRAGMENTS = ("password", "passwd", "pwd", "secret", "token", "credential", "accountkey", "accesskey",
+                           "sharedkey", "storagekey", "apikey", "privatekey", "encryptionkey", "sastoken")
 
 
-def _compute_settings(kind: Optional[str], tp: dict) -> dict:
-    if kind != "AzureDatabricks":
-        return {}
-    return {k: v for k in _DATABRICKS_COMPUTE_KEYS if (v := safe_scalar(tp.get(k))) is not None}
+def _secret_shaped_setting(name: str) -> bool:
+    flat = re.sub(r"[^a-z]", "", name.lower())
+    return name.lower() in SECRET_KEY_HINTS or any(f in flat for f in _SPARK_SECRET_FRAGMENTS)
+
+
+def _worker_range(value: Any) -> tuple[Optional[int], Optional[int]]:
+    """ADF writes ``newClusterNumOfWorker`` as ``"4"`` (fixed) or ``"2:8"`` (autoscale min:max)."""
+    if isinstance(value, bool):
+        return None, None
+    if isinstance(value, int):
+        return value, value
+    if isinstance(value, str):
+        m = re.fullmatch(r"\s*(\d+)\s*(?::\s*(\d+)\s*)?", value)
+        if m:
+            lo = int(m.group(1))
+            return lo, int(m.group(2)) if m.group(2) else lo
+    return None, None
+
+
+def _databricks_compute(tp: dict) -> AdfSparkCompute:
+    """Read the cluster settings of an ``AzureDatabricks`` linked service. Allowlisted, non-secret fields only."""
+    unresolved: list[str] = []
+
+    def lit(key: str) -> Optional[str]:
+        v = tp.get(key)
+        if v is None:
+            return None
+        s = safe_scalar(v) if isinstance(v, (str, int, float)) else None
+        if s is None:  # an Expression object, a parameter, or something secret-shaped: never guessed
+            unresolved.append(key)
+        return s
+
+    existing, pool = lit("existingClusterId"), lit("instancePoolId")
+    node, workers = lit("newClusterNodeType"), tp.get("newClusterNumOfWorker")
+    lo, hi = _worker_range(workers)
+    if workers is not None and lo is None:
+        unresolved.append("newClusterNumOfWorker")
+    conf: dict[str, str] = {}
+    raw_conf = tp.get("newClusterSparkConf")
+    if isinstance(raw_conf, dict):
+        for k, v in raw_conf.items():
+            sv = safe_scalar(v) if isinstance(v, (str, int, float, bool)) else None
+            conf[str(k)] = sv if sv is not None and not _secret_shaped_setting(str(k)) else "[masked]"
+    elif raw_conf is not None:
+        unresolved.append("newClusterSparkConf")
+    env = tp.get("newClusterSparkEnvVars")
+    tags = tp.get("newClusterCustomTags")
+    scripts = tp.get("newClusterInitScripts")
+    if existing:
+        mode = "existing_cluster"
+    elif node or workers is not None:
+        mode = "new_cluster"
+    elif pool:
+        mode = "instance_pool"
+    else:
+        mode = "unspecified"
+    return AdfSparkCompute(
+        mode=mode, workspace=lit("domain"), existing_cluster_id=existing, instance_pool_id=pool,
+        workspace_resource_id=lit("workspaceResourceId"),
+        policy_id=lit("policyId"), node_type=node, driver_node_type=lit("newClusterDriverNodeType"),
+        min_workers=lo, max_workers=hi, runtime_version=lit("newClusterVersion"), spark_conf=conf,
+        spark_env_var_names=sorted(str(k) for k in env) if isinstance(env, dict) else [],
+        init_script_count=len(scripts) if isinstance(scripts, list) else 0,
+        custom_tag_names=sorted(str(k) for k in tags) if isinstance(tags, dict) else [],
+        unresolved_fields=sorted(set(unresolved)))
 
 
 def parse_linked_service(data: dict, path: str) -> AdfLinkedService:
@@ -404,10 +466,12 @@ def parse_linked_service(data: dict, path: str) -> AdfLinkedService:
 
     auth = tp.get("authenticationType")
     connection = _connection_parts(tp)
+    ls_type = props.get("type") if isinstance(props.get("type"), str) else None
     return AdfLinkedService(
         name=str(data.get("name") or ""),
         path=path,
-        type=props.get("type") if isinstance(props.get("type"), str) else None,
+        type=ls_type,
+        compute=_databricks_compute(tp) if ls_type == "AzureDatabricks" else None,
         endpoint=endpoint,
         has_connection_string=("connectionString" in tp),  # presence only; value NEVER read
         key_vault_refs=_find_key_vault_refs(tp),
@@ -419,7 +483,6 @@ def parse_linked_service(data: dict, path: str) -> AdfLinkedService:
         parameters=_parse_param_map(props.get("parameters")),
         connector_version=(str(tp.get("version")).strip() if isinstance(tp.get("version"), (str, int, float))
                            and not isinstance(tp.get("version"), bool) and str(tp.get("version")).strip() else None),
-        compute=_compute_settings(props.get("type") if isinstance(props.get("type"), str) else None, tp),
     )
 
 

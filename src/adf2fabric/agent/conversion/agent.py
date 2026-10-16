@@ -19,6 +19,7 @@ import re
 from datetime import datetime, timezone
 from pathlib import Path
 from adf2fabric.agent.conversion import compatibility as compat
+from adf2fabric.agent.conversion.compute_plan import ComputeSources, build_compute_plan, load_sources
 from adf2fabric.agent.conversion.context import ProjectContext, Resolutions
 from adf2fabric.agent.conversion.engine import ConversionEngine
 from adf2fabric.agent.conversion.fabric_schema import INFERRED
@@ -115,6 +116,7 @@ class ConversionAgent:
 
         resolutions = Resolutions.load(Path(request.resolutions_path) if request.resolutions_path else None)
         ctx = build_project_context(d, resolutions)
+        compute_sources = load_sources(request.compute_sources_path)
         wanted = {n.lower() for n in request.pipelines}
         selected = [p for p in sorted(d.pipelines, key=lambda p: p.name.lower())
                     if not wanted or p.name.lower() in wanted]
@@ -125,7 +127,8 @@ class ConversionAgent:
                                     error=f"Pipeline(s) not found in the semantic record: {', '.join(unknown)}. "
                                           f"Available: {', '.join(sorted(p.name for p in d.pipelines)) or '(none)'}.")
         if not selected:
-            conv = self._assemble(pid, d, [], ctx, ConversionOutcome.no_pipelines, "No pipelines to convert.")
+            conv = self._assemble(pid, d, [], ctx, ConversionOutcome.no_pipelines, "No pipelines to convert.",
+                                  compute_sources)
             self.store.save_conversion(pid, conv)
             return ConversionResult(success=True, conversion=conv, message="No pipelines found to convert.",
                                     problems=resolutions.problems)
@@ -161,10 +164,12 @@ class ConversionAgent:
 
         all_fine = all(r.status is ConversionStatus.converted for r in converted)
         outcome = ConversionOutcome.converted if all_fine else ConversionOutcome.partial
-        conv = self._assemble(pid, d, converted, ctx, outcome, "")
+        conv = self._assemble(pid, d, converted, ctx, outcome, "", compute_sources)
         conv.reconstruction_applied = sorted(p.id for p in applied)
         conv.reconstruction_open = sorted(open_blockers)
         self.store.save_conversion(pid, conv)
+        if conv.compute_plan is not None:
+            self.store.write_conversion_file(pid, "compute-plan.json", conv.compute_plan.model_dump_json(indent=2) + "\n")
         self.store.write_conversion_file(pid, "conversion-report.md", render_report(conv))
         self.store.write_conversion_file(
             pid, "resolutions.template.json", render_resolutions_template(conv, set(ctx.linked_services)))
@@ -193,7 +198,8 @@ class ConversionAgent:
         return d, applied, open_blockers
 
     def _assemble(self, pid: str, d: AdfSemanticDiscovery, pipelines, ctx: ProjectContext,
-                  outcome: ConversionOutcome, detail: str) -> ProjectConversion:
+                  outcome: ConversionOutcome, detail: str,
+                  compute_sources: ComputeSources | None = None) -> ProjectConversion:
         status_counts: dict[str, int] = {s.value: 0 for s in ConversionStatus}
         strategy_counts: dict[str, int] = {}
         for p in pipelines:
@@ -220,7 +226,8 @@ class ConversionAgent:
             connections=[q for q in ordered if q.kind in ("connection", "gateway", "credential")],
             workspace_items=[q for q in ordered if q.kind not in ("connection", "gateway", "credential")],
             schema_notes=notes, detail=detail, provenance=dict(_PROVENANCE),
-            compatibility=compat.scan(d, {p.source_pipeline for p in pipelines}))
+            compatibility=compat.scan(d, {p.source_pipeline for p in pipelines}),
+            compute_plan=build_compute_plan(d, {p.source_pipeline.lower() for p in pipelines}, compute_sources))
         if self.store.has_conversion(pid):
             try:
                 existing = self.store.load_conversion(pid)

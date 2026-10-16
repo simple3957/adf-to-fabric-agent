@@ -17,6 +17,10 @@ class ConversionRequest(BaseModel):
     resolutions_path: Optional[str] = Field(
         default=None,
         description="JSON file mapping linked services / items to real Fabric ids (see docs/conversion.md).")
+    compute_sources_path: Optional[str] = Field(
+        default=None,
+        description="JSON file describing external Spark compute that ADF only references (Databricks clusters by id, "
+                    "Synapse Spark pools by name), so it can be sized. See docs/compute-plan.md.")
     apply_reconstruction: bool = Field(
         default=False,
         description="Convert the completed pipelines (original + SAFE reconstruction proposals) and mark every "

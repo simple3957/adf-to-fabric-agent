@@ -25,6 +25,8 @@ from typing import Any, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from adf2fabric.project.compute import ComputePlan
+
 CONVERSION_SCHEMA_VERSION = "adf-fabric-conversion/1"
 
 
@@ -261,5 +263,6 @@ class ProjectConversion(_Strict):
     reconstruction_applied: list[str] = Field(default_factory=list)  # proposal ids that entered this output
     reconstruction_open: list[str] = Field(default_factory=list)  # blocker ids still unresolved
     compatibility: list[CompatibilityFinding] = Field(default_factory=list)  # retired/deprecated/preview components
+    compute_plan: Optional[ComputePlan] = None  # external Spark compute in use and the Fabric compute that would replace it
     detail: str = ""
     provenance: dict[str, str] = Field(default_factory=dict)

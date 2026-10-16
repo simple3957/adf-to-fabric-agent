@@ -219,27 +219,28 @@ def _databricks(ac: ActivityCompute, a: AdfActivity, ls: Optional[AdfLinkedServi
     """Databricks cost of one activity run: nodes x hours x (DBUs/node-hour x DBU price + VM price)."""
     ex = ExternalCompute(linked_service=ls.name if ls else (a.linked_service_refs[0] if a.linked_service_refs else None),
                          duration_source=ac.duration_source)
-    c = ls.compute if ls else {}
-    if not ls:
+    c = ls.compute if ls else None  # AdfSparkCompute, read by discovery from the Databricks linked service
+    if not ls or c is None:
         ex.cluster = "unknown"
-        ex.notes.append("Linked service not found in the record: cluster size unknown, cost not estimated.")
+        ex.notes.append("Databricks linked service or its cluster settings not in the record: cost not estimated.")
         return ex
-    if c.get("existingClusterId"):
+    if c.mode == "existing_cluster":
         ex.cluster = "existing cluster"
         ex.notes.append("Runs on an existing all-purpose cluster: billed for the cluster's uptime, not per run; "
                         "not estimated here.")
         return ex
-    ex.cluster = "instance pool" if c.get("instancePoolId") else "job cluster"
-    ex.node_type, ex.workers = c.get("newClusterNodeType"), c.get("newClusterNumOfWorker")
-    workers = str(ex.workers or "").split(":")
-    if not ex.node_type or not workers[0].isdigit():
+    ex.cluster = "instance pool" if c.mode == "instance_pool" else "job cluster"
+    ex.node_type = c.node_type
+    ex.workers = (None if c.min_workers is None else
+                  str(c.min_workers) if c.max_workers in (None, c.min_workers) else f"{c.min_workers}:{c.max_workers}")
+    if not ex.node_type or c.min_workers is None:
         ex.notes.append("Node type or worker count is not a literal value: cost not estimated.")
         return ex
-    ex.nodes = 1 + int(workers[0])
-    if len(workers) > 1:
-        ex.notes.append(f"Autoscale {ex.workers} workers: estimated at the minimum ({workers[0]}).")
+    ex.nodes = 1 + c.min_workers
+    if c.max_workers not in (None, c.min_workers):
+        ex.notes.append(f"Autoscale {ex.workers} workers: estimated at the minimum ({c.min_workers}).")
     ex.hours = round(ac.duration_s * ac.runs_per_pipeline_run / 3600, 5)
-    ex.region, ex.tier, ex.region_tier_source = pricing.region_tier(c.get("workspaceResourceId"))
+    ex.region, ex.tier, ex.region_tier_source = pricing.region_tier(c.workspace_resource_id)
     if ex.region_tier_source == "assumed":
         ex.notes.append(f"Workspace region/tier not read from Azure: {ex.region} / {ex.tier} assumed.")
     dbu_rate = R.DATABRICKS_DBU_PER_NODE_HOUR.get(ex.node_type)

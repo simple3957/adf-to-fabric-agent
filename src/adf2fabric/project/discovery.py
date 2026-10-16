@@ -789,10 +789,37 @@ class AdfLinkedConnection(_Strict):
     parameterized_fields: list[str] = Field(default_factory=list)  # fields that use linkedService().X
 
 
+class AdfSparkCompute(_Strict):
+    """The cluster a Databricks linked service describes (explicit, non-secret settings only).
+
+    Used to size the Fabric Spark compute that would replace it. A value authored as an expression or a linked
+    service parameter is not read; its field name is listed in ``unresolved_fields`` instead of being guessed.
+    """
+
+    platform: str = "databricks"
+    mode: str = "unspecified"  # existing_cluster | new_cluster | instance_pool | unspecified
+    workspace: Optional[str] = None  # the workspace domain (a URL, not a credential)
+    workspace_resource_id: Optional[str] = None  # ARM id of the workspace (region and pricing tier are read from it)
+    existing_cluster_id: Optional[str] = None
+    instance_pool_id: Optional[str] = None
+    policy_id: Optional[str] = None
+    node_type: Optional[str] = None
+    driver_node_type: Optional[str] = None
+    min_workers: Optional[int] = None
+    max_workers: Optional[int] = None  # equal to min_workers when the cluster is a fixed size
+    runtime_version: Optional[str] = None  # as authored, e.g. 14.3.x-scala2.12
+    spark_conf: dict[str, str] = Field(default_factory=dict)  # values that look like secrets are masked
+    spark_env_var_names: list[str] = Field(default_factory=list)  # names only
+    init_script_count: int = 0
+    custom_tag_names: list[str] = Field(default_factory=list)
+    unresolved_fields: list[str] = Field(default_factory=list)
+
+
 class AdfLinkedService(_Strict):
     name: str
     path: str
     type: Optional[str] = None
+    compute: Optional[AdfSparkCompute] = None  # cluster settings, for Databricks linked services
     endpoint: Optional[str] = None  # non-secret url/baseUrl only; never a connection string
     has_connection_string: bool = False  # presence only; value NEVER read
     key_vault_refs: list[AdfKeyVaultRef] = Field(default_factory=list)
@@ -812,9 +839,6 @@ class AdfLinkedService(_Strict):
     # service that uses one has an empty ``connection`` (the UI asks the user for the values instead of guessing them).
     connection: "AdfLinkedConnection" = Field(default_factory=lambda: AdfLinkedConnection())
     parameters: list["AdfParameter"] = Field(default_factory=list)  # the linked service's own parameters
-    # Non-secret compute settings of an external-compute linked service (Azure Databricks: newClusterNodeType,
-    # newClusterNumOfWorker, newClusterVersion, existingClusterId, instancePoolId, policyId). Empty for data stores.
-    compute: dict[str, Any] = Field(default_factory=dict)
 
 
 class AdfTrigger(_Strict):

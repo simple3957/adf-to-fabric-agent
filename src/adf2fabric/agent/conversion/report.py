@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 
+from adf2fabric.agent.conversion.compute_plan import render_compute_section
 from adf2fabric.agent.conversion.fabric_schema import INFERRED, SOURCES
 from adf2fabric.project.conversion import (
     ActivityConversion,
@@ -121,6 +122,8 @@ def render_report(c: ProjectConversion) -> str:
             out += ["", f"**{f.id}** - {f.summary}"]
             out += [f"- Way forward: {alt}" for alt in f.alternatives]
             out.append(f"- Source: <{f.source_url}>")
+    if c.compute_plan is not None:
+        out += render_compute_section(c.compute_plan)
     out += ["", "## Prerequisites (all pipelines)", ""]
     out += _prereq_lines([*c.connections, *c.workspace_items]) or ["None."]
     out += ["", "## Schema provenance", "",

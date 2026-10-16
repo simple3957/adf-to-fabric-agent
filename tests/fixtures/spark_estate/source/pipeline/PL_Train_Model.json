@@ -1,0 +1,19 @@
+{
+  "name": "PL_Train_Model",
+  "properties": {
+    "activities": [
+      {
+        "name": "Train",
+        "type": "DatabricksNotebook",
+        "dependsOn": [],
+        "typeProperties": {
+          "notebookPath": "/Shared/ml/train"
+        },
+        "linkedServiceName": {
+          "referenceName": "LS_DBX_GPU",
+          "type": "LinkedServiceReference"
+        }
+      }
+    ]
+  }
+}

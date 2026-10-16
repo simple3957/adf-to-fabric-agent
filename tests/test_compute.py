@@ -187,10 +187,10 @@ def _nb(name="NB", ls="LS_Databricks", deps=()):
 
 def test_parser_keeps_databricks_cluster_settings_but_never_secrets():
     d = semantic([pipe(_nb(), name="P")], linked_services=[_dbx_ls(accessToken={"type": "SecureString", "value": "dapiSECRET"})])
-    ls = d.linked_services[0]
-    assert ls.compute == {"newClusterNodeType": "Standard_D4ds_v5", "newClusterNumOfWorker": "0",
-                          "newClusterVersion": "15.4.x-scala2.12", "workspaceResourceId": "/x",
-                          "domain": "https://adb-1.1.azuredatabricks.net"}
+    c = d.linked_services[0].compute
+    assert (c.mode, c.node_type, c.min_workers, c.max_workers, c.runtime_version) == \
+        ("new_cluster", "Standard_D4ds_v5", 0, 0, "15.4.x-scala2.12")
+    assert c.workspace_resource_id == "/x" and c.workspace == "https://adb-1.1.azuredatabricks.net"
     assert "dapiSECRET" not in d.model_dump_json()
 
 
