@@ -3,23 +3,38 @@
     "activities": [
       {
         "name": "Generate_CSV_And_Parquet",
-        "type": "TridentNotebook",
+        "type": "DatabricksNotebook",
         "dependsOn": [],
         "policy": {
-          "timeout": "0.12:00:00",
+          "timeout": "0.01:00:00",
           "retry": 0,
           "retryIntervalInSeconds": 30,
           "secureOutput": false,
           "secureInput": false
         },
         "typeProperties": {
-          "notebookId": "a43d5c2c-7e9e-4c0f-9176-cc94bb47e659",
-          "workspaceId": "53d67e72-8124-4ca3-ae55-c4b266935faa"
+          "notebookPath": "/Shared/adf-migration/NB_Read_Raw_Data",
+          "newClusterVersion": "15.4.x-scala2.12",
+          "newClusterNodeType": "Standard_D4ds_v5",
+          "newClusterNumOfWorker": "0",
+          "policyId": "0018796FECE9BEFE",
+          "dataSecurityMode": "SINGLE_USER",
+          "newClusterSparkConf": {
+            "spark.databricks.cluster.profile": "singleNode",
+            "spark.master": "local[*, 4]"
+          },
+          "newClusterCustomTags": {
+            "ResourceClass": "SingleNode",
+            "project": "adf-migration"
+          }
+        },
+        "externalReferences": {
+          "connection": "3f664c75-6e19-4d59-bfdb-96a80594ef28"
         }
       },
       {
         "name": "Transform_Parquet",
-        "type": "TridentNotebook",
+        "type": "DatabricksNotebook",
         "dependsOn": [
           {
             "activity": "Generate_CSV_And_Parquet",
@@ -29,15 +44,30 @@
           }
         ],
         "policy": {
-          "timeout": "0.12:00:00",
+          "timeout": "0.01:00:00",
           "retry": 0,
           "retryIntervalInSeconds": 30,
           "secureOutput": false,
           "secureInput": false
         },
         "typeProperties": {
-          "notebookId": "7db8ed6a-676f-4f5d-be6e-b85b8e7d88e1",
-          "workspaceId": "53d67e72-8124-4ca3-ae55-c4b266935faa"
+          "notebookPath": "/Shared/adf-migration/NB_Transform_Cab_Data",
+          "newClusterVersion": "15.4.x-scala2.12",
+          "newClusterNodeType": "Standard_D4ds_v5",
+          "newClusterNumOfWorker": "0",
+          "policyId": "0018796FECE9BEFE",
+          "dataSecurityMode": "SINGLE_USER",
+          "newClusterSparkConf": {
+            "spark.databricks.cluster.profile": "singleNode",
+            "spark.master": "local[*, 4]"
+          },
+          "newClusterCustomTags": {
+            "ResourceClass": "SingleNode",
+            "project": "adf-migration"
+          }
+        },
+        "externalReferences": {
+          "connection": "3f664c75-6e19-4d59-bfdb-96a80594ef28"
         }
       }
     ]
