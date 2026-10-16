@@ -933,6 +933,48 @@ def deploy_cmd(project_name: str, workspace_id: str, pipelines: tuple[str, ...],
         sys.exit(2)
 
 
+@cli.command(name="create-shortcut")
+@click.option("--workspace-id", "workspace_id", required=True, help="Target Fabric workspace id (GUID).")
+@click.option("--lakehouse", "lakehouse", required=True, help="Lakehouse name. Created if it does not exist.")
+@click.option("--name", "name", required=True, help="Shortcut name, for example the container name.")
+@click.option("--path", "path", default="Files", show_default=True, help="Where in the lakehouse the shortcut goes (Files or Tables).")
+@click.option("--storage-account", "account", required=True,
+              help="The ADLS Gen2 account URL: https://<account>.dfs.core.windows.net")
+@click.option("--subpath", "subpath", required=True, help="Container and optional folder, for example /migrationcontainer")
+@click.option("--connection-id", "connection_id", required=True,
+              help="GUID of an existing Fabric connection to that storage account (never a key).")
+@azure_auth_options()
+@click.option("--apply", "apply_", is_flag=True,
+              help="Actually create what is missing. Without it this only reads. Nothing is deleted or overwritten.")
+def create_shortcut_cmd(workspace_id: str, lakehouse: str, name: str, path: str, account: str, subpath: str,
+                        connection_id: str, apply_: bool, auth: str, **auth_env: str | None) -> None:
+    """Create a lakehouse and an ADLS Gen2 shortcut so Fabric notebooks can read storage (dry run unless --apply)."""
+    from adf2fabric.agent.deployment.fabric_deploy import FABRIC_SCOPE, DeployError, FabricClient
+    from adf2fabric.agent.deployment.shortcut_deploy import ShortcutSpec, create_lakehouse_shortcut
+    from adf2fabric.connectivity._azure import CredentialUnavailable, build_credential
+
+    try:
+        credential, _ = build_credential(credential_from(auth, **auth_env))
+        client = FabricClient(credential.get_token(FABRIC_SCOPE).token)
+        r = create_lakehouse_shortcut(client, workspace_id, lakehouse,
+                                      ShortcutSpec(name, path, account, subpath, connection_id), apply=apply_)
+    except (DeployError, CredentialUnavailable) as exc:
+        click.secho(f"Shortcut failed: {getattr(exc, 'detail', None) or exc}", fg="red", err=True)
+        sys.exit(1)
+    except Exception as exc:  # noqa: BLE001 - e.g. az login missing/expired; message carries no token
+        click.secho(f"Shortcut failed: could not get a Fabric token or reach Fabric ({type(exc).__name__}). "
+                    "Check `az login` with an account that has access to the workspace.", fg="red", err=True)
+        sys.exit(1)
+    click.echo(("SHORTCUT" if apply_ else "SHORTCUT (dry run - nothing changed; add --apply)") + f"  workspace: {workspace_id}")
+    click.echo(f"  lakehouse: {r.lakehouse}: {r.lakehouse_action}{f' [{r.lakehouse_id}]' if r.lakehouse_id else ''}")
+    click.secho(f"  shortcut:  {path}/{r.shortcut}: {r.shortcut_action} - {r.detail}",
+                fg="red" if r.shortcut_action == "differs" else ("green" if apply_ else None))
+    if r.onelake_path:
+        click.echo(f"  read it from a notebook at: {r.onelake_path}")
+    if r.shortcut_action == "differs":
+        sys.exit(2)
+
+
 @cli.command(name="fetch-databricks-notebooks")
 @click.option("--project", "project_name", required=True, help="Project name (`discovery-adf-semantic` must have run).")
 @click.option("--linked-service", "linked_service", default=None,

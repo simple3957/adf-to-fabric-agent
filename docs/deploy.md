@@ -24,6 +24,14 @@ Verified live on 2026-10-16: a notebook was created in `adf-migration-test`, its
 
 A long-running operation may come back with a `Location` on a regional host. That host is never followed; the operation is polled at `https://api.fabric.microsoft.com/v1/operations/{id}` (found live, fixed in `fabric_deploy._operation_url`).
 
+## Giving notebooks access to storage (lakehouse and shortcut)
+
+`adf2fabric create-shortcut --workspace-id <guid> --lakehouse <name> --name <shortcut> --storage-account https://<account>.dfs.core.windows.net --subpath /<container> --connection-id <guid> [--apply]` creates the lakehouse if it is missing, and an ADLS Gen2 OneLake shortcut in it, then prints the `abfss://` path a notebook reads it from. The connection must already exist in Fabric; no storage key is handled. It is idempotent and never deletes or overwrites: a shortcut with the same name and path that points elsewhere is reported (exit code 2). Code: `agent/deployment/shortcut_deploy.py`.
+
+Why: a Databricks notebook that reads ADLS through a Unity Catalog external location fails in Fabric with HTTP 401, because Fabric uses the running identity's access (see `docs/databricks-notebooks.md`).
+
+In Git Bash on Windows, set `MSYS_NO_PATHCONV=1` first, or `/container` is rewritten into a Windows path and the tool refuses it.
+
 ## Running a deployed pipeline
 
 `adf2fabric run --workspace-id <guid> --pipeline <name> [--param name=value] [--apply]` runs a pipeline through the Job Scheduler API and waits for the result (`Completed`, `Failed`, `Cancelled`, `Deduped`, or `Timeout` if it outlasts `--timeout`; a timed-out run keeps running in Fabric). It prints the failure reason and each activity's outcome. Without `--apply` it only checks the pipeline exists. Code: `agent/deployment/fabric_run.py`.
