@@ -18,6 +18,7 @@ from adf2fabric.api.container import Container, Session, Settings
 from adf2fabric.connections.fabric import FabricService
 from adf2fabric.connections.models import (
     ArmResource,
+    AzureAccount,
     Check,
     CheckStatus,
     ConnectionState,
@@ -131,7 +132,7 @@ class DemoAzure:
     def __init__(self):
         self.logins = _DemoLogins()
 
-    def status(self) -> ProviderStatus:
+    def status(self, refresh: bool = False) -> ProviderStatus:
         return ProviderStatus(provider=self.id, available=True, version="demo", authenticated=True, account=DEMO_ACCOUNT,
                               tenant_id=DEMO_TENANT, subscription_id=DEMO_SUB, state=ConnectionState.authenticated,
                               checks=[Check(name="demo", status=CheckStatus.passed, detail="canned data; no Azure call is made")])
@@ -145,7 +146,10 @@ class DemoAzure:
     def logout(self, username=None):
         return self.status()  # demo: nothing to sign out of
 
-    def subscriptions(self):
+    def accounts(self, refresh=False):
+        return [AzureAccount(username=DEMO_ACCOUNT, tenants=[DEMO_TENANT], is_default=True, subscription_count=1)]
+
+    def subscriptions(self, account=None, refresh=False):
         return [Subscription(id=DEMO_SUB, name="Contoso Demo", tenant_id=DEMO_TENANT, state="Enabled", is_default=True, user=DEMO_ACCOUNT)]
 
     def tenants(self):

@@ -81,8 +81,11 @@ class Container:
         return self.sessions.setdefault(session_id, Session(id=session_id))
 
     # ---- Fabric destination -------------------------------------------------------------------------------------
-    def fabric(self, session: Session, provider: Optional[str] = None) -> FabricService:
-        """A FabricService through the chosen sign-in: the Azure CLI session (REST) or the Fabric CLI (``fab api``)."""
+    def fabric(self, session: Session, provider: Optional[str] = None, account: Optional[str] = None) -> FabricService:
+        """A FabricService through the chosen sign-in: the Azure CLI session (REST) or the Fabric CLI (``fab api``).
+
+        ``account`` (or the one saved on the session's destination) picks which signed-in Azure account Fabric is used as,
+        independently of the account the ADF source uses."""
         provider = provider or session.destination.get("provider") or "azure_cli"
         if self._fabric_factory:
             return self._fabric_factory(session, provider)
@@ -91,7 +94,8 @@ class Container:
         if provider != "azure_cli":
             raise ValueError(f"Unknown destination sign-in '{provider}'. Use azure_cli or fabric_cli.")
         tenant = session.destination.get("tenant_id")
-        return FabricService(RestFabricApi(lambda: self.azure.token(tenant=tenant, resource=FABRIC_RESOURCE)))
+        who = account or session.destination.get("account")
+        return FabricService(RestFabricApi(lambda: self.azure.token(tenant=tenant, account=who, resource=FABRIC_RESOURCE)))
 
     # ---- Key Vault ---------------------------------------------------------------------------------------------
     def read_vault_secret(self, vault_url: str, secret_name: str) -> str:

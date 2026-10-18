@@ -77,6 +77,15 @@ class Subscription(_Model):
     user: Optional[str] = None
 
 
+class AzureAccount(_Model):
+    """One person signed in to the Azure CLI on this machine (a username can appear in several tenants)."""
+
+    username: str
+    tenants: list[str] = Field(default_factory=list)
+    is_default: bool = False
+    subscription_count: int = 0  # real subscriptions; the tenant-level entry of a sign-in without any is not counted
+
+
 class ArmResource(_Model):
     id: str
     name: str

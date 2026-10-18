@@ -38,6 +38,7 @@ class SourceSelection(_In):
 
 class DestinationSelection(_In):
     provider: str = "azure_cli"  # azure_cli | fabric_cli
+    account: Optional[str] = None  # azure_cli: which signed-in account Fabric is used as (default: the CLI's default)
     tenant_id: Optional[str] = None
     workspace_id: Optional[str] = None
 

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from typing import Any, Callable, Optional
 from urllib.parse import quote
 
@@ -20,6 +21,7 @@ from adf2fabric.agent.discovery.adf.arm import API_VERSION as ADF_API_VERSION
 from adf2fabric.agent.intake.azure_source import AdfRequestError, ArmFetcher, describe_failure
 from adf2fabric.connections.models import (
     ArmResource,
+    AzureAccount,
     Check,
     CheckStatus,
     ConnectionState,
@@ -63,11 +65,21 @@ class AzureCliProvider:
 
     def __init__(self, runner: Runner = run_cli, login_manager: Optional[LoginManager] = None,
                  transport_factory: Optional[Callable[[], Any]] = None,
-                 fetcher_factory: Optional[Callable[[str], ArmFetcher]] = None):
+                 fetcher_factory: Optional[Callable[[str], ArmFetcher]] = None,
+                 cache_seconds: float = 20.0, clock: Callable[[], float] = time.monotonic):
         self._run = runner
         self.logins = login_manager or LoginManager()
         self._transport_factory = transport_factory
         self._fetcher_factory = fetcher_factory
+        # `az account list` and `az account show` each take seconds, and a page asks for them on every click. Their
+        # answers change only when someone signs in or out, so they are kept briefly and dropped at once on a sign-in or
+        # sign-out (or when a caller asks for `refresh`). Only the account list is cached, never a token.
+        self._ttl, self._clock = cache_seconds, clock
+        self._rows_cache: Optional[tuple[float, list[dict]]] = None
+        self._status_cache: Optional[tuple[float, ProviderStatus]] = None
+
+    def invalidate(self) -> None:
+        self._rows_cache = self._status_cache = None
 
     # ---- availability + sign-in state ---------------------------------------------------------------------
     def version(self) -> Optional[str]:
@@ -79,7 +91,17 @@ class AzureCliProvider:
         except (ValueError, AttributeError):
             return "unknown" if r.ok else None
 
-    def status(self) -> ProviderStatus:
+    def status(self, refresh: bool = False) -> ProviderStatus:
+        """The default account's state; kept for a few seconds unless `refresh`."""
+        now = self._clock()
+        if not refresh and self._status_cache and now - self._status_cache[0] < self._ttl:
+            return self._status_cache[1].model_copy(deep=True)
+        st = self._status()
+        if st.available:  # "not installed" is not worth keeping: installing it is exactly what the user does next
+            self._status_cache = (now, st)
+        return st.model_copy(deep=True)
+
+    def _status(self) -> ProviderStatus:
         """Installed? Signed in? Can a management token actually be acquired (so a stale session is caught)?"""
         st = ProviderStatus(provider=self.id)
         show = self._run(["az", "account", "show", "--output", "json"], timeout=40)
@@ -120,6 +142,7 @@ class AzureCliProvider:
     def start_login(self, tenant: Optional[str] = None, device_code: bool = False) -> LoginAttempt:
         if self._run(["az", "--version"], timeout=40).found is False:
             raise ProviderError("The Azure CLI is not installed.", [INSTALL_HINT])
+        self.invalidate()
         argv = ["az", "login", "--allow-no-subscriptions"]
         if tenant:
             argv += ["--tenant", tenant]
@@ -136,14 +159,22 @@ class AzureCliProvider:
         """
         argv = ["az", "logout"] + (["--username", username] if username else [])
         r = self._run(argv, timeout=60)
+        self.invalidate()
         if not r.found:
             raise ProviderError("The Azure CLI is not installed.", [INSTALL_HINT])
         if not r.ok and "no account" not in r.text.lower() and "please run 'az login'" not in r.text.lower():
             raise ProviderError(f"Sign-out failed: {redact(r.text)[:300]}")
-        return self.status()
+        return self.status(refresh=True)
 
     # ---- tokens (internal only; never returned by any API) ---------------------------------------------------
-    def token(self, subscription: Optional[str] = None, tenant: Optional[str] = None, resource: str = ARM_RESOURCE) -> str:
+    def token(self, subscription: Optional[str] = None, tenant: Optional[str] = None, resource: str = ARM_RESOURCE,
+              account: Optional[str] = None) -> str:
+        """A token for `resource`. `account` (a signed-in username) selects that person without changing the CLI's
+        default account: it is resolved to one of the account's own subscription entries, which the CLI maps back to it."""
+        if account and not subscription:
+            subscription = self.subscription_for(account, tenant)
+            if subscription is None:
+                raise ProviderError(f"{account} is not signed in on this machine.", ["Sign in with that account first."])
         argv = ["az", "account", "get-access-token", "--resource", resource, "--query", "accessToken", "-o", "tsv"]
         if subscription:
             argv += ["--subscription", subscription]
@@ -156,17 +187,59 @@ class AzureCliProvider:
         return r.stdout.strip()
 
     # ---- subscriptions + discovery ---------------------------------------------------------------------------
-    def subscriptions(self) -> list[Subscription]:
+    def _rows(self, refresh: bool = False) -> list[dict]:
+        now = self._clock()
+        if not refresh and self._rows_cache and now - self._rows_cache[0] < self._ttl:
+            return self._rows_cache[1]
         r = self._run(["az", "account", "list", "--all", "--output", "json"], timeout=90)
         if not r.ok:
             raise ProviderError("Could not list subscriptions." + (" " + _first_line(r.text) if r.text else ""),
                                 ["Sign in with `az login`, then retry."])
+        try:
+            rows = json.loads(r.stdout or "[]")
+        except ValueError:
+            raise ProviderError("`az account list` returned something unreadable.") from None
+        self._rows_cache = (now, rows)
+        return rows
+
+    def subscriptions(self, account: Optional[str] = None, refresh: bool = False) -> list[Subscription]:
+        """Subscriptions of every signed-in account, or of just `account`."""
         out = []
-        for a in json.loads(r.stdout or "[]"):
+        for a in self._rows(refresh):
+            user = (a.get("user") or {}).get("name")
+            if account and (user or "").lower() != account.lower():
+                continue
             out.append(Subscription(id=a.get("id", ""), name=a.get("name", ""), tenant_id=a.get("tenantId"),
-                                    state=a.get("state"), is_default=bool(a.get("isDefault")),
-                                    user=(a.get("user") or {}).get("name")))
+                                    state=a.get("state"), is_default=bool(a.get("isDefault")), user=user))
         return out
+
+    def accounts(self, refresh: bool = False) -> list[AzureAccount]:
+        """Who is signed in on this machine: one entry per username, default first, then by name."""
+        by_user: dict[str, AzureAccount] = {}
+        for a in self._rows(refresh):
+            user = (a.get("user") or {}).get("name")
+            if not user:
+                continue
+            acc = by_user.setdefault(user.lower(), AzureAccount(username=user))
+            tenant = a.get("tenantId")
+            if tenant and tenant not in acc.tenants:
+                acc.tenants.append(tenant)
+            acc.is_default = acc.is_default or bool(a.get("isDefault"))
+            if not str(a.get("name", "")).startswith("N/A(tenant level"):
+                acc.subscription_count += 1
+        return sorted(by_user.values(), key=lambda x: (not x.is_default, x.username.lower()))
+
+    def subscription_for(self, account: str, tenant: Optional[str] = None) -> Optional[str]:
+        """An entry of `account` the CLI can use to pick that person for a token. Prefers the given tenant, then a real
+        subscription over the tenant-level entry a sign-in without subscriptions leaves behind."""
+        mine = [a for a in self._rows() if ((a.get("user") or {}).get("name") or "").lower() == account.lower()]
+        if tenant:
+            in_tenant = [a for a in mine if a.get("tenantId") == tenant]
+            mine = in_tenant or mine
+        if not mine:
+            return None
+        mine.sort(key=lambda a: (a.get("state") != "Enabled", str(a.get("name", "")).startswith("N/A(tenant level")))
+        return mine[0].get("id")
 
     def tenants(self) -> list[dict[str, str]]:
         r = self._run(["az", "account", "tenant", "list", "--output", "json"], timeout=60)

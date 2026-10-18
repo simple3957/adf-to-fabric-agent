@@ -156,8 +156,9 @@ def create_app(settings: Optional[Settings] = None, live: Optional[Container] = 
         raise HTTPException(404, "Unknown provider. Use azure_cli or fabric_cli.")
 
     @app.get("/auth/{provider}/status", dependencies=dep)
-    def auth_status(provider: str, ctx: Ctx = Depends()):
-        return S.dump(_provider_for(ctx, provider).status())
+    def auth_status(provider: str, refresh: bool = False, ctx: Ctx = Depends()):
+        p = _provider_for(ctx, provider)
+        return S.dump(p.status(refresh=refresh) if provider == "azure_cli" else p.status())
 
     @app.post("/auth/{provider}/login", dependencies=dep)
     def auth_login(provider: str, body: S.LoginBody, ctx: Ctx = Depends()):
@@ -191,6 +192,14 @@ def create_app(settings: Optional[Settings] = None, live: Optional[Container] = 
             raise HTTPException(404, "No such sign-in attempt.")
         return a.public()
 
+    @app.get("/auth/azure_cli/accounts", dependencies=dep)
+    def accounts(refresh: bool = False, ctx: Ctx = Depends()):
+        """Everyone signed in to the Azure CLI on this machine. Source and destination each pick one of them."""
+        try:
+            return {"accounts": S.dump(ctx.c.azure.accounts(refresh=refresh))}
+        except ProviderError as exc:
+            return _err(502, str(exc), exc.actions)
+
     @app.get("/auth/azure_cli/tenants", dependencies=dep)
     def tenants(ctx: Ctx = Depends()):
         return {"tenants": ctx.c.azure.tenants()}
@@ -202,8 +211,8 @@ def create_app(settings: Optional[Settings] = None, live: Optional[Container] = 
 
     # ---- source --------------------------------------------------------------------------------------------------------
     @app.get("/azure/subscriptions", dependencies=dep)
-    def subscriptions(ctx: Ctx = Depends()):
-        return {"subscriptions": S.dump(ctx.c.azure.subscriptions())}
+    def subscriptions(account: Optional[str] = None, refresh: bool = False, ctx: Ctx = Depends()):
+        return {"subscriptions": S.dump(ctx.c.azure.subscriptions(account=account, refresh=refresh))}
 
     @app.get("/azure/discover", dependencies=dep)
     def azure_discover(subscription_id: str = Query(...), ctx: Ctx = Depends()):
@@ -279,16 +288,16 @@ def create_app(settings: Optional[Settings] = None, live: Optional[Container] = 
         return {"destination": ctx.session.destination}
 
     @app.get("/fabric/workspaces", dependencies=dep)
-    def fabric_workspaces(provider: Optional[str] = None, ctx: Ctx = Depends()):
-        return {"workspaces": S.dump(ctx.c.fabric(ctx.session, provider).workspaces())}
+    def fabric_workspaces(provider: Optional[str] = None, account: Optional[str] = None, ctx: Ctx = Depends()):
+        return {"workspaces": S.dump(ctx.c.fabric(ctx.session, provider, account).workspaces())}
 
     @app.get("/fabric/capacities", dependencies=dep)
-    def fabric_capacities(provider: Optional[str] = None, ctx: Ctx = Depends()):
-        return {"capacities": ctx.c.fabric(ctx.session, provider).capacities()}
+    def fabric_capacities(provider: Optional[str] = None, account: Optional[str] = None, ctx: Ctx = Depends()):
+        return {"capacities": ctx.c.fabric(ctx.session, provider, account).capacities()}
 
     @app.post("/test/destination", dependencies=dep)
     def test_destination(body: S.DestinationSelection, ctx: Ctx = Depends()):
-        svc = ctx.c.fabric(ctx.session, body.provider)
+        svc = ctx.c.fabric(ctx.session, body.provider, body.account)
         if not body.workspace_id:
             raise HTTPException(422, "workspace_id is required.")
         rep = svc.validate_workspace(body.workspace_id)
