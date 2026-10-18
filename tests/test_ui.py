@@ -322,3 +322,24 @@ def test_journey_rules():
     c = journey.connect_facts(cards)
     assert not c.complete and c.metric == "1 of 3 ready" and c.attention == "1 need attention"
     assert journey.deploy_facts({"applied": False, "results": [{"action": "create"}]}).complete is False
+
+
+def test_importing_from_git_creates_and_selects_the_project(api):
+    at = _app(api)
+    at.session_state["src-method"] = "Git repository"
+    at.run()
+    at.text_input(key="src-git-url").set_value("https://github.com/org/demo-adf.git").run()
+    next(b for b in at.button if b.label == "Import repository").click().run()
+    assert not at.exception, at.exception
+    assert at.session_state["project_id"] in [p["id"] for p in api.projects()]
+
+
+def test_a_failed_azure_import_is_shown_and_selects_nothing(api):
+    # demo mode has no real Azure behind it, so the import job fails: the page must say so, not stay silent
+    at = _app(api)
+    at.run()
+    at.selectbox(key="src-account").select(DEMO).run()
+    next(b for b in at.button if b.label == "Import factory").click().run()
+    assert not at.exception, at.exception
+    assert at.error and "token" in str(at.error[0].value).lower()
+    assert "project_id" not in at.session_state or not at.session_state["project_id"]

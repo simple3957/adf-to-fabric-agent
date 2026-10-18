@@ -10,13 +10,13 @@ import streamlit as st
 
 import theme
 from api_client import ApiClient
-from components import STATE_LABELS, call, run_job, state_badge, status_badge, test_report
+from components import STATE_LABELS, call, run_job, short_source, state_badge, status_badge, test_report
 
 
 # ---- 1. discover ----------------------------------------------------------------------------------------------------------
 def discover(api: ApiClient, pid: str, project: dict | None, found: dict | None) -> None:
     src = (project or {}).get("source") or {}
-    st.markdown(f"Source: **{src.get('provider') or '-'}** {src.get('url') or ''} · commit `{(src.get('commit') or '-')[:12]}`")
+    st.markdown(f"Source: **{src.get('provider') or '-'}** {short_source(src.get('url'))} · commit `{(src.get('commit') or '-')[:12]}`")
     label = "Run discovery again" if (project or {}).get("has_semantic") else "Run discovery"
     if st.button(label, type="primary", key="run-discover"):
         for stage in ("discovery", "semantic"):

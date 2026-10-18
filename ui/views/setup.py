@@ -9,7 +9,7 @@ import streamlit as st
 import theme
 from api_client import ApiError
 from cache import DISCOVERY_TTL, SUBSCRIPTIONS_TTL, WORKSPACES_TTL, cached, forget
-from components import account_picker, call, client, identity, run_job, show_error, test_report
+from components import account_picker, call, client, identity, run_job, short_source, show_error, test_report
 
 api = client()
 pid = st.session_state.get("project_id")
@@ -171,7 +171,7 @@ def source_body() -> None:
     if pid:
         info = call(api.project, pid) or {}
         src = info.get("source") or {}
-        st.success(f"Using project **{pid}** · {src.get('provider') or '?'} {src.get('url') or ''}")
+        st.success(f"Using project **{pid}** · {src.get('provider') or '?'} {short_source(src.get('url'))}")
         if not st.toggle("Import a different source", key="src-again"):
             return
     method = st.segmented_control("Where is the ADF source?", ["Azure factory", "Git repository", "ZIP export"],

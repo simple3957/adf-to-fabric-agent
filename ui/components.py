@@ -299,6 +299,14 @@ def _sign_out(provider: str, account: Optional[str], key: str) -> None:
         st.rerun()
 
 
+def short_source(url: Optional[str]) -> str:
+    """A readable form of a source address: an Azure factory is its name, not the full ARM path."""
+    url = url or ""
+    if url.startswith("azure://"):
+        return "factory " + url.rstrip("/").rsplit("/", 1)[-1]
+    return url
+
+
 def current_project() -> Optional[str]:
     return st.session_state.get("project_id")
 
