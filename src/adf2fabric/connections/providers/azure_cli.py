@@ -52,6 +52,32 @@ _EXPIRED = re.compile(r"(?i)AADSTS(700082|50173|70043|50078|50079)|refresh token
                       r"token (?:has )?expired|session has expired|az login")
 
 
+# What Azure's AADSTS codes mean for the person who has to act. Anything not listed falls back to Azure's own first line.
+_AAD_HINTS = {
+    "530035": ("Azure blocked this sign-in because of the directory's security defaults.",
+               "Set up multi-factor authentication for this account (portal.azure.com > the account's security info), then "
+               "sign in with it again."),
+    "50076": ("Azure needs multi-factor verification for this account.", "Sign in again and complete the verification."),
+    "50079": ("Azure needs multi-factor verification for this account.", "Sign in again and complete the verification."),
+    "90072": ("This account is not a user in that directory.", "Sign in with an account that belongs to that directory."),
+    "700082": ("The sign-in expired.", "Sign in again."),
+    "50173": ("The sign-in expired.", "Sign in again."),
+    "70043": ("The sign-in expired.", "Sign in again."),
+}
+
+
+def token_failure(text: str) -> tuple[str, list[str]]:
+    """A message and next step for a failed `az account get-access-token`, from what Azure said (never a token)."""
+    code = re.search(r"AADSTS(\d+)", text or "")
+    if code and code.group(1) in _AAD_HINTS:
+        what, action = _AAD_HINTS[code.group(1)]
+        return f"Could not get an Azure token (AADSTS{code.group(1)}): {what}", [action]
+    if _EXPIRED.search(text or ""):
+        return "Could not get an Azure token. The session has expired.", ["Sign in again (`az login`)."]
+    line = _first_line(text)
+    return "Could not get an Azure token." + (f" Azure said: {line}" if line else ""), ["Sign in again (`az login`)."]
+
+
 class ProviderError(Exception):
     """A failure with an actionable message (already redacted)."""
 
@@ -182,8 +208,7 @@ class AzureCliProvider:
             argv += ["--tenant", tenant]
         r = self._run(argv, timeout=60, raw=True)  # the only call that keeps stdout unredacted: the token stays local
         if not r.ok or not r.stdout.strip():
-            raise ProviderError("Could not get an Azure token." + (" The session has expired." if _EXPIRED.search(r.text) else ""),
-                                ["Sign in again (`az login`)."])
+            raise ProviderError(*token_failure(r.text))
         return r.stdout.strip()
 
     # ---- subscriptions + discovery ---------------------------------------------------------------------------

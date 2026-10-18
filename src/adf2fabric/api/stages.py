@@ -121,7 +121,7 @@ def run_stage(c: Container, session: Session, pid: str, stage: str, log: Log, op
     if not items:
         raise StageError("Nothing to deploy.", ["Run the convert stage first."])
     try:
-        token = c.azure.token(tenant=dest.get("tenant_id"), resource=FABRIC_RESOURCE)
+        token = c.azure.token(tenant=dest.get("tenant_id"), account=dest.get("account"), resource=FABRIC_RESOURCE)
         results = deploy(FabricClient(token), workspace, items, apply=stage == "deploy_apply",
                          allow_unbound=bool(options.get("allow_unbound")))
     except DeployError as exc:

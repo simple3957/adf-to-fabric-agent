@@ -231,3 +231,34 @@ def test_fabric_is_reached_as_the_chosen_account_even_when_another_is_the_defaul
     c.fabric(sess).api._token()  # the saved account
     c.fabric(sess, account=GMAIL).api._token()  # an explicit one wins
     assert [k["account"] for k in seen] == [PAL, GMAIL] and all(k["tenant"] == "t-pal" for k in seen)
+
+
+# --- what a failed token says -------------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("stderr,code,fragment", [
+    ("ERROR: AADSTS530035: Access has been blocked by security defaults. Trace ID: abc", "530035", "security defaults"),
+    ("ERROR: AADSTS90072: User account 'x' does not exist in tenant 'Default Directory'", "90072", "not a user in that directory"),
+    ("ERROR: AADSTS50076: Due to a configuration change made by your administrator", "50076", "multi-factor"),
+    ("ERROR: AADSTS700082: The refresh token has expired due to inactivity.", "700082", "expired"),
+])
+def test_a_failed_token_says_what_azure_said_not_just_that_the_session_expired(stderr, code, fragment):
+    p, _ = provider({"az account get-access-token": bad(stderr)})
+    with pytest.raises(ProviderError) as e:
+        p.token(account=GMAIL)
+    assert f"AADSTS{code}" in str(e.value) and fragment in str(e.value)
+    assert e.value.actions and "session has expired" not in str(e.value).replace("The sign-in expired", "")
+
+
+def test_an_unrecognised_failure_quotes_azures_first_line_and_never_a_token():
+    p, _ = provider({"az account get-access-token": bad("ERROR: something odd happened\nsecond line")})
+    with pytest.raises(ProviderError) as e:
+        p.token(account=GMAIL)
+    assert "something odd happened" in str(e.value) and "second line" not in str(e.value)
+
+
+def test_a_plain_expired_session_keeps_its_old_message():
+    from adf2fabric.connections.providers.azure_cli import token_failure
+
+    msg, actions = token_failure("ERROR: Please run 'az login' to setup account.")
+    assert "session has expired" in msg and actions
