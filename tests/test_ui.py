@@ -136,21 +136,178 @@ def test_discover_then_confirm_opens_connect(api):
     assert at.button(key="open-convert").disabled  # still locked until Connect is confirmed
 
 
-def test_sign_in_is_asked_not_assumed_then_switch_and_sign_out(api):
+DEMO = "demo.user@contoso.example"
+NEW_LABEL = "＋ Sign in with another account…"
+
+
+def _choose_new_account(at, key):
+    box = at.selectbox(key=key)
+    box.select_index(len(box.options) - 1).run()  # the last choice is always "sign in with another account"
+
+
+def _counted(api, *names):
+    """Wrap API methods so a test can count how often a page asks for them."""
+    calls = {n: 0 for n in names}
+    for n in names:
+        real = getattr(api, n)
+
+        def wrapper(*a, _real=real, _n=n, **k):
+            calls[_n] += 1
+            return _real(*a, **k)
+
+        setattr(api, n, wrapper)
+    return calls
+
+
+def test_nobody_is_assumed_each_side_picks_its_own_account(api):
     at = _app(api)
     at.run()
     assert not at.exception, at.exception
-    # Nobody is assumed: the Fabric card offers "Continue as ..." and lists no workspaces yet.
-    assert at.button(key="dst-azure_cli-continue") and not [s for s in at.selectbox if s.key == "dst-ws"]
-    at.button(key="dst-azure_cli-continue").click().run()
-    assert at.session_state["confirmed_ids"]["dst-azure_cli"] == "demo.user@contoso.example"
-    assert [s for s in at.selectbox if s.key == "dst-ws"]  # workspaces appear once the account is confirmed
-    at.button(key="dst-azure_cli-switch").click().run()  # switch opens the sign-in form
-    assert at.button(key="dst-azure_cli-go") and at.button(key="dst-azure_cli-cancel")
-    at.button(key="dst-azure_cli-cancel").click().run()
-    at.button(key="dst-azure_cli-out").click().run()  # sign out forgets the confirmation
-    assert "dst-azure_cli" not in at.session_state["confirmed_ids"]
+    dst = at.selectbox(key="dst-account")
+    assert dst.value is None and DEMO in dst.options and dst.options[-1] == NEW_LABEL
+    assert not [s for s in at.selectbox if s.key == "dst-ws"]  # no workspaces until an account is chosen
+    dst.select(DEMO).run()
+    assert at.selectbox(key="dst-account").value == DEMO
+    assert [s for s in at.selectbox if s.key == "dst-ws"]
+    # the destination's choice does not choose for the source: that side still asks
+    assert at.selectbox(key="src-account").value is None if [s for s in at.selectbox if s.key == "src-account"] else True
     assert not at.exception, at.exception
+
+
+def test_source_and_destination_can_hold_different_accounts(api):
+    at = _app(api)
+    at.run()
+    at.toggle(key="src-again").set_value(True).run() if [t for t in at.toggle if t.key == "src-again"] else None
+    src = [s for s in at.selectbox if s.key == "src-account"]
+    if src:  # no project selected, so the source card shows its picker
+        src[0].select(DEMO).run()
+    at.selectbox(key="dst-account").select(DEMO).run()
+    assert at.selectbox(key="dst-account").value == DEMO
+    if src:
+        assert at.selectbox(key="src-account").value == DEMO
+    assert not at.exception, at.exception
+
+
+def test_signing_in_is_a_choice_in_the_dropdown_and_the_tenant_is_last(api):
+    at = _app(api)
+    at.run()
+    _choose_new_account(at, "dst-account")
+    assert at.button(key="dst-account-go") and at.button(key="dst-account-cancel")
+    tenant = at.text_input(key="dst-account-tenant")
+    assert tenant.value == "" and tenant.label == "Tenant ID"
+    # start without any tenant: the sign-in works and the new account is selected
+    at.button(key="dst-account-go").click().run()
+    assert at.selectbox(key="dst-account").value == DEMO
+    assert not at.exception, at.exception
+
+
+def test_cancelling_a_sign_in_clears_the_choice_and_signing_out_forgets_the_account(api):
+    at = _app(api)
+    at.run()
+    _choose_new_account(at, "dst-account")
+    at.button(key="dst-account-cancel").click().run()
+    assert at.selectbox(key="dst-account").value is None
+    at.selectbox(key="dst-account").select(DEMO).run()
+    at.button(key="dst-account-out").click().run()
+    assert at.selectbox(key="dst-account").value is None
+    assert not at.exception, at.exception
+
+
+def test_slow_lookups_are_made_once_not_on_every_click(api):
+    calls = _counted(api, "accounts", "workspaces", "subscriptions", "discover")
+    at = _app(api)
+    at.run()
+    at.selectbox(key="dst-account").select(DEMO).run()
+    for _ in range(4):  # unrelated clicks: opening Advanced, toggling, rerunning the page
+        at.toggle(key="dst-fab").set_value(False).run()
+        at.run()
+    assert calls["accounts"] == 1, calls
+    assert calls["workspaces"] == 1, calls
+    at.button(key="dst-refresh").click().run()  # an explicit refresh looks again
+    assert calls["workspaces"] == 2, calls
+
+
+def test_a_failed_factory_lookup_is_shown_not_reported_as_no_factories(api):
+    api.discover = lambda sub: {"factories": [], "_errors": [{"id": "factories", "name": "Azure blocked this sign-in", "type": "error"},
+                                                                 {"id": "storage", "name": "Azure blocked this sign-in", "type": "error"}]}
+    at = _app(api)
+    at.run()
+    at.selectbox(key="src-account").select(DEMO).run()
+    shown = [e.value for e in at.error]
+    assert shown.count("Azure blocked this sign-in") == 1  # the repeated message appears once
+    assert not [i for i in at.info if "No data factories" in str(i.value)]
+    assert not at.exception, at.exception
+
+
+def test_the_launch_bar_is_one_line_not_three_checks(api):
+    at = _app(api)
+    at.run()
+    text = " ".join(str(m.value) for m in at.markdown)
+    assert "Still needed" in text and "Route chosen" not in text
+
+
+def test_the_route_step_and_the_hero_are_gone(api):
+    at = _app(api)
+    at.run()
+    assert not [s for s in at.selectbox if s.label in ("From · Source", "To · Destination")]
+    assert "Move your Data Factory" not in " ".join(str(m.value) for m in at.markdown)
+
+
+def test_the_connect_step_shows_one_editor_not_one_per_linked_service(api):
+    at = _app(api, project_id="demo-estate")
+    at.switch_page("views/migration.py").run()
+    at.button(key="run-discover").click().run()
+    at.button(key="go-next").click().run()
+    assert at.session_state["step"]["demo-estate"] == "connect"
+    assert len(at.dataframe) >= 1 and not at.exception, at.exception
+    forms = [k for k in (s.key for s in at.selectbox) if k and k.startswith("m-")]
+    assert len(forms) == 1, forms  # a single sign-in method picker: only the selected linked service is editable
+    assert not [e for e in at.expander if "LS_" in str(e.label)]  # no expander per linked service
+
+
+def test_creating_connections_needs_a_preview_first(api):
+    at = _app(api, project_id="demo-estate", confirmed={"demo-estate": {"discover"}}, step={"demo-estate": "connect"})
+    at.switch_page("views/migration.py").run()
+    at.button(key="run-discover").click().run() if [b for b in at.button if b.key == "run-discover"] else None
+    go = [b for b in at.button if b.key == "apply-go"]
+    assert go and go[0].disabled  # nothing to create until a preview has been looked at
+
+
+def test_ttl_cache_keeps_an_answer_until_it_expires_and_never_keeps_an_error():
+    from cache import TtlCache
+
+    now = [0.0]
+    c = TtlCache(clock=lambda: now[0])
+    n = {"calls": 0}
+
+    def load():
+        n["calls"] += 1
+        return n["calls"]
+
+    assert c.get("a", 10, load) == 1 and c.get("a", 10, load) == 1 and n["calls"] == 1
+    now[0] = 11
+    assert c.get("a", 10, load) == 2
+    c.forget("a")
+    assert c.get("a", 10, load) == 3
+
+    def boom():
+        raise RuntimeError("down")
+
+    with pytest.raises(RuntimeError):
+        c.get("b", 10, boom)
+    assert c.get("b", 10, lambda: "ok") == "ok"  # the failure was not stored
+
+
+def test_forgetting_by_prefix_leaves_other_keys():
+    from cache import TtlCache
+
+    c = TtlCache()
+    for k in ("subs:a", "subs:b", "disc:x", "ws:y"):
+        c.get(k, 10, lambda k=k: k)
+    c.forget("subs", "ws")
+    assert len(c) == 1 and c.get("disc:x", 10, lambda: "reloaded") == "disc:x"
+    c.forget()
+    assert len(c) == 0
 
 
 def test_journey_rules():

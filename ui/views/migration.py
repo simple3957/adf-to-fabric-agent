@@ -39,7 +39,7 @@ if selected not in by_key or by_key[selected].locked:
 
 # ---- layout: stepper on the left, the open step on the right ---------------------------------------------------------------
 done = done_count(steps)
-left, right = st.columns([1.05, 2.8], gap="large")
+left, right = st.columns([0.95, 3.3], gap="large")
 with left, st.container(key="stepper"):
     theme.html_block(theme.ring(done, len(steps), (project or {}).get("name") or pid, "ADF → Microsoft Fabric"))
     for s in steps:

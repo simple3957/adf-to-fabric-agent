@@ -99,3 +99,13 @@ The connections screen only works after `semantic`. Before that the API returns 
 - Does the API still match section 4 after your latest changes? Is anything renamed, added or removed?
 - Do you agree with the `ui/` folder layout?
 - Should any screen be dropped or merged for v1, for example Destination merged into Deploy?
+
+
+## Changes on 2026-10-18 (lag, sign-in, simpler Connections)
+
+Measured against a real machine before the change: on the Connections page every click re-ran the sign-in check (2.1-3.5 s), the Azure resource discovery (6.7 s) and the Fabric workspace list (2.5 s), about 12 seconds per click. The Migration page's data calls were fast (about 7 ms); its problem was layout, because all six connection forms were built on every run even while collapsed.
+
+- **Lag.** `ui/cache.py` keeps the slow lookups for a short time per browser session (accounts 20 s, subscriptions 60 s, discovery 5 min, workspaces 60 s) with a refresh button each; a failed lookup is never kept. The API also keeps the account list for 20 s and drops it on any sign-in or sign-out. Each card on Connections is a `st.fragment`, so a click in one does not redraw the other. The page no longer downloads a web font or uses blur effects.
+- **Sign-in.** One account dropdown per side; the Fabric destination can name its account (`PUT /session/destination` with `account`), and deploy uses it too. The tenant ID is under Advanced. A failed token now says what Azure said (for example AADSTS530035, security defaults), and a failed factory lookup is shown, not reported as "No data factories".
+- **Connections page.** The hero, the step chips and the one-option "route" step are gone; status shows in one place per card plus one line in the launch bar. The page fits in about 560 px instead of 1250.
+- **Connect step.** A table of linked services with one editor for the selected one, instead of an expander with a full form for each. Creating connections is Preview, then Create; the rarely used actions are under More.

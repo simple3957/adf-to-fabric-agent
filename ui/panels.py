@@ -38,24 +38,36 @@ def discover(api: ApiClient, pid: str, project: dict | None, found: dict | None)
 
 
 # ---- 2. connect -----------------------------------------------------------------------------------------------------------
-def _card(api: ApiClient, pid: str, card: dict, known: dict[str, str]) -> None:
+READY = ("connection_tested", "connection_configured")
+PROBLEM = ("manual_action_required", "validation_failed")
+
+
+def _grid(items: list, render) -> None:
+    """Lay ``items`` out two to a row so a form is not one long column."""
+    for i in range(0, len(items), 2):
+        for col, item in zip(st.columns(2), items[i:i + 2]):
+            with col:
+                render(item)
+
+
+def _editor(api: ApiClient, pid: str, card: dict, known: dict[str, str]) -> None:
+    """The one linked service being set up: its state once, the few facts that matter, and one form."""
     name = card["name"]
-    st.markdown(f"**{card.get('adf_type') or '?'}** → {card.get('connector_label') or 'no matching Fabric connector'}"
-                f" ({card.get('fabric_connection_type') or '-'}) · authored auth: `{card.get('authentication_type') or '-'}`")
+    held = set(card.get("secrets_held", []))
+    st.markdown(f"#### {name} &nbsp; {state_badge(card['state'])}" + (" 🔑" if held else ""))
+    st.caption(f"{card.get('adf_type') or '?'} → {card.get('connector_label') or 'no matching Fabric connector'}"
+               f"{' (' + card['fabric_connection_type'] + ')' if card.get('fabric_connection_type') else ''}"
+               f" · authored auth: {card.get('authentication_type') or '-'}")
     if not card.get("supported"):
-        st.warning("No automatic Fabric connector for this type. Use an existing connection, or handle it manually.")
-    rt = card.get("runtime") or {}
-    if rt:
-        st.markdown(f"Runtime: `{rt.get('runtime_name') or 'default Azure'}` ({rt.get('runtime_kind')}) → "
-                    f"Fabric path: **{(rt.get('fabric_path') or '-').replace('_', ' ')}**")
-        if rt.get("recommendation"):
-            st.caption(rt["recommendation"])
-        for r in rt.get("requirements", []):
-            st.caption(f"• {r}")
-    for label, items, show in (("Missing", card.get("missing"), st.warning), ("Next steps", card.get("next_steps"), st.info),
-                               ("Warnings", card.get("warnings"), st.warning)):
-        if items:
-            show(f"**{label}:**\n" + "".join(f"\n- {i}" for i in items))
+        # one message: the card's own missing/warning/next-step lines say the same thing for a type with no connector
+        st.warning("No automatic Fabric connector for this type. Create the connection in Fabric, then choose "
+                   "'Use an existing Fabric connection' below, or handle it manually.")
+    else:
+        problems = [*card.get("missing", []), *card.get("warnings", [])]
+        if problems:
+            st.warning("\n".join(f"- {x}" for x in problems))
+        if card.get("next_steps"):
+            st.info("**Next:** " + " ".join(card["next_steps"]))
 
     options = card.get("auth_options", [])
     usable = [o for o in options if o.get("available")]
@@ -74,18 +86,11 @@ def _card(api: ApiClient, pid: str, card: dict, known: dict[str, str]) -> None:
     if not method.get("api_creatable", True):
         st.info("This kind of connection can't be created automatically. Create it in the Fabric portal, "
                 "then choose 'existing connection'.")
-    if blocked:
-        with st.expander(f"{len(blocked)} unavailable method(s)"):
-            for o in blocked:
-                st.caption(f"• **{o['label']}**: {o.get('reason') or 'not available'}")
-    if card.get("existing_matches"):
-        with st.expander(f"Existing Fabric connections that may fit ({len(card['existing_matches'])})"):
-            st.dataframe(card["existing_matches"], hide_index=True)
 
-    held = set(card.get("secrets_held", []))
-    with st.form(f"f-{name}", clear_on_submit=True):
-        endpoint = {}
-        for f in card.get("endpoint_fields", []):
+    with st.form(f"f-{name}", clear_on_submit=True, border=False):
+        endpoint: dict = {}
+
+        def endpoint_field(f: dict) -> None:
             current = (chosen.get("endpoint") or {}).get(f["name"]) or f.get("value") or ""
             help_ = f"from: {f.get('source')}"
             if f.get("candidates"):
@@ -94,15 +99,18 @@ def _card(api: ApiClient, pid: str, card: dict, known: dict[str, str]) -> None:
             else:
                 endpoint[f["name"]] = st.text_input(f["label"] + (" *" if f.get("required") else ""), value=current,
                                                     key=f"e-{name}-{f['name']}", help=help_)
-        values, secrets = {}, {}
-        for f in method.get("fields", []):
+
+        _grid(card.get("endpoint_fields", []), endpoint_field)
+        values: dict = {}
+        secrets: dict = {}
+
+        def method_field(f: dict) -> None:
             label = f["label"] + (" *" if f.get("required") else "")
             if f["kind"] == "secret":
                 state = "held for this session" if f["name"] in held else "not given"
                 secrets[f["name"]] = st.text_input(f"{label} ({state})", type="password", key=f"s-{name}-{f['name']}",
-                                                   help="Kept in API memory for 30 minutes. Never saved or shown again.")
+                                                   help="Kept in the accelerator's memory for 30 minutes. Never saved or shown again.")
             elif f["name"] == "connection_id":
-                # Pick an existing Fabric connection by name; the ID is filled in for you.
                 current = (chosen.get("values") or {}).get("connection_id", "")
                 names = {f"{n} · {i[:8]}…": i for n, i in known.items()}
                 labels = ["- choose a Fabric connection -", *names]
@@ -111,36 +119,58 @@ def _card(api: ApiClient, pid: str, card: dict, known: dict[str, str]) -> None:
                 picked = st.selectbox(f"Fabric connection ({kind}) *", labels, index=labels.index(at), key=f"c-{name}",
                                       help=f"Existing {kind} connections in your Fabric workspace. Only the same type is listed.")
                 if current and current not in names.values():
-                    st.warning("The saved connection ID isn't one of this type's known connections. Check it's the right one.")
+                    st.warning("The saved connection ID isn't one of this type's known connections.")
                 pasted = st.text_input("…or paste a connection ID", value="" if current in names.values() else current,
                                        key=f"v-{name}-connection_id",
-                                       help="Only needed if the connection isn't in the list. Find it in Fabric: "
-                                            "Settings ⚙ → Manage connections and gateways → the connection → Settings.")
+                                       help="Fabric: Settings ⚙ → Manage connections and gateways → the connection → Settings.")
                 values["connection_id"] = pasted.strip() or names.get(picked, "")
             else:
                 values[f["name"]] = st.text_input(label, value=(chosen.get("values") or {}).get(f["name"], ""),
                                                   key=f"v-{name}-{f['name']}", help=f.get("help") or None)
+
+        _grid(method.get("fields", []), method_field)
         display = st.text_input("Fabric connection name (optional)", value=chosen.get("display_name") or "", key=f"d-{name}")
-        if st.form_submit_button("Save"):
+        a, b, _ = st.columns([1, 1.5, 2.5])
+        save = a.form_submit_button("Save")
+        save_test = b.form_submit_button("Save and test", type="primary")
+        if save or save_test:
             saved = call(api.set_choice, pid, name, method_id, {k: v for k, v in endpoint.items() if v},
                          {k: v for k, v in values.items() if v}, display or None)
             if saved is not None:
                 for field, value in secrets.items():
                     if value:
                         call(api.put_secret, pid, name, field, value)
+                if save_test:
+                    st.session_state["conn_test"] = (name, call(api.test_connection, pid, name))
                 st.rerun()
-    if st.button("Test", key=f"t-{name}"):
-        rep = call(api.test_connection, pid, name)
-        if rep:
-            test_report(rep)
-    if card.get("used_by_activities"):
-        with st.expander(f"Used by {len(card['used_by_activities'])} activity(ies)"):
+    shown = st.session_state.get("conn_test")
+    if shown and shown[0] == name and shown[1]:
+        test_report(shown[1])
+
+    rt = card.get("runtime") or {}
+    with st.expander("Details"):
+        if rt:
+            st.markdown(f"Runtime `{rt.get('runtime_name') or 'default Azure'}` ({rt.get('runtime_kind')}) → Fabric path: "
+                        f"**{(rt.get('fabric_path') or '-').replace('_', ' ')}**")
+            if rt.get("recommendation"):
+                st.caption(rt["recommendation"])
+            for r in rt.get("requirements", []):
+                st.caption(f"• {r}")
+        if blocked:
+            st.markdown("**Unavailable sign-in methods**")
+            for o in blocked:
+                st.caption(f"• {o['label']}: {o.get('reason') or 'not available'}")
+        if card.get("existing_matches"):
+            st.markdown(f"**Existing Fabric connections that may fit ({len(card['existing_matches'])})**")
+            st.dataframe(card["existing_matches"], hide_index=True)
+        if card.get("used_by_activities"):
+            st.markdown(f"**Used by {len(card['used_by_activities'])} activity(ies)**")
             st.dataframe(card["used_by_activities"], hide_index=True)
 
 
 def _apply_table(res: dict) -> None:
-    st.markdown(theme.badge("Dry run: nothing was created", "info") if res.get("dry_run")
-                else theme.badge("Applied to Fabric", "success"), unsafe_allow_html=True)
+    st.markdown(theme.badge("Preview: nothing was created", "info") if res.get("dry_run")
+                else theme.badge("Created in Fabric", "success"), unsafe_allow_html=True)
     st.dataframe([{"linked service": i["linked_service"], "action": i["action"], "bound": i["bound"],
                    "Fabric validated": i["fabric_validated"], "connection ids": ", ".join(i["connection_ids"]),
                    "detail": i["detail"]} for i in res.get("items", [])], hide_index=True)
@@ -150,59 +180,77 @@ def _apply_table(res: dict) -> None:
 
 
 def connect(api: ApiClient, pid: str, cards: list[dict] | None, workspace_id: str | None) -> None:
-    st.caption("🔒 Passwords and keys are never saved: they stay in the accelerator's memory for 30 minutes.")
     if not cards:
         st.info("No linked services found." if cards == [] else "Run discovery first.")
         return
-    counts: dict[str, int] = {}
-    for c in cards:
-        counts[c["state"]] = counts.get(c["state"], 0) + 1
-    st.markdown(" ".join(f"{state_badge(s)} ×{n}" for s, n in counts.items()))
-    # Existing Fabric connections seen on any card, so any linked service can reuse them by name.
-    # Keyed by Fabric connection type, so a storage linked service is never offered a SQL connection (and vice versa).
+    ready = sum(1 for c in cards if c["state"] in READY)
+    problems = sum(1 for c in cards if c["state"] in PROBLEM)
+    st.markdown(f"**{len(cards)} linked services** · {ready} ready" + (f" · {problems} need attention" if problems else "")
+                + f" · {len(cards) - ready - problems} to do")
+    # Existing Fabric connections seen on any card, keyed by Fabric connection type so a storage linked service is never
+    # offered a SQL connection (and vice versa).
     known: dict[str, dict[str, str]] = {}
     for c in cards:
         for m in c.get("existing_matches", []):
             known.setdefault(c.get("fabric_connection_type") or "?", {})[m["display_name"]] = m["id"]
-    for card in cards:
-        label, color = STATE_LABELS.get(card["state"], (card["state"], "gray"))
-        title = f"**{card['name']}** · {card.get('adf_type') or '?'} · :{color}[{label}]"
-        if card.get("secrets_held"):
-            title += " · 🔑"
-        with st.expander(title, expanded=False):
-            st.markdown(state_badge(card["state"]) + ("  🔑 " + ", ".join(card["secrets_held"]) + " held"
-                                                      if card.get("secrets_held") else ""))
-            _card(api, pid, card, known.get(card.get("fabric_connection_type") or "?", {}))
+
+    rows = [{"Linked service": c["name"], "Type": c.get("adf_type") or "?",
+             "Fabric connector": c.get("connector_label") or "none", "Status": STATE_LABELS.get(c["state"], (c["state"],))[0],
+             "Sign-in": (c.get("choice") or {}).get("method") or "-"} for c in cards]
+    event = st.dataframe(rows, hide_index=True, on_select="rerun", selection_mode="single-row", key="conn-table", width="stretch")
+    picked = event.selection.rows
+    first_open = next((i for i, c in enumerate(cards) if c["state"] not in READY), 0)
+    card = cards[picked[0] if picked else first_open]
+    if not picked:
+        st.caption("Showing the first one still to do. Select a row above to set up another.")
+    with st.container(border=True):
+        _editor(api, pid, card, known.get(card.get("fabric_connection_type") or "?", {}))
 
     st.markdown("#### Create the connections in Fabric")
     if not workspace_id:
         st.warning("Connect a Fabric workspace on the **Connections** page first.")
-    names = st.multiselect("Linked services (empty = all)", [c["name"] for c in cards], key="apply-names")
-    auto = st.checkbox("Reuse matching existing Fabric connections automatically", key="apply-auto")
-    a, b, c = st.columns(3)
-    if a.button("Dry run", disabled=not workspace_id, key="apply-dry"):
+    names = st.session_state.get("apply-names", [])
+    auto = st.checkbox("Reuse matching connections that already exist in Fabric", key="apply-auto")
+    sig = (tuple(sorted(names)), auto, workspace_id)
+    prev = st.session_state.get("apply_preview")
+    valid = bool(prev and prev["sig"] == sig)
+    a, b, c = st.columns([1, 1.4, 1])
+    if a.button("Preview", key="apply-dry", disabled=not workspace_id, help="Shows what would be created. Changes nothing."):
         res = call(api.apply_connections, pid, names, dry_run=True, auto_match=auto, workspace_id=workspace_id)
         if res:
-            _apply_table(res)
-    sure = b.checkbox("Create them for real", key="apply-sure")
-    if b.button("Apply", type="primary", disabled=not (workspace_id and sure), key="apply-go"):
+            st.session_state.apply_preview = {"sig": sig, "res": res}
+            st.session_state.pop("apply_result", None)
+            st.rerun()
+    if b.button("Create in Fabric", type="primary", key="apply-go", disabled=not (workspace_id and valid),
+                help=None if valid else "Run Preview first, and create only what it showed."):
         res = call(api.apply_connections, pid, names, dry_run=False, auto_match=auto, workspace_id=workspace_id)
         if res:
-            _apply_table(res)
-    if c.button("Set up workspace identity", disabled=not workspace_id, key="apply-wi",
-                help="Needed by connections that sign in as the workspace."):
-        out = call(api.provision_workspace_identity, pid, workspace_id)
-        if out:
-            (st.success if out.get("provisioned") else st.error)(out.get("next") or out.get("error") or str(out))
-    with st.expander("Connections report"):
-        if st.button("Build report", key="apply-report"):
+            st.session_state.apply_result = res
+            st.session_state.pop("apply_preview", None)
+            st.rerun()
+    with c.popover("More", width="stretch"):
+        st.multiselect("Only these linked services (empty = all)", [x["name"] for x in cards], key="apply-names")
+        if st.button("Set up workspace identity", disabled=not workspace_id, key="apply-wi",
+                     help="Needed by connections that sign in as the workspace."):
+            out = call(api.provision_workspace_identity, pid, workspace_id)
+            if out:
+                (st.success if out.get("provisioned") else st.error)(out.get("next") or out.get("error") or str(out))
+        if st.button("Build connections report", key="apply-report"):
             rep = call(api.connections_report, pid)
             if rep:
-                st.markdown(rep["markdown"])
-    if st.button("Forget all secrets for this project", key="apply-forget"):
-        n = call(api.clear_secrets, pid)
-        if n is not None:
-            st.success(f"Cleared {n} secret(s).")
+                st.session_state.conn_report = rep["markdown"]
+        if st.button("Forget all secrets for this project", key="apply-forget"):
+            n = call(api.clear_secrets, pid)
+            if n is not None:
+                st.success(f"Cleared {n} secret(s).")
+        st.caption("🔒 Passwords and keys are never saved: they stay in the accelerator's memory for 30 minutes.")
+    if valid:
+        _apply_table(prev["res"])
+    elif st.session_state.get("apply_result"):
+        _apply_table(st.session_state.apply_result)
+    if st.session_state.get("conn_report"):
+        with st.expander("Connections report"):
+            st.markdown(st.session_state.conn_report)
 
 
 # ---- 3. convert -----------------------------------------------------------------------------------------------------------

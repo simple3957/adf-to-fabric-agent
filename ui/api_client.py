@@ -82,8 +82,12 @@ class ApiClient:
         return self._get("/session")
 
     # ---- sign-in -------------------------------------------------------------------------------------------------------
-    def auth_status(self, provider: str) -> dict:
-        return self._get(f"/auth/{provider}/status")
+    def auth_status(self, provider: str, refresh: bool = False) -> dict:
+        return self._get(f"/auth/{provider}/status", refresh="true" if refresh else None)
+
+    def accounts(self, refresh: bool = False) -> list[dict]:
+        """Everyone signed in to the Azure CLI on the API machine. Source and destination each pick one."""
+        return self._get("/auth/azure_cli/accounts", refresh="true" if refresh else None)["accounts"]
 
     def start_login(self, provider: str, *, tenant_id: Optional[str] = None, device_code: bool = False,
                     method: str = "interactive") -> dict:
@@ -105,8 +109,8 @@ class ApiClient:
         return self._get("/auth/azure_cli/tenants")["tenants"]
 
     # ---- source --------------------------------------------------------------------------------------------------------
-    def subscriptions(self) -> list[dict]:
-        return self._get("/azure/subscriptions")["subscriptions"]
+    def subscriptions(self, account: Optional[str] = None, refresh: bool = False) -> list[dict]:
+        return self._get("/azure/subscriptions", account=account, refresh="true" if refresh else None)["subscriptions"]
 
     def discover(self, subscription_id: str) -> dict:
         return self._get("/azure/discover", subscription_id=subscription_id)
@@ -125,18 +129,20 @@ class ApiClient:
 
     # ---- destination ---------------------------------------------------------------------------------------------------
     def set_destination(self, provider: str = "azure_cli", workspace_id: Optional[str] = None,
-                        tenant_id: Optional[str] = None) -> dict:
+                        tenant_id: Optional[str] = None, account: Optional[str] = None) -> dict:
         return self._put("/session/destination", {"provider": provider, "workspace_id": workspace_id,
-                                                  "tenant_id": tenant_id})["destination"]
+                                                  "tenant_id": tenant_id, "account": account})["destination"]
 
-    def workspaces(self, provider: Optional[str] = None) -> list[dict]:
-        return self._get("/fabric/workspaces", provider=provider)["workspaces"]
+    def workspaces(self, provider: Optional[str] = None, account: Optional[str] = None) -> list[dict]:
+        return self._get("/fabric/workspaces", provider=provider, account=account)["workspaces"]
 
     def capacities(self, provider: Optional[str] = None) -> list[dict]:
         return self._get("/fabric/capacities", provider=provider)["capacities"]
 
-    def test_destination(self, provider: str, workspace_id: str, tenant_id: Optional[str] = None) -> dict:
-        return self._post("/test/destination", {"provider": provider, "workspace_id": workspace_id, "tenant_id": tenant_id})
+    def test_destination(self, provider: str, workspace_id: str, tenant_id: Optional[str] = None,
+                         account: Optional[str] = None) -> dict:
+        return self._post("/test/destination", {"provider": provider, "workspace_id": workspace_id, "tenant_id": tenant_id,
+                                                "account": account})
 
     # ---- projects ------------------------------------------------------------------------------------------------------
     def projects(self) -> list[dict]:

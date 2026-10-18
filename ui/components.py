@@ -8,6 +8,7 @@ from typing import Any, Callable, Optional
 import streamlit as st
 
 from api_client import ApiClient, ApiError
+from cache import ACCOUNTS_TTL, cached, forget
 
 # Connection states, worded plainly. "Tested" is shown ONLY for connection_tested.
 STATE_LABELS = {
@@ -103,12 +104,138 @@ def run_job(start: Callable[[], dict], label: str) -> Optional[dict]:
     return final
 
 
+NEW_ACCOUNT = "__new__"
+
+
+def _sign_in_panel(provider: str, label: str, key: str, *, device_option: bool = True,
+                   on_cancel: Optional[Callable[[], None]] = None) -> Optional[dict]:
+    """The sign-in form. Returns the sign-in status once a sign-in has succeeded, otherwise None.
+
+    Sign-in runs on the API machine (``az login`` / ``fab auth login``); this browser never sees a password or token. The
+    tenant (directory) is asked for last, under Advanced: most accounts do not need it.
+    """
+    import time
+
+    api = client()
+    with st.container(border=True):
+        st.markdown(f"**Sign in with {label}**")
+        st.caption("You get a short code and a link here. Open the link on any device, enter the code, then sign in and "
+                   "approve with Authenticator.")
+        device = st.checkbox("Use a device code (recommended)", key=f"{key}-device", value=True,
+                             help="Shows a code to enter at microsoft.com/devicelogin from any device. Untick it to sign in "
+                                  "through a browser tab on the machine running the accelerator.") if device_option else False
+        a, b = st.columns(2)
+        go = a.button("Start sign-in", key=f"{key}-go", type="primary", width="stretch")
+        cancel = b.button("Cancel", key=f"{key}-cancel", width="stretch")
+        with st.expander("Advanced · a specific directory (tenant)"):
+            st.caption("Only needed if signing in lands in the wrong directory, for example when the account belongs to "
+                       "several of them.")
+            tenant = st.text_input("Tenant ID", key=f"{key}-tenant", placeholder="e.g. 1680abbe-1a01-4cb0-99e9-452fe05bf615")
+        if cancel:
+            if on_cancel:
+                on_cancel()
+            else:
+                st.session_state[f"{key}-pending"] = ""  # applied at the top of the next run, before the widget exists
+            st.rerun()
+        if not go:
+            return None
+        attempt = call(api.start_login, provider, tenant_id=tenant.strip() or None, device_code=device)
+        if not attempt:
+            return None
+        with st.status("Waiting for you to finish signing in…", expanded=True) as box:
+            out = st.empty()
+            deadline = time.time() + 300
+            if not device:
+                st.info("A Microsoft sign-in page has opened in the browser on the machine running the accelerator. "
+                        "Check your browser tabs (it may be behind other windows).")
+            while attempt["state"] == "running" and time.time() < deadline:
+                out.code("\n".join(attempt.get("output", [])) or "Starting the sign-in…")
+                time.sleep(2)
+                attempt = call(api.login_state, provider, attempt["id"]) or {"state": "failed", "output": []}
+            out.code("\n".join(attempt.get("output", [])) or "(no output)")
+            if attempt["state"] != "succeeded":
+                box.update(label=f"Sign-in {attempt['state'].replace('_', ' ')}", state="error")
+                st.error("The sign-in did not complete. The message from Azure is shown above.")
+                return None
+            box.update(label="Signed in", state="complete")
+    forget("accounts", "subs", "disc", "ws")  # a sign-in changes who is available and what they can see
+    return call(api.auth_status, provider, True) or {}
+
+
+def _accounts() -> list[dict]:
+    try:
+        return cached("accounts", ACCOUNTS_TTL, lambda: client().accounts())
+    except ApiError as err:
+        show_error(err)
+        return []
+
+
+def account_picker(side: str, who: str, *, hint: str) -> Optional[str]:
+    """Which signed-in account this side works as. Each side picks its own, so ADF and Fabric can use different accounts.
+
+    Nobody is assumed: the dropdown starts empty. Signing in with another account is one of its choices, not a separate
+    screen. Returns the chosen account's name, or None until one is chosen.
+    """
+    key = f"{side}-account"
+    pending = st.session_state.pop(f"{key}-pending", None)
+    if pending is not None:  # set by a sign-in or a cancel in the previous run; widget state can only change before it exists
+        if pending:
+            st.session_state[key] = pending
+        else:
+            st.session_state.pop(key, None)
+    accounts = _accounts()
+    names = [a["username"] for a in accounts]
+    default = next((a["username"] for a in accounts if a.get("is_default")), None)
+    options = [*names, NEW_ACCOUNT]
+    if st.session_state.get(key) not in options:
+        st.session_state.pop(key, None)
+
+    def label(v: str) -> str:
+        if v == NEW_ACCOUNT:
+            return "＋ Sign in with another account…"
+        return f"{v}  ·  machine default" if v == default and len(names) > 1 else v
+
+    if not names:
+        st.markdown(f"No account is signed in on this machine yet. {hint}")
+        _after_sign_in(side, key, names, _sign_in_panel("azure_cli", "Azure", key))
+        return None
+    chosen = st.selectbox(f"{who} account", options, index=None, key=key, format_func=label,
+                          placeholder="Choose an account…", help=hint)
+    if chosen == NEW_ACCOUNT:
+        _after_sign_in(side, key, names, _sign_in_panel("azure_cli", "Azure", key))
+        return None
+    if chosen:
+        row = next((a for a in accounts if a["username"] == chosen), {})
+        a, b = st.columns([3, 1], vertical_alignment="center")
+        a.caption(f"{row.get('subscription_count', 0)} subscription(s) · "
+                  f"{len(row.get('tenants', []))} director{'y' if len(row.get('tenants', [])) == 1 else 'ies'}")
+        if b.button("Sign out", key=f"{key}-out", type="tertiary", width="stretch", help=f"Sign {chosen} out on this machine."):
+            if call(client().logout, "azure_cli", chosen) is not None:
+                forget("accounts", "subs", "disc", "ws")
+                st.session_state[f"{key}-pending"] = ""
+                st.rerun()
+        return chosen
+    return None
+
+
+def _after_sign_in(side: str, key: str, before: list[str], status: Optional[dict]) -> None:
+    """Select the account that just signed in (the new one, else whoever the CLI now reports) and run again."""
+    if status is None:
+        return
+    after = [a["username"] for a in (call(client().accounts, True) or [])]
+    forget("accounts")
+    new = [n for n in after if n not in before]
+    pick = new[0] if new else status.get("account")
+    if pick:
+        st.session_state[f"{key}-pending"] = pick
+    st.rerun()
+
+
 def identity(provider: str, label: str, key: str, *, purpose: str, device_option: bool = True) -> Optional[dict]:
-    """Who this card works as. Nobody is assumed: the user signs in, or confirms the account already on this machine.
+    """The single-identity sign-in used by the Fabric CLI (it has one account at a time, unlike the Azure CLI).
 
     Returns the sign-in status once an account is confirmed for this browser session, otherwise renders the sign-in
-    choices and returns None. Sign-in itself runs on the API machine (``az login`` / ``fab auth login``); this browser
-    never sees a password or token.
+    choices and returns None.
     """
     api = client()
     ids = st.session_state.setdefault("confirmed_ids", {})
@@ -120,7 +247,6 @@ def identity(provider: str, label: str, key: str, *, purpose: str, device_option
 
     if ids.get(key) and st.session_state.get(mode_key) != "signin":
         st.markdown(f"Signed in as **{account}**")
-        st.caption(f"Tenant {status.get('tenant_id') or '-'}")
         a, b, _ = st.columns([1.3, 1, 1.7])
         if a.button("Switch account", key=f"{key}-switch", width="stretch"):
             st.session_state[mode_key] = "signin"
@@ -154,51 +280,14 @@ def identity(provider: str, label: str, key: str, *, purpose: str, device_option
                 st.rerun()
         return None
 
-    # ---- the sign-in form ----------------------------------------------------------------------------------------
-    import time
-
-    with st.container(border=True):
-        st.markdown(f"**Sign in with {label}**")
-        st.caption("You get a short code and a link here. Open the link on any device, enter the code, then sign in and "
-                   "approve with Authenticator. Untick the device code to sign in through a browser tab on the machine "
-                   "running the accelerator instead.")
-        tenant = st.text_input("Tenant ID (needed if the account belongs to several directories)", key=f"{key}-tenant",
-                               placeholder="e.g. 1680abbe-1a01-4cb0-99e9-452fe05bf615")
-        device = st.checkbox("Use a device code (recommended)", key=f"{key}-device", value=True,
-                             help="Shows a code to enter at microsoft.com/devicelogin from any device.") if device_option else False
-        a, b = st.columns([1, 1])
-        go = a.button("Start sign-in", key=f"{key}-go", type="primary", width="stretch")
-        if b.button("Cancel", key=f"{key}-cancel", width="stretch"):
-            st.session_state.pop(mode_key, None)
-            st.rerun()
-        if not go:
-            return None
-        attempt = call(api.start_login, provider, tenant_id=tenant.strip() or None, device_code=device)
-        if not attempt:
-            return None
-        with st.status("Waiting for you to finish signing in…", expanded=True) as box:
-            out = st.empty()
-            deadline = time.time() + 300
-            if not device:
-                st.info("A Microsoft sign-in page has opened in the browser on the machine running the accelerator. "
-                        "Check your browser tabs (it may be behind other windows).")
-            while attempt["state"] == "running" and time.time() < deadline:
-                out.code("\n".join(attempt.get("output", [])) or "Starting the sign-in…")
-                time.sleep(2)
-                attempt = call(api.login_state, provider, attempt["id"]) or {"state": "failed", "output": []}
-            out.code("\n".join(attempt.get("output", [])) or "(no output)")
-            if attempt["state"] != "succeeded":
-                box.update(label=f"Sign-in {attempt['state'].replace('_', ' ')}", state="error")
-                st.error("The sign-in did not complete. The message from Azure is shown above.")
-                return None
-            box.update(label="Signed in", state="complete")
-        new = call(api.auth_status, provider) or {}
+    new = _sign_in_panel(provider, label, key, device_option=device_option,
+                         on_cancel=lambda: st.session_state.pop(mode_key, None))
+    if new is not None:
         if new.get("authenticated"):
             ids[key] = new.get("account")
             st.session_state.pop(mode_key, None)
-            if new.get("tenant_id"):
-                st.session_state[f"{key}-tenant-id"] = new["tenant_id"]
         st.rerun()
+    return None
 
 
 def _sign_out(provider: str, account: Optional[str], key: str) -> None:
@@ -206,6 +295,7 @@ def _sign_out(provider: str, account: Optional[str], key: str) -> None:
     if call(api.logout, provider, account) is not None:
         st.session_state.setdefault("confirmed_ids", {}).pop(key, None)
         st.session_state.pop(f"{key}-mode", None)
+        forget("accounts", "subs", "disc", "ws")
         st.rerun()
 
 
