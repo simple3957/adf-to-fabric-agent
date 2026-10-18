@@ -66,8 +66,22 @@ _AAD_HINTS = {
 }
 
 
+# The Azure CLI refuses to work at all when its sign-in cache holds two entries for one username (Azure CLI issue 20168).
+# It happens when a browser sign-in picks the wrong identity, for example a work account's address that also exists as a
+# personal Microsoft account, and the same username then appears in a second directory.
+_DUPLICATE = re.compile(r"Found multiple accounts with the same username")
+DUPLICATE_MESSAGE = "The Azure CLI has two saved sign-ins for the same username, so it refuses to pick one."
+DUPLICATE_ACTIONS = [
+    "Run `az account clear` in a terminal (it signs every account out of the CLI; nothing else is lost).",
+    "Sign in again, one account at a time. For the second account use a private browser window so the browser does not "
+    "reuse the first account's session, and choose the right identity (work or school vs personal) when asked.",
+]
+
+
 def token_failure(text: str) -> tuple[str, list[str]]:
     """A message and next step for a failed `az account get-access-token`, from what Azure said (never a token)."""
+    if _DUPLICATE.search(text or ""):
+        return DUPLICATE_MESSAGE, list(DUPLICATE_ACTIONS)
     code = re.search(r"AADSTS(\d+)", text or "")
     if code and code.group(1) in _AAD_HINTS:
         what, action = _AAD_HINTS[code.group(1)]
@@ -137,6 +151,10 @@ class AzureCliProvider:
             return st
         st.available = True
         st.checks.append(Check(name="az installed", status=CheckStatus.passed))
+        if not show.ok and _DUPLICATE.search(show.text):
+            st.state, st.error, st.actions = ConnectionState.manual_action_required, DUPLICATE_MESSAGE, list(DUPLICATE_ACTIONS)
+            st.checks.append(Check(name="signed in", status=CheckStatus.failed, detail="two sign-ins for one username"))
+            return st
         if not show.ok:
             st.state = ConnectionState.authentication_required
             st.error = "No Azure CLI sign-in was found." if not _EXPIRED.search(show.text) else "The Azure CLI session has expired."
@@ -153,6 +171,10 @@ class AzureCliProvider:
         st.checks.append(Check(name="signed in", status=CheckStatus.passed, detail=st.account or ""))
         tok = self._run(["az", "account", "get-access-token", "--resource", ARM_RESOURCE, "--query", "expiresOn", "-o", "tsv"],
                         timeout=60)
+        if not tok.ok and _DUPLICATE.search(tok.text):
+            st.state, st.error, st.actions = ConnectionState.manual_action_required, DUPLICATE_MESSAGE, list(DUPLICATE_ACTIONS)
+            st.checks.append(Check(name="management token", status=CheckStatus.failed, detail="two sign-ins for one username"))
+            return st
         if not tok.ok:
             st.state = ConnectionState.authentication_required
             st.error = ("The sign-in has expired." if _EXPIRED.search(tok.text) else "A management token could not be acquired.")

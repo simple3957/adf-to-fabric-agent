@@ -262,3 +262,30 @@ def test_a_plain_expired_session_keeps_its_old_message():
 
     msg, actions = token_failure("ERROR: Please run 'az login' to setup account.")
     assert "session has expired" in msg and actions
+
+
+# --- two saved sign-ins for one username (Azure CLI issue 20168) -------------------------------------------------
+
+DUPES = ("ERROR: Found multiple accounts with the same username 'a@b.c': [{'home_account_id': 'x.y', 'realm': 'r1'}, "
+         "{'home_account_id': 'p.q', 'realm': 'r2'}]\nPlease report to us via Github: https://github.com/Azure/azure-cli/issues/20168")
+
+
+def test_duplicate_sign_ins_are_explained_with_the_fix_not_quoted_raw():
+    p, _ = provider({"az account get-access-token": bad(DUPES)})
+    with pytest.raises(ProviderError) as e:
+        p.token(account=GMAIL)
+    assert "two saved sign-ins for the same username" in str(e.value)
+    assert any("az account clear" in a for a in e.value.actions) and any("private browser window" in a for a in e.value.actions)
+    assert "home_account_id" not in str(e.value)
+
+
+def test_status_reports_the_duplicate_as_a_manual_action_with_the_fix():
+    from adf2fabric.connections.models import ConnectionState
+
+    p, _ = provider({"az account show": bad(DUPES)})
+    st = p.status()
+    assert st.state is ConnectionState.manual_action_required and st.available and not st.authenticated
+    assert "two saved sign-ins" in st.error and any("az account clear" in a for a in st.actions)
+    p2, _ = provider({"az account get-access-token": bad(DUPES)})
+    st2 = p2.status()
+    assert st2.state is ConnectionState.manual_action_required and "two saved sign-ins" in st2.error
