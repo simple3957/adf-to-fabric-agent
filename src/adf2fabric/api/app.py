@@ -317,7 +317,10 @@ def create_app(settings: Optional[Settings] = None, live: Optional[Container] = 
     def project(pid: str, ctx: Ctx = Depends()):
         slug = ctx.project(pid)
         p = ctx.c.store.load(slug)
-        return {"id": slug, "name": p.name, "has_semantic": ctx.c.store.has_adf_semantic_discovery(slug),
+        has = ctx.c.store.has_adf_semantic_discovery(slug)
+        # A record made from an older commit than the project's source cannot be converted: report it as not run, stale.
+        stale = bool(has and p.repository and ctx.c.store.load_adf_semantic_discovery(slug).source_commit_sha != p.repository.commit_sha)
+        return {"id": slug, "name": p.name, "has_semantic": has and not stale, "semantic_stale": stale,
                 "has_conversion": ctx.c.store.has_conversion(slug),
                 "source": {"provider": p.repository.provider if p.repository else None,
                            "url": p.repository.repository_url if p.repository else None,

@@ -363,3 +363,10 @@ def test_a_failed_azure_import_is_shown_and_selects_nothing(api):
     assert not at.exception, at.exception
     assert at.error and "token" in str(at.error[0].value).lower()
     assert "project_id" not in at.session_state or not at.session_state["project_id"]
+
+
+def test_a_stale_discovery_is_shown_as_out_of_date_not_done():
+    from journey import discover_facts
+
+    f = discover_facts({"has_semantic": False, "semantic_stale": True}, None)
+    assert not f.complete and f.metric == "Out of date"

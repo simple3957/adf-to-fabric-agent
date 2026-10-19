@@ -101,6 +101,8 @@ PROBLEM_STATES = {"manual_action_required", "validation_failed"}
 
 
 def discover_facts(project: Optional[dict], found: Optional[dict]) -> StepFacts:
+    if project and project.get("semantic_stale"):
+        return StepFacts(waiting="The source changed since discovery ran. Run discovery again.", metric="Out of date")
     if not project or not project.get("has_semantic"):
         return StepFacts(waiting="Run discovery to read the ADF source.", metric="Not run yet")
     ls = len((found or {}).get("linked_services", []))

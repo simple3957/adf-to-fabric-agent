@@ -18,6 +18,8 @@ def discover(api: ApiClient, pid: str, project: dict | None, found: dict | None)
     src = (project or {}).get("source") or {}
     st.markdown(f"Source: **{src.get('provider') or '-'}** {short_source(src.get('url'))} · commit `{(src.get('commit') or '-')[:12]}`")
     label = "Run discovery again" if (project or {}).get("has_semantic") else "Run discovery"
+    if (project or {}).get("semantic_stale"):
+        st.warning("The source changed after discovery last ran, so conversion would use old data. Run discovery again.")
     if st.button(label, type="primary", key="run-discover"):
         for stage in ("discovery", "semantic"):
             job = run_job(lambda s=stage: api.run_stage(pid, s), f"Stage: {stage}")

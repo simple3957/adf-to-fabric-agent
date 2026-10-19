@@ -86,6 +86,7 @@ def run_stage(c: Container, session: Session, pid: str, stage: str, log: Log, op
         res = c.store.conversion_dir(pid) / "resolutions.json"
         r = ConversionAgent(c.store).run(ConversionRequest(
             project_name=pid, pipelines=options.get("pipelines") or [], resolutions_path=str(res) if res.exists() else None))
+        _ok(r)  # a failed conversion has no record: say why before reading it
         conv = r.conversion
         return _ok(r, status=conv.status.value, status_counts=conv.status_counts,
                    pipelines=[{"name": p.source_pipeline, "status": p.status.value, "structurally_valid": p.structural_valid,

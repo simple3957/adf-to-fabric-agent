@@ -289,3 +289,14 @@ def test_status_reports_the_duplicate_as_a_manual_action_with_the_fix():
     p2, _ = provider({"az account get-access-token": bad(DUPES)})
     st2 = p2.status()
     assert st2.state is ConnectionState.manual_action_required and "two saved sign-ins" in st2.error
+
+
+def test_a_failed_conversion_reports_why_instead_of_crashing_the_stage():
+    from adf2fabric.api.stages import StageError, run_stage
+    from adf2fabric.api.container import Session
+    from adf2fabric.api.demo import build_demo_container
+
+    c = build_demo_container()
+    pid = c.store.list_ids()[0]
+    with pytest.raises(StageError, match="Pipeline\(s\) not found"):
+        run_stage(c, Session(id="s"), pid, "convert", lambda *_: None, {"pipelines": ["Nope"]})
