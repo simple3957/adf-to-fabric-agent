@@ -93,7 +93,9 @@ class ConnectionService:
         if ls is None:
             raise catalog.ChoiceError([f"Linked service '{choice.linked_service}' is not in this project."])
         spec = catalog.connector_for(ls.type)
-        if spec is None:
+        if choice.method == catalog.SKIP_METHOD:
+            choice = choice.model_copy(update={"values": {}, "variants": []})
+        elif spec is None:
             if choice.method != "existing_connection":
                 raise catalog.ChoiceError([catalog.UNSUPPORTED_NOTE])
         else:
@@ -197,6 +199,10 @@ class ConnectionService:
                                           values={"connection_id": exact[0].id}, origin="auto_matched")
                 origin = "auto_matched"
         item.origin = origin
+        if choice is not None and choice.method == catalog.SKIP_METHOD:
+            item.action, item.state = "skipped", ConnectionState.skipped
+            item.detail = "Skipped by choice: no Fabric connection is created or bound for this linked service."
+            return item
         if card.connector is None and choice is None:
             item.action, item.state = "manual", ConnectionState.manual_action_required
             item.detail = catalog.UNSUPPORTED_NOTE

@@ -20,6 +20,7 @@ STATE_LABELS = {
     "connection_tested": ("Tested", "green"),
     "validation_failed": ("Test failed", "red"),
     "manual_action_required": ("Manual action required", "orange"),
+    "skipped": ("Skipped", "gray"),
 }
 CONVERSION_COLORS = {"converted": "green", "converted_with_differences": "orange", "manual_required": "orange",
                      "blocked": "red", "partial": "orange", "failed": "red"}

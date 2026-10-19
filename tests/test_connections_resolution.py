@@ -726,3 +726,26 @@ def test_service_keeps_an_injected_empty_vault(tmp_path):
 
     vault = SecretVault()
     assert ConnectionService(ProjectStore(tmp_path), vault).vault is vault
+
+
+def test_a_linked_service_can_be_skipped_and_nothing_is_created_or_bound_for_it(project):
+    s, pid = svc(project)
+    fab = FakeFabric()
+    for name in ("LS_SQL", "LS_COSMOS"):  # a supported type and one with no connector
+        s.set_choice(pid, ConnectionChoice(linked_service=name, method="skip", values={"x": "y"}))
+    on_disk = yaml.safe_load((s._dir(pid) / "choices.yaml").read_text(encoding="utf-8"))
+    assert on_disk["LS_SQL"]["method"] == "skip" and on_disk["LS_SQL"]["values"] == {}
+    cards = {c.name: c for c in s.cards(pid, "sess")}
+    assert cards["LS_SQL"].state is ConnectionState.skipped and cards["LS_COSMOS"].state is ConnectionState.skipped
+    r = s.apply(pid, "sess", fab, workspace_id="ws")
+    items = {i.linked_service: i for i in r.items}
+    assert items["LS_SQL"].action == "skipped" and items["LS_SQL"].state is ConnectionState.skipped
+    assert not items["LS_SQL"].bound and not fab.created
+
+
+def test_skipping_can_be_undone_by_choosing_a_method(project):
+    s, pid = svc(project)
+    s.set_choice(pid, ConnectionChoice(linked_service="LS_SQL", method="skip"))
+    s.set_choice(pid, sql_choice())
+    s.put_secret("sess", pid, "LS_SQL", "password", PW)
+    assert {c.name: c for c in s.cards(pid, "sess")}["LS_SQL"].state is ConnectionState.connection_configured

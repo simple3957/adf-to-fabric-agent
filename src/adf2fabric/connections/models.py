@@ -23,6 +23,7 @@ class ConnectionState(str, Enum):
     connection_tested = "connection_tested"
     validation_failed = "validation_failed"
     manual_action_required = "manual_action_required"
+    skipped = "skipped"  # the user chose to leave this linked service unbound; nothing is created for it
 
 
 class CheckStatus(str, Enum):

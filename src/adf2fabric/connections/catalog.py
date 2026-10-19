@@ -217,6 +217,9 @@ def methods_for(spec: Optional[ConnectorSpec], supported_credentials: Optional[l
 # ---- validation + Fabric request building --------------------------------------------------------------------------------
 
 
+SKIP_METHOD = "skip"  # not a Fabric sign-in method: the user decided this linked service needs no connection
+
+
 class ChoiceError(Exception):
     """The choice cannot be used; ``problems`` lists every field to fix (never a secret value)."""
 

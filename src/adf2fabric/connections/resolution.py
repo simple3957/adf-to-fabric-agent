@@ -278,6 +278,11 @@ def build_cards(d: AdfSemanticDiscovery, *, choices: Optional[dict[str, Connecti
 def _state_and_guidance(card: LinkedServiceCard, ls: AdfLinkedService, spec: Optional[catalog.ConnectorSpec],
                         chosen: Optional[catalog.AuthMethod], tested: Optional[ConnectionState]) -> None:
     rt = card.runtime
+    if card.choice is not None and card.choice.method == catalog.SKIP_METHOD:
+        card.state = ConnectionState.skipped
+        card.next_steps.append("Skipped by choice. Pipelines that use it keep an unbound placeholder, so they are not "
+                               "ready to run until it is bound.")
+        return
     if spec is None:
         card.state = ConnectionState.manual_action_required
         card.missing.append("No connector declaration exists for this linked-service type.")

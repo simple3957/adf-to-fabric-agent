@@ -38,7 +38,7 @@ def discover(api: ApiClient, pid: str, project: dict | None, found: dict | None)
 
 
 # ---- 2. connect -----------------------------------------------------------------------------------------------------------
-READY = ("connection_tested", "connection_configured")
+READY = ("connection_tested", "connection_configured", "skipped")
 PROBLEM = ("manual_action_required", "validation_failed")
 
 
@@ -72,10 +72,24 @@ def _editor(api: ApiClient, pid: str, card: dict, known: dict[str, str]) -> None
     options = card.get("auth_options", [])
     usable = [o for o in options if o.get("available")]
     blocked = [o for o in options if not o.get("available")]
-    if not usable:
-        st.error("No sign-in method is available for this linked service.")
-        return
     chosen = card.get("choice") or {}
+    # A linked service need not get a connection: skipping is a decision, accepted as done. Pipelines that use it keep an
+    # unbound placeholder and the deploy says so.
+    skipped = chosen.get("method") == "skip"
+    if skipped and not st.session_state.get(f"reopen-{name}"):
+        st.info("Skipped: no Fabric connection will be created or bound for this linked service.")
+        if st.button("Set up a connection after all", key=f"reopen-btn-{name}"):
+            st.session_state[f"reopen-{name}"] = True
+            st.rerun()
+        return
+    if not skipped:
+        if st.button("Skip this one: it needs no connection", key=f"skip-{name}",
+                     help="Nothing is created for it. Pipelines that use it stay unbound until you bind it."):
+            if call(api.set_choice, pid, name, "skip") is not None:
+                st.rerun()
+    if not usable:
+        st.caption("No sign-in method can be set up for this linked service here; skip it, or bind it by hand.")
+        return
     ids = [o["id"] for o in usable]
     method_id = st.selectbox("How should Fabric sign in?", ids, key=f"m-{name}",
                              index=ids.index(chosen["method"]) if chosen.get("method") in ids else 0,

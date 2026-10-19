@@ -265,6 +265,26 @@ def test_the_connect_step_shows_one_editor_not_one_per_linked_service(api):
     assert not [e for e in at.expander if "LS_" in str(e.label)]  # no expander per linked service
 
 
+def test_a_linked_service_can_be_skipped_and_the_step_accepts_it(api):
+    from journey import connect_facts
+
+    cards = [{"name": "A", "state": "skipped"}, {"name": "B", "state": "connection_configured"}]
+    facts = connect_facts(cards)
+    assert facts.complete and "2 of 2" in facts.metric  # a skip is a decision, not an open item
+    assert not connect_facts([{"name": "A", "state": "resource_discovered"}]).complete
+
+
+def test_the_editor_offers_to_skip_and_does_not_force_a_connection(api):
+    at = _app(api, project_id="demo-estate")
+    at.switch_page("views/migration.py").run()
+    at.button(key="run-discover").click().run()
+    at.button(key="go-next").click().run()
+    skip = [b for b in at.button if b.key and b.key.startswith("skip-")]
+    assert len(skip) == 1 and not at.exception, at.exception
+    skip[0].click().run()
+    assert not at.exception, at.exception
+
+
 def test_creating_connections_needs_a_preview_first(api):
     at = _app(api, project_id="demo-estate", confirmed={"demo-estate": {"discover"}}, step={"demo-estate": "connect"})
     at.switch_page("views/migration.py").run()
