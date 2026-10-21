@@ -291,7 +291,8 @@ def convert(api: ApiClient, pid: str, result: dict | None) -> None:
     st.dataframe([{"pipeline": p["name"], "status": p["status"], "structurally valid": "✅" if p["structurally_valid"] else "❌",
                    "ready to run": "✅" if p["runtime_ready"] else "⬜"} for p in result.get("pipelines", [])], hide_index=True)
     for f in result.get("preflight", []):
-        (st.error if f.get("severity") == "error" else st.info)(f"**{f['subject']}**: {f['message']}  \n*Fix:* {f['fix']}")
+        show = {"error": st.error, "warning": st.warning}.get(f.get("severity"), st.info)
+        show(f"**{f['subject']}**: {f['message']}  \n*Fix:* {f['fix']}")
     if result.get("unbound"):
         st.warning("You still need to supply (pipelines that need these won't be ready to run):\n" +
                    "".join(f"\n- `{u}`" for u in result["unbound"]))
@@ -331,3 +332,38 @@ def deploy(api: ApiClient, pid: str, dest: dict, conversion: dict | None, result
         st.dataframe([{"pipeline": x["name"], "action": x["action"], "item id": x.get("item_id") or "",
                        "detail": x.get("detail") or "", "children": ", ".join(x.get("children") or [])}
                       for x in result.get("results", [])], hide_index=True)
+    _compare(api, pid)
+
+
+VERDICT_LABELS = {"matches": "✅ matches", "partial": "🟡 partly compared", "differs": "🟠 differs", "no_baseline": "⬜ no baseline",
+                  "failed": "❌ run failed", "not_run": "⬜ not run yet"}
+
+
+def _compare(api: ApiClient, pid: str) -> None:
+    """Run-and-compare on the latest Fabric runs: nothing is started from here (`adf2fabric verify --apply` runs them)."""
+    st.markdown("#### Prove it: compare with the ADF runs")
+    st.caption("Compares each pipeline's latest Fabric run with its last successful ADF run (or the previous Fabric run): "
+               "status, rows and files copied, lookup results. Nothing is started.")
+    if st.button("Compare latest runs", key="verify-go"):
+        job = run_job(lambda: api.run_stage(pid, "verify"), "Run-and-compare")
+        if job and job["state"] == "succeeded":
+            st.session_state.setdefault("verify", {})[pid] = job["result"]
+            st.rerun()
+    res = st.session_state.get("verify", {}).get(pid)
+    try:  # quiet: before a conversion exists there is simply no report to offer
+        handover = api.handover(pid)
+    except Exception:  # noqa: BLE001
+        handover = None
+    if handover:
+        st.download_button("Download handover report (Markdown)", handover.encode("utf-8"), file_name=f"{pid}-handover.md",
+                           mime="text/markdown", key="handover-dl",
+                           help="Each pipeline's readiness and next step, the source problems and what is still to supply.")
+    if not res:
+        return
+    st.dataframe([{"pipeline": r["pipeline"], "verdict": VERDICT_LABELS.get(r["verdict"], r["verdict"]),
+                   "Fabric run": r.get("ran_at") or "-", "baseline": f"{r.get('baseline') or '-'} {r.get('baseline_at') or ''}",
+                   "facts matched": r.get("matched", 0), "detail": r.get("detail") or ""} for r in res["results"]],
+                 hide_index=True)
+    for r in res["results"]:
+        for d in r.get("differences") or []:
+            st.warning(f"**{r['pipeline']}** · `{d['activity']}` {d['fact']}: ADF {d['baseline']} → Fabric {d['fabric']}")

@@ -32,6 +32,8 @@ class ActivityRun:
     type: str
     status: str
     error: str = ""
+    output: dict = field(default_factory=dict)  # the activity's output as the service reports it (run-and-compare reads it)
+    iteration: str = ""  # iterationHash: tells the items of a ForEach apart (retries of one item share it)
 
 
 @dataclass
@@ -63,6 +65,8 @@ def _query_activities(client: FabricClient, workspace: str, job_id: str, started
         start = datetime.fromisoformat(started.replace("Z", "+00:00")) if started else None
     except ValueError:
         start = None
+    if start is not None and start.tzinfo is None:  # Fabric's times are UTC, often without a zone suffix
+        start = start.replace(tzinfo=timezone.utc)
     after = (start or datetime.now(timezone.utc) - timedelta(days=1)) - timedelta(minutes=5)
     before = datetime.now(timezone.utc) + timedelta(minutes=5)
     stamp = lambda d: d.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")  # noqa: E731
@@ -73,12 +77,45 @@ def _query_activities(client: FabricClient, workspace: str, job_id: str, started
         return []
     if resp.status_code != 200:
         return []
+    body = resp.json() or {}
+    rows = body if isinstance(body, list) else body.get("value", [])  # Microsoft's sample shows a bare list
     out: list[ActivityRun] = []
-    for a in (resp.json() or {}).get("value", []):
+    for a in rows:
         err = a.get("error") if isinstance(a.get("error"), dict) else {}
         out.append(ActivityRun(name=str(a.get("activityName", "")), type=str(a.get("activityType", "")),
-                               status=str(a.get("status", "")), error=str(err.get("message", ""))[:300]))
+                               status=str(a.get("status", "")), error=str(err.get("message", ""))[:300],
+                               output=a.get("output") if isinstance(a.get("output"), dict) else {},
+                               iteration=str(a.get("iterationHash") or "")))
     return sorted(out, key=lambda r: r.name.lower())
+
+
+def latest_run(client: FabricClient, workspace: str, name: str) -> Optional[RunResult]:
+    """The most recent finished run of a pipeline, read-only (``GET .../jobs/instances``). None when it never ran."""
+    ids = client.list_pipelines(workspace)
+    item_id = ids.get(name.lower())
+    if item_id is None:
+        raise DeployError(f"No pipeline named '{name}' in the workspace.")
+    jobs: list[dict] = []
+    url: Optional[str] = f"{FABRIC_API}/workspaces/{workspace}/items/{item_id}/jobs/instances"
+    for _ in range(20):  # pages; _call refuses any URL that is not Fabric's
+        resp = client._call("GET", url)
+        if resp.status_code != 200:
+            raise DeployError(f"Reading the runs of '{name}' failed (HTTP {resp.status_code}): {_error_text(resp)}")
+        body = resp.json() or {}
+        jobs += body.get("value", [])
+        url = body.get("continuationUri")
+        if not url:
+            break
+    # Completed or Failed only: a Deduped or Cancelled job says nothing about what the pipeline does
+    done = [j for j in jobs if str(j.get("status", "")).lower() in ("completed", "failed")]
+    if not done:
+        return None
+    job = max(done, key=lambda j: str(j.get("endTimeUtc") or j.get("startTimeUtc") or ""))
+    result = RunResult(pipeline=name, item_id=item_id, job_id=str(job.get("id", "")), status=str(job.get("status", "")),
+                       started=str(job.get("startTimeUtc") or ""), ended=str(job.get("endTimeUtc") or ""),
+                       failure=_failure_text(job.get("failureReason")))
+    result.activities = _query_activities(client, workspace, result.job_id, result.started)
+    return result
 
 
 def run_pipeline(client: FabricClient, workspace: str, name: str, *, parameters: Optional[dict[str, Any]] = None,

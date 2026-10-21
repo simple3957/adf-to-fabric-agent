@@ -365,6 +365,24 @@ def create_app(settings: Optional[Settings] = None, live: Optional[Container] = 
 
         return c.jobs.submit("import", slugify(body.project_name), work).public()
 
+    @app.get("/projects/{pid}/conversion", dependencies=dep)
+    def conversion(pid: str, ctx: Ctx = Depends()):
+        from adf2fabric.api.stages import conversion_summary
+
+        slug = ctx.project(pid)
+        if not ctx.c.store.has_conversion(slug):
+            raise HTTPException(404, "This project has not been converted yet.")
+        return conversion_summary(ctx.c.store, slug)
+
+    @app.get("/projects/{pid}/handover", dependencies=dep)
+    def handover(pid: str, ctx: Ctx = Depends()):
+        from adf2fabric.agent.handover import render
+
+        slug = ctx.project(pid)
+        if not ctx.c.store.has_conversion(slug):
+            raise HTTPException(404, "This project has not been converted yet.")
+        return {"markdown": render(ctx.c.store, slug)}
+
     @app.get("/projects/{pid}/linked-services", dependencies=dep)
     def linked_services(pid: str, ctx: Ctx = Depends()):
         slug = ctx.project(pid)

@@ -34,8 +34,13 @@ WHILE WITH WRITETEXT LABEL
 """.split())
 
 _QUERY_KEYS = {"sqlReaderQuery", "query"}
-# `AS word` where word is a bare identifier: an alias in [brackets] or "quotes" starts with a delimiter, so it never matches.
-_ALIAS = re.compile(r"\bAS\s+([A-Za-z_][A-Za-z0-9_]*)\b", re.IGNORECASE)
+# `AS word` where word is a bare identifier and what follows is where a column alias ends (a comma, a closing bracket, the
+# end, or the next clause). An alias in [brackets] or "quotes" starts with a delimiter, so it never matches; neither do
+# `FOR SYSTEM_TIME AS OF '...'` or `CAST(x AS DOUBLE PRECISION)`, where the word after AS is followed by more of the clause.
+_ALIAS = re.compile(r"\bAS\s+([A-Za-z_][A-Za-z0-9_]*)(?=\s*(?:,|\)|;|$|\b(?:FROM|INTO|WHERE|GROUP|ORDER|UNION|HAVING)\b))",
+                    re.IGNORECASE)
+# String literals and comments are blanked before matching: words in them are not SQL.
+_NOT_SQL = re.compile(r"'(?:[^']|'')*'|--[^\n]*|/\*.*?\*/", re.DOTALL)
 
 
 def _queries(node: Any) -> Iterator[str]:
@@ -43,6 +48,8 @@ def _queries(node: Any) -> Iterator[str]:
         for k, v in node.items():
             if k in _QUERY_KEYS and isinstance(v, str):
                 yield v
+            elif k in _QUERY_KEYS and isinstance(v, dict) and isinstance(v.get("value"), str):
+                yield v["value"]  # an expression query: its literal SQL parts are still SQL
             else:
                 yield from _queries(v)
     elif isinstance(node, list):
@@ -68,7 +75,8 @@ def _reserved_aliases(contents: dict[str, dict]) -> list[PreflightFinding]:
         for act in _activities(content):
             words = []
             for q in _queries(act.get("typeProperties") or {}):
-                words += [m.group(1).upper() for m in _ALIAS.finditer(q) if m.group(1).upper() in RESERVED_SQL]
+                sql = _NOT_SQL.sub(lambda m: "''" if m.group(0).startswith("'") else " ", q)  # a literal stays a value
+                words += [m.group(1).upper() for m in _ALIAS.finditer(sql) if m.group(1).upper() in RESERVED_SQL]
             if words:
                 hits[act["name"]] = sorted(dict.fromkeys(words))
         if not hits:
@@ -98,7 +106,7 @@ def _parameters_without_value(d: AdfSemanticDiscovery) -> list[PreflightFinding]
         if not missing:
             continue
         out.append(PreflightFinding(
-            code="linked_service_parameter_without_value", severity="error", subject=ls.name,
+            code="linked_service_parameter_without_value", severity="warning", subject=ls.name,  # breaks ADF runs, not Fabric ones
             pipelines=sorted({a["pipeline"] for a in acts}),
             message=f"Linked service '{ls.name}' needs a value for parameter(s) {', '.join(missing)}, but it has no default "
                     "and no dataset or activity passes one. A run in ADF fails with 'No value provided for Parameter'.",

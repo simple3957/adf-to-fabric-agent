@@ -33,7 +33,7 @@ from adf2fabric.project.models import (
     SqlTlsMode,
     SqlTlsPolicy,
 )
-from adf2fabric.project.store import ProjectStore
+from adf2fabric.project.store import ProjectStore, slugify
 
 
 # --- shared Azure authentication options ---------------------------------------------------------------
@@ -771,7 +771,8 @@ def convert(project_name: str, pipelines: tuple[str, ...], resolutions_path: str
         for prob in plan.sources_problems:
             click.secho(f"    compute sources file: {prob}", fg="yellow")
     for f in c.preflight:
-        click.secho(f"  source check ({f.severity}): {f.message}", fg="red" if f.severity == "error" else None)
+        click.secho(f"  source check ({f.severity}): {f.message}",
+                    fg={"error": "red", "warning": "yellow"}.get(f.severity))
         click.echo(f"      fix: {f.fix}")
     unbound = [q for q in [*c.connections, *c.workspace_items] if not q.bound]
     # a pipeline's own Fabric id only exists once it is deployed: deploy fills it in, nobody supplies it
@@ -1184,6 +1185,92 @@ def run_cmd(workspace_id: str, pipelines: tuple[str, ...], params: tuple[str, ..
         sys.exit(1)
     if failed:
         sys.exit(1)
+
+
+@cli.command(name="verify")
+@click.option("--project", "project_name", required=True, help="Project name (`convert` and `deploy` must have run).")
+@click.option("--workspace-id", "workspace_id", required=True, help="Fabric workspace id (GUID) that holds the pipelines.")
+@click.option("--pipeline", "pipelines", multiple=True, help="Verify only this pipeline. Repeatable. Default: every converted one.")
+@click.option("--no-adf", "no_adf", is_flag=True, help="Do not read the ADF factory's run history (compare with earlier Fabric runs only).")
+@click.option("--timeout", "timeout_seconds", type=int, default=1800, show_default=True, help="Seconds to wait for each run.")
+@azure_auth_options()
+@click.option("--apply", "apply_", is_flag=True,
+              help="Start a new Fabric run of each pipeline, then compare. Without it nothing is started: the latest finished "
+                   "Fabric run of each pipeline is compared instead (read-only).")
+def verify_cmd(project_name: str, workspace_id: str, pipelines: tuple[str, ...], no_adf: bool, timeout_seconds: int,
+               apply_: bool, auth: str, **auth_env: str | None) -> None:
+    """Prove converted pipelines: compare each Fabric run with the last successful ADF run (or the previous Fabric run)."""
+    from adf2fabric.agent.deployment.fabric_deploy import FABRIC_SCOPE, DeployError, FabricClient
+    from adf2fabric.agent.deployment.verify import AdfRuns, Factory, load_record, render_report, save_record, verify_pipeline
+    from adf2fabric.agent.deployment.verify import record_path as verify_record_path
+    from adf2fabric.connections.providers.azure_cli import AzureCliProvider, ProviderError
+    from adf2fabric.connectivity._azure import CredentialUnavailable, build_credential
+
+    config = load_config()
+    store = ProjectStore(projects_root(config))
+    pid = slugify(project_name)
+    if not store.has_conversion(pid):
+        click.secho(f"Verify failed: project '{pid}' has no conversion. Run `adf2fabric convert` first.", fg="red", err=True)
+        sys.exit(1)
+    names = list(pipelines) or [p.source_pipeline for p in store.load_conversion(pid).pipelines]
+    record_path = verify_record_path(store.project_dir(pid))
+    previous = load_record(record_path)
+    adf = None
+    factory = Factory.from_source(store.load(pid).repository.repository_url if store.load(pid).repository else None)
+    if factory and not no_adf:
+        try:  # the factory's own subscription picks the signed-in account that owns it; the CLI default is not changed
+            adf = AdfRuns(factory, AzureCliProvider().token(subscription=factory.subscription))
+        except ProviderError as exc:
+            click.secho(f"  ADF run history not available ({exc}); comparing with earlier Fabric runs only.", fg="yellow")
+    try:
+        credential, _ = build_credential(credential_from(auth, **auth_env))
+        client = FabricClient(credential.get_token(FABRIC_SCOPE).token)
+        click.echo(f"RUN AND COMPARE ({'new runs' if apply_ else 'latest finished runs; nothing started, add --apply to run'})"
+                   f"  workspace: {workspace_id}")
+        results = []
+        for n in names:
+            v = verify_pipeline(client, workspace_id, n, start=apply_, adf=adf, previous=previous.get(n),
+                                timeout_seconds=timeout_seconds)
+            results.append(v)
+            colour = {"matches": "green", "partial": "yellow", "differs": "yellow", "no_baseline": None, "failed": "red",
+                      "not_run": None}[v.verdict]
+            ran = f" - Fabric run {v.ran_at}" if v.ran_at else ""
+            base = f", {v.matched} fact(s) matched vs {v.baseline} run {v.baseline_at}" if v.baseline else ""
+            click.secho(f"  - {n}: {v.verdict}{ran}{base}", fg=colour)
+            for d in v.differences[:5]:
+                click.echo(f"      {d['activity']} {d['fact']}: baseline {d['baseline']} -> Fabric {d['fabric']}")
+            if v.detail:
+                click.echo(f"      {v.detail}")
+    except (DeployError, CredentialUnavailable) as exc:
+        click.secho(f"Verify failed: {getattr(exc, 'detail', None) or exc}", fg="red", err=True)
+        sys.exit(1)
+    record = save_record(record_path, results)
+    report = record_path.with_name("verification-report.md")
+    report.write_text(render_report(record), encoding="utf-8")
+    click.echo(f"  record: {record_path}")
+    click.echo(f"  report: {report}")
+    if any(v.verdict in ("failed", "differs") for v in results):
+        sys.exit(1)
+
+
+@cli.command(name="handover")
+@click.option("--project", "project_name", required=True, help="Project name (`convert` must have run).")
+def handover_cmd(project_name: str) -> None:
+    """Write the handover report: each pipeline's readiness and next step, from what earlier stages recorded."""
+    from adf2fabric.agent.handover import assess, render
+    from adf2fabric.agent.deployment.verify import load_record, record_path
+
+    store = ProjectStore(projects_root(load_config()))
+    pid = slugify(project_name)
+    if not store.has_conversion(pid):
+        click.secho(f"Handover failed: project '{pid}' has no conversion. Run `adf2fabric convert` first.", fg="red", err=True)
+        sys.exit(1)
+    path = store.project_dir(pid) / "handover.md"
+    path.write_text(render(store, pid), encoding="utf-8")
+    click.echo(f"HANDOVER  project: {pid}")
+    for r in assess(store.load_conversion(pid), load_record(record_path(store.project_dir(pid)))):
+        click.echo(f"  - {r.pipeline}: {r.label}" + (f" ({r.why[:120]})" if r.why else ""))
+    click.echo(f"  report: {path}")
 
 
 @cli.command(name="compute-deploy")

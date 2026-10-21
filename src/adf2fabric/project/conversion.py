@@ -229,7 +229,7 @@ class PreflightFinding(_Strict):
     """A problem in the authored source that conversion cannot fix (``agent/conversion/preflight.py``)."""
 
     code: str  # reserved_sql_alias | linked_service_parameter_without_value | wait_only_pipeline
-    severity: str  # error: a run will fail | info: worth knowing
+    severity: str  # error: the Fabric run will fail | warning: the ADF run fails, Fabric is not affected | info: worth knowing
     subject: str  # the activity, linked service or pipeline it is about
     pipelines: list[str] = Field(default_factory=list)
     message: str

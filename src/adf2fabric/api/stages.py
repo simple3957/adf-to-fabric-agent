@@ -19,7 +19,7 @@ from adf2fabric.agent.reconstruction.models import ReconstructionRequest
 from adf2fabric.api.container import FABRIC_RESOURCE, Container, Session
 from adf2fabric.project.store import ProjectStore
 
-STAGES = ("discovery", "semantic", "reconstruct", "convert", "compute", "deploy_dry_run", "deploy_apply")
+STAGES = ("discovery", "semantic", "reconstruct", "convert", "compute", "deploy_dry_run", "deploy_apply", "verify")
 Log = Callable[[str], None]
 
 
@@ -62,6 +62,64 @@ def assemble_items(store: ProjectStore, pid: str, names: Optional[list[str]] = N
     return [available[n] for n in wanted if n in available]
 
 
+def conversion_summary(store: ProjectStore, pid: str, conv=None) -> dict[str, Any]:
+    """What the UI shows for a conversion. ``stale`` = made from an older commit than the project's source."""
+    conv = conv or store.load_conversion(pid)
+    project = store.load(pid)
+    res = store.conversion_dir(pid) / "resolutions.json"
+    return dict(
+        status=conv.status.value, status_counts=conv.status_counts,
+        pipelines=[{"name": p.source_pipeline, "status": p.status.value, "structurally_valid": p.structural_valid,
+                    "runtime_ready": p.runtime_ready} for p in conv.pipelines],
+        unbound=[q.name for q in [*conv.connections, *conv.workspace_items] if not q.bound and not q.name.startswith("pipeline:")],
+        filled_at_deploy=[q.name for q in conv.workspace_items if not q.bound and q.name.startswith("pipeline:")],
+        preflight=[f.model_dump(mode="json") for f in conv.preflight],
+        compatibility_findings=len(conv.compatibility), resolutions_used=res.exists(),
+        stale=bool(project.repository and conv.source_commit_sha != project.repository.commit_sha))
+
+
+def _verify(c: Container, session: Session, pid: str, options: dict, log: Log) -> dict[str, Any]:
+    """Run-and-compare on the latest finished Fabric runs. Read-only: from the UI it never starts a run."""
+    from adf2fabric.agent.deployment.verify import AdfRuns, Factory, load_record, record_path, render_report, save_record, verify_pipeline
+
+    dest = session.destination
+    workspace = options.get("workspace_id") or dest.get("workspace_id")
+    if not workspace:
+        raise StageError("No destination workspace is selected.", ["Choose a workspace on the Connections screen."])
+    if not c.store.has_conversion(pid):
+        raise StageError("Nothing converted yet.", ["Run the convert stage first."])
+    names = options.get("pipelines") or [p.source_pipeline for p in c.store.load_conversion(pid).pipelines]
+    path = record_path(c.store.project_dir(pid))
+    previous = load_record(path)
+    project = c.store.load(pid)
+    factory = Factory.from_source(project.repository.repository_url if project.repository else None)
+    adf = None
+    if factory:
+        try:  # the factory's subscription selects the account that owns it
+            adf = AdfRuns(factory, c.azure.token(subscription=factory.subscription))
+        except Exception as exc:  # noqa: BLE001 - no ADF history is a weaker baseline, not a failure
+            log(f"ADF run history not available: {type(exc).__name__}")
+    from adf2fabric.connections.providers.azure_cli import ProviderError
+
+    try:
+        token = c.azure.token(tenant=dest.get("tenant_id"), account=dest.get("account"), resource=FABRIC_RESOURCE)
+    except ProviderError as exc:
+        raise StageError(str(exc), getattr(exc, "actions", None) or ["Sign in to Fabric on the Connections page."]) from None
+    try:
+        client = FabricClient(token)
+        results = []
+        for n in names:
+            log(f"comparing {n}")
+            results.append(verify_pipeline(client, workspace, n, start=False, adf=adf, previous=previous.get(n)))
+    except DeployError as exc:
+        raise StageError(str(exc)) from None
+    record = save_record(path, results)
+    path.with_name("verification-report.md").write_text(render_report(record), encoding="utf-8")
+    keep = ("pipeline", "verdict", "fabric_status", "ran_at", "baseline", "baseline_at", "matched", "differences",
+            "baseline_only", "fabric_only", "detail")
+    return {"results": [{k: v.to_dict()[k] for k in keep} for v in results]}
+
+
 def run_stage(c: Container, session: Session, pid: str, stage: str, log: Log, options: Optional[dict] = None) -> dict[str, Any]:
     options = options or {}
     if stage not in STAGES:
@@ -87,15 +145,7 @@ def run_stage(c: Container, session: Session, pid: str, stage: str, log: Log, op
         r = ConversionAgent(c.store).run(ConversionRequest(
             project_name=pid, pipelines=options.get("pipelines") or [], resolutions_path=str(res) if res.exists() else None))
         _ok(r)  # a failed conversion has no record: say why before reading it
-        conv = r.conversion
-        return _ok(r, status=conv.status.value, status_counts=conv.status_counts,
-                   pipelines=[{"name": p.source_pipeline, "status": p.status.value, "structurally_valid": p.structural_valid,
-                               "runtime_ready": p.runtime_ready} for p in conv.pipelines],
-                   unbound=[q.name for q in [*conv.connections, *conv.workspace_items] if not q.bound
-                            and not q.name.startswith("pipeline:")],
-                   filled_at_deploy=[q.name for q in conv.workspace_items if not q.bound and q.name.startswith("pipeline:")],
-                   preflight=[f.model_dump(mode="json") for f in conv.preflight],
-                   compatibility_findings=len(conv.compatibility), resolutions_used=res.exists())
+        return _ok(r, **conversion_summary(c.store, pid, r.conversion))
     if stage == "compute":
         from adf2fabric.agent.assessment.agent import ComputeAgent, ComputeRequest
 
@@ -113,6 +163,8 @@ def run_stage(c: Container, session: Session, pid: str, stage: str, log: Log, op
         a = r.assessment
         return _ok(r, recommended_sku=a.recommended_sku if a else None, cu_hours_per_day=a.cu_hours_per_day if a else None,
                    history_used=a.history_used if a else False, report=r.report_markdown)
+    if stage == "verify":
+        return _verify(c, session, pid, options, log)
     # deploy
     dest = session.destination
     if dest.get("provider", "azure_cli") != "azure_cli":

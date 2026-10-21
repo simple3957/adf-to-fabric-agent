@@ -26,6 +26,12 @@ cards = call(api.cards, pid) if discovered else None
 session = call(api.session) or {}
 dest = session.get("destination") or {}
 conversion = st.session_state.get("conversion", {}).get(pid)
+if conversion is None and discovered and project.get("has_conversion") and pid not in st.session_state.get("stale_conv", set()):
+    saved = call(api.conversion, pid)  # a conversion made earlier (CLI or another session) counts; a stale one does not
+    if saved and not saved.get("stale"):
+        conversion = st.session_state.setdefault("conversion", {})[pid] = saved
+    elif saved:
+        st.session_state.setdefault("stale_conv", set()).add(pid)  # asked once; converting again replaces it
 deployed = st.session_state.get("deploy", {}).get(pid)
 
 facts = {"discover": discover_facts(project, found), "connect": connect_facts(cards),

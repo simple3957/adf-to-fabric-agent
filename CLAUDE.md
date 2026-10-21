@@ -14,7 +14,7 @@ streamlit run ui/app.py                 # UI on http://localhost:8501 (add ?demo
 adf2fabric --help                       # CLI
 ```
 
-CLI commands (`src/adf2fabric/cli.py`): `intake`, `consultation`, `discovery`, `discovery-adls`, `discovery-adls-paths`, `discovery-sql`, `discovery-sql-structural`, `discovery-adf`, `discovery-adf-semantic`, `convert`, `reconstruct`, `deploy`, `deploy-notebook`, `create-shortcut`, `fetch-databricks-notebooks`, `run`, `compute-deploy`, `assess-compute`. Each takes `--project <name>`; state lives under `projects/<name>/` (see `project/store.py`).
+CLI commands (`src/adf2fabric/cli.py`): `intake`, `consultation`, `discovery`, `discovery-adls`, `discovery-adls-paths`, `discovery-sql`, `discovery-sql-structural`, `discovery-adf`, `discovery-adf-semantic`, `convert`, `reconstruct`, `deploy`, `deploy-notebook`, `create-shortcut`, `fetch-databricks-notebooks`, `run`, `verify`, `handover`, `compute-deploy`, `assess-compute`. Each takes `--project <name>`; state lives under `projects/<name>/` (see `project/store.py`).
 
 ## Layout (`src/adf2fabric/`)
 
@@ -45,6 +45,7 @@ Per-agent operating instructions are in `skills/`. Per-stage references are in `
 - Triggers are created disabled and never duplicated.
 - `agent/conversion/preflight.py` reports source problems conversion cannot fix (reserved SQL aliases from Microsoft's keyword list, linked-service parameters with no value, Wait-only pipelines). They are findings, never blockers.
 - Secrets are referenced by env-var name, never stored in project files.
+- `verify` (`agent/deployment/verify.py`) compares a Fabric run with the last successful ADF run (or the previous Fabric run) by activity name: status, Copy counts, Lookup results. It stores numbers and hashes, never data values. Without `--apply` it only reads the latest finished runs. `handover` (`agent/handover.py`) turns conversion, source checks and verify results into one readiness level per pipeline.
 - Connection auto-creation covers only SQL/Synapse, ADLS Gen2, Blob, REST and Databricks. Others get a verdict but are created by hand.
 - Before claiming a Fabric property is valid, check the Fabric pipeline docs. Do not guess properties.
 - Smoke-run new analysis stages on the real `projects/` sample, not only synthetic fixtures.

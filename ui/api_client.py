@@ -151,6 +151,13 @@ class ApiClient:
     def project(self, pid: str) -> dict:
         return self._get(f"/projects/{pid}")
 
+    def handover(self, pid: str) -> str:
+        return self._get(f"/projects/{pid}/handover")["markdown"]
+
+    def conversion(self, pid: str) -> dict:
+        """The saved conversion's summary (the same shape the convert stage returns)."""
+        return self._get(f"/projects/{pid}/conversion")
+
     def linked_services(self, pid: str) -> dict:
         return self._get(f"/projects/{pid}/linked-services")
 

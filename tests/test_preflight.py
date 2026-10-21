@@ -43,3 +43,35 @@ def test_wait_only_pipelines_are_noted_and_real_ones_are_not():
 
     got = preflight._wait_only(D())
     assert [f.subject for f in got] == ["W"] and got[0].severity == "info"
+
+
+def test_a_linked_service_parameter_with_no_value_is_flagged_as_an_adf_side_warning(monkeypatch):
+    import adf2fabric.connections.resolution as R
+
+    class LS:
+        name, parameters = "LS_SQL", [_P("DBName"), _P("Port", "1433", True)]
+
+    class D:
+        linked_services = [LS()]
+
+    monkeypatch.setattr(R, "usage", lambda d, n: (["DS"], [{"pipeline": "PL_X", "activity": "A", "type": "Lookup"}], {}))
+    got = preflight._parameters_without_value(D())
+    assert len(got) == 1 and got[0].severity == "warning" and "DBName" in got[0].message and "Port" not in got[0].message
+    monkeypatch.setattr(R, "usage", lambda d, n: (["DS"], [], {"DBName": {"db1"}}))
+    assert preflight._parameters_without_value(D()) == []  # a dataset passes it
+
+
+def test_temporal_queries_types_literals_and_comments_are_not_flagged():
+    assert not preflight._reserved_aliases({"PL": _content(
+        "SELECT * FROM t FOR SYSTEM_TIME AS OF '2024-01-01'",
+        "SELECT CAST(x AS DOUBLE PRECISION) AS Total FROM t",
+        "SELECT 'value as of today' AS Note FROM t -- returned as is",
+        "SELECT 1 AS Total /* AS RowCount, */ FROM t")})
+
+
+def test_an_alias_before_a_clause_or_bracket_is_flagged_and_expression_queries_are_read():
+    got = preflight._reserved_aliases({"PL": {"properties": {"activities": [
+        {"name": "A", "type": "Lookup", "typeProperties": {"source": {
+            "sqlReaderQuery": {"value": "SELECT COUNT(*) AS RowCount FROM @{pipeline().parameters.t}", "type": "Expression"}}}},
+        {"name": "B", "type": "Lookup", "typeProperties": {"source": {"sqlReaderQuery": "SELECT (SELECT 1 AS User)"}}}]}}})
+    assert len(got) == 1 and "ROWCOUNT" in got[0].message and "USER" in got[0].message
