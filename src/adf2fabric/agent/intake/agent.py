@@ -69,7 +69,7 @@ class IntakeAgent:
         return self._azure.run(request)
 
     def run(self, request: IntakeRequest) -> IntakeResult:
-        token: str = ""
+        token: str | None = ""  # None once a fetch is tried without one
         try:
             project_id = slugify(request.project_name)
             provider = get_provider(request.provider)
@@ -109,8 +109,8 @@ class IntakeAgent:
                 # Explicit refresh: replace whatever is there with a fresh clone.
                 _remove_tree(dest)
 
-            # --- Fresh fetch (requires authentication) ---
-            token = authentication.resolve_token(self.token_env)
+            # --- Fresh fetch: with a token when one is set, otherwise anonymously (public repositories) ---
+            token = authentication.optional_token(self.token_env)
             client = RepositoryClient(provider, token)
             metadata = client.fetch(request.repository_url, request.branch, dest)
             manifest = github_source.build_manifest(
@@ -130,6 +130,8 @@ class IntakeAgent:
             )
         except Exception as exc:  # noqa: BLE001 - surface a clean, redacted failure
             message = authentication.redact(str(exc), token) if token else str(exc)
+            if token is None:  # a fetch was tried without a token: say how to give one
+                message += " " + authentication.NO_TOKEN_HINT.format(env=self.token_env)
             return IntakeResult(success=False, error=message, message="Intake failed.")
 
     def _matches(self, dest, clean_url: str, branch: str | None) -> bool:

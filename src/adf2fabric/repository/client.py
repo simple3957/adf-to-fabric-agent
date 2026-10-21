@@ -26,7 +26,7 @@ class RepositoryAccessError(Exception):
 
 
 class RepositoryClient:
-    def __init__(self, provider: RepositoryProvider, token: str):
+    def __init__(self, provider: RepositoryProvider, token: str | None):
         self.provider = provider
         self.token = token
 

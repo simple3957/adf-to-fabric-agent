@@ -30,6 +30,15 @@ def resolve_token(env_var: str = DEFAULT_TOKEN_ENV) -> str:
     return token
 
 
+def optional_token(env_var: str = DEFAULT_TOKEN_ENV) -> str | None:
+    """The token from ``env_var``, or None: a public repository (or one git can already reach) needs none."""
+    return os.environ.get(env_var) or None
+
+
+NO_TOKEN_HINT = ("If the repository is private, set the {env} environment variable to a token with read access to it "
+                 "(it is used only for the git operation and never stored).")
+
+
 def redact(text: str, *secrets: str) -> str:
     """Mask every non-empty secret occurring in ``text`` with ``***``.
 

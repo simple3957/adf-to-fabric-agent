@@ -143,12 +143,46 @@ def test_different_repo_not_reused(store, make_git_repo, tmp_path, token_env):
 
 # --- failure paths ----------------------------------------------------------
 
-def test_intake_missing_token_fails_cleanly(store, source_repo, monkeypatch):
-    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+def test_intake_without_a_token_works_when_git_can_reach_the_repo(store, source_repo, monkeypatch):
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)  # a public repository needs no token
     result = _run(store, source_repo)
-    assert result.success is False
-    assert result.project is None
-    assert "token" in result.error.lower()
+    assert result.success is True and result.project.repository.commit_sha == repo_head(source_repo)
+
+
+def test_a_fetch_without_a_token_that_fails_says_how_to_give_one(store, tmp_path, monkeypatch):
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    result = _run(store, tmp_path / "no-such-repo")
+    assert result.success is False and result.project is None
+    assert "GITHUB_TOKEN" in result.error and "private" in result.error
+
+
+def test_a_failure_with_a_token_gives_no_token_hint(store, tmp_path, token_env):
+    result = _run(store, tmp_path / "no-such-repo")
+    assert result.success is False and "If the repository is private" not in result.error
+
+
+def test_github_urls_carry_a_token_only_when_there_is_one():
+    from adf2fabric.repository.providers import GitHubProvider
+
+    p = GitHubProvider()
+    assert p.authenticated_url("https://github.com/o/r", None) == "https://github.com/o/r.git"
+    assert p.authenticated_url("https://github.com/o/r", "t") == "https://x-access-token:t@github.com/o/r.git"
+
+
+def test_git_never_waits_for_a_credential_prompt(monkeypatch):
+    seen = {}
+
+    def fake_run(args, **kw):
+        seen.update(kw["env"])
+
+        class P:
+            returncode, stdout, stderr = 0, "", ""
+
+        return P()
+
+    monkeypatch.setattr(git_mod.subprocess, "run", fake_run)
+    git_mod._run(["--version"])
+    assert seen["GIT_TERMINAL_PROMPT"] == "0" and seen["GCM_INTERACTIVE"] == "never"
 
 
 def test_intake_bad_branch_fails(store, source_repo, token_env):

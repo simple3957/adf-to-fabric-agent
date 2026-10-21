@@ -37,8 +37,8 @@ class RepositoryProvider(ABC):
         """Return a canonical, token-free HTTPS clone URL (ending in .git)."""
 
     @abstractmethod
-    def authenticated_url(self, url: str, token: str) -> str:
-        """Return a clone URL with the token embedded for the git operation."""
+    def authenticated_url(self, url: str, token: str | None) -> str:
+        """Return a clone URL with the token embedded for the git operation (the plain URL when there is none)."""
 
 
 class GitHubProvider(RepositoryProvider):
@@ -64,8 +64,10 @@ class GitHubProvider(RepositoryProvider):
         owner, repo = self.parse(url)
         return f"https://github.com/{owner}/{repo}.git"
 
-    def authenticated_url(self, url: str, token: str) -> str:
+    def authenticated_url(self, url: str, token: str | None) -> str:
         owner, repo = self.parse(url)
+        if not token:
+            return f"https://github.com/{owner}/{repo}.git"
         # x-access-token is GitHub's documented username for token auth over HTTPS.
         return f"https://x-access-token:{token}@github.com/{owner}/{repo}.git"
 

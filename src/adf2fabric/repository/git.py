@@ -8,6 +8,7 @@ they surface (see ``authentication.redact``).
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -37,11 +38,15 @@ def _run(args: list[str], *, cwd: Path | None = None) -> subprocess.CompletedPro
     Raises :class:`GitError` on non-zero exit. The raw (possibly secret-bearing)
     stderr is attached so the caller can redact and re-raise.
     """
+    # Never wait for a credential prompt (terminal or Git Credential Manager window): without a token a private
+    # repository must fail fast with a clear message, not hang the intake.
+    env = {**os.environ, "GIT_TERMINAL_PROMPT": "0", "GCM_INTERACTIVE": "never"}
     proc = subprocess.run(
         [_git_path(), *args],
         cwd=str(cwd) if cwd else None,
         capture_output=True,
         text=True,
+        env=env,
     )
     if proc.returncode != 0:
         raise GitError(proc.stderr.strip() or proc.stdout.strip() or "git command failed")
