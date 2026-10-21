@@ -225,6 +225,18 @@ class PipelineConversion(_Strict):
     runtime_ready: bool = False
 
 
+class PreflightFinding(_Strict):
+    """A problem in the authored source that conversion cannot fix (``agent/conversion/preflight.py``)."""
+
+    code: str  # reserved_sql_alias | linked_service_parameter_without_value | wait_only_pipeline
+    severity: str  # error: a run will fail | info: worth knowing
+    subject: str  # the activity, linked service or pipeline it is about
+    pipelines: list[str] = Field(default_factory=list)
+    message: str
+    fix: str
+    source_url: Optional[str] = None
+
+
 class CompatibilityFinding(_Strict):
     """A retired / deprecated / preview / unavailable component found in the source estate.
 
@@ -273,6 +285,7 @@ class ProjectConversion(_Strict):
     reconstruction_applied: list[str] = Field(default_factory=list)  # proposal ids that entered this output
     reconstruction_open: list[str] = Field(default_factory=list)  # blocker ids still unresolved
     compatibility: list[CompatibilityFinding] = Field(default_factory=list)  # retired/deprecated/preview components
+    preflight: list[PreflightFinding] = Field(default_factory=list)  # source problems conversion cannot fix
     connector_coverage: list[ConnectorCoverage] = Field(default_factory=list)  # per linked service, see connectors.coverage
     compute_plan: Optional[ComputePlan] = None  # external Spark compute in use and the Fabric compute that would replace it
     detail: str = ""

@@ -107,6 +107,12 @@ def render_report(c: ProjectConversion) -> str:
         if p.prerequisites:
             out += ["", "### Prerequisites for this pipeline", ""] + _prereq_lines(p.prerequisites)
 
+    if c.preflight:
+        out += ["", "## Source checks (problems in the authored source that conversion cannot fix)", "",
+                "| Severity | Subject | Used in | Finding | Fix |", "| --- | --- | --- | --- | --- |"]
+        for f in c.preflight:
+            used = ", ".join(f"`{n}`" for n in f.pipelines[:3]) + (f" +{len(f.pipelines) - 3}" if len(f.pipelines) > 3 else "")
+            out.append(f"| {f.severity} | `{f.subject}` | {used or '-'} | {f.message} | {f.fix} |")
     if c.compatibility:
         out += ["", "## Compatibility findings (retired, deprecated, preview and unavailable components)", "",
                 "Each finding cites Microsoft's page and the date the catalog was verified. A component that is retired "

@@ -19,6 +19,7 @@ import re
 from datetime import datetime, timezone
 from pathlib import Path
 from adf2fabric.agent.conversion import compatibility as compat
+from adf2fabric.agent.conversion import preflight
 from adf2fabric.agent.conversion.compute_plan import ComputeSources, build_compute_plan, load_sources
 from adf2fabric.agent.conversion.connectors import coverage as connector_coverage
 from adf2fabric.agent.conversion.context import ProjectContext, Resolutions
@@ -140,12 +141,14 @@ class ConversionAgent:
                 inferences.setdefault(aid, []).append(pr)
         engine = ConversionEngine(ctx, inferences)
         converted = []
+        contents: dict[str, dict] = {}
         for p in selected:
             record, content = engine.convert_pipeline(p)
             rel = f"pipelines/{p.name}.DataPipeline/pipeline-content.json"
             self.store.write_conversion_file(pid, rel, json.dumps(content, indent=2, ensure_ascii=False) + "\n")
             record.artifact_path = rel
             converted.append(record)
+            contents[p.name] = content
 
         written: dict[str, str] = {}  # trigger name -> relative file (one file per trigger, shared by its pipelines)
         for record in converted:
@@ -165,7 +168,7 @@ class ConversionAgent:
 
         all_fine = all(r.status is ConversionStatus.converted for r in converted)
         outcome = ConversionOutcome.converted if all_fine else ConversionOutcome.partial
-        conv = self._assemble(pid, d, converted, ctx, outcome, "", compute_sources)
+        conv = self._assemble(pid, d, converted, ctx, outcome, "", compute_sources, contents)
         conv.reconstruction_applied = sorted(p.id for p in applied)
         conv.reconstruction_open = sorted(open_blockers)
         self.store.save_conversion(pid, conv)
@@ -200,7 +203,8 @@ class ConversionAgent:
 
     def _assemble(self, pid: str, d: AdfSemanticDiscovery, pipelines, ctx: ProjectContext,
                   outcome: ConversionOutcome, detail: str,
-                  compute_sources: ComputeSources | None = None) -> ProjectConversion:
+                  compute_sources: ComputeSources | None = None,
+                  contents: dict[str, dict] | None = None) -> ProjectConversion:
         status_counts: dict[str, int] = {s.value: 0 for s in ConversionStatus}
         strategy_counts: dict[str, int] = {}
         for p in pipelines:
@@ -228,6 +232,7 @@ class ConversionAgent:
             workspace_items=[q for q in ordered if q.kind not in ("connection", "gateway", "credential")],
             schema_notes=notes, detail=detail, provenance=dict(_PROVENANCE),
             compatibility=compat.scan(d, {p.source_pipeline for p in pipelines}),
+            preflight=preflight.scan(d, contents or {}),
             connector_coverage=connector_coverage(d.linked_services),
             compute_plan=build_compute_plan(d, {p.source_pipeline.lower() for p in pipelines}, compute_sources))
         if self.store.has_conversion(pid):

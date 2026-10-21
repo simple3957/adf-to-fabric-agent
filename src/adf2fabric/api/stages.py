@@ -91,7 +91,10 @@ def run_stage(c: Container, session: Session, pid: str, stage: str, log: Log, op
         return _ok(r, status=conv.status.value, status_counts=conv.status_counts,
                    pipelines=[{"name": p.source_pipeline, "status": p.status.value, "structurally_valid": p.structural_valid,
                                "runtime_ready": p.runtime_ready} for p in conv.pipelines],
-                   unbound=[q.name for q in [*conv.connections, *conv.workspace_items] if not q.bound],
+                   unbound=[q.name for q in [*conv.connections, *conv.workspace_items] if not q.bound
+                            and not q.name.startswith("pipeline:")],
+                   filled_at_deploy=[q.name for q in conv.workspace_items if not q.bound and q.name.startswith("pipeline:")],
+                   preflight=[f.model_dump(mode="json") for f in conv.preflight],
                    compatibility_findings=len(conv.compatibility), resolutions_used=res.exists())
     if stage == "compute":
         from adf2fabric.agent.assessment.agent import ComputeAgent, ComputeRequest

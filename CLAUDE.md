@@ -43,6 +43,7 @@ Per-agent operating instructions are in `skills/`. Per-stage references are in `
 - An unregistered activity type becomes an explicit blocker, never silently dropped. Keep it that way when adding handlers.
 - Deploy defaults to dry run. It refuses unbound placeholders (notebook, dataflow, Spark job ids) unless `--allow-unbound`.
 - Triggers are created disabled and never duplicated.
+- `agent/conversion/preflight.py` reports source problems conversion cannot fix (reserved SQL aliases from Microsoft's keyword list, linked-service parameters with no value, Wait-only pipelines). They are findings, never blockers.
 - Secrets are referenced by env-var name, never stored in project files.
 - Connection auto-creation covers only SQL/Synapse, ADLS Gen2, Blob, REST and Databricks. Others get a verdict but are created by hand.
 - Before claiming a Fabric property is valid, check the Fabric pipeline docs. Do not guess properties.

@@ -770,9 +770,17 @@ def convert(project_name: str, pipelines: tuple[str, ...], resolutions_path: str
             click.secho(f"    {len(plan.gaps)} item(s) need a person; see the report.", fg="yellow")
         for prob in plan.sources_problems:
             click.secho(f"    compute sources file: {prob}", fg="yellow")
+    for f in c.preflight:
+        click.secho(f"  source check ({f.severity}): {f.message}", fg="red" if f.severity == "error" else None)
+        click.echo(f"      fix: {f.fix}")
     unbound = [q for q in [*c.connections, *c.workspace_items] if not q.bound]
-    if unbound:
-        click.secho(f"  {len(unbound)} binding(s) still to supply before anything can run; see the report.", fg="yellow")
+    # a pipeline's own Fabric id only exists once it is deployed: deploy fills it in, nobody supplies it
+    owed = [q for q in unbound if not q.name.startswith("pipeline:")]
+    if owed:
+        click.secho(f"  {len(owed)} binding(s) still to supply before anything can run: "
+                    + ", ".join(q.name for q in owed) + "; see the report.", fg="yellow")
+    if len(unbound) > len(owed):
+        click.echo(f"  {len(unbound) - len(owed)} pipeline id(s) are filled in by `deploy` once the pipelines exist.")
     base = store.conversion_dir(c.project_id)
     click.echo(f"  report:     {base / 'conversion-report.md'}")
     click.echo(f"  record:     {store.conversion_path(c.project_id)}")

@@ -211,8 +211,7 @@ def connect(api: ApiClient, pid: str, cards: list[dict] | None, workspace_id: st
             known.setdefault(c.get("fabric_connection_type") or "?", {})[m["display_name"]] = m["id"]
 
     rows = [{"Linked service": c["name"], "Type": c.get("adf_type") or "?",
-             "Fabric connector": c.get("connector_label") or "none", "Status": STATE_LABELS.get(c["state"], (c["state"],))[0],
-             "Sign-in": (c.get("choice") or {}).get("method") or "-"} for c in cards]
+             "Fabric connector": c.get("connector_label") or "none", "Status": STATE_LABELS.get(c["state"], (c["state"],))[0]} for c in cards]
     event = st.dataframe(rows, hide_index=True, on_select="rerun", selection_mode="single-row", key="conn-table", width="stretch")
     picked = event.selection.rows
     first_open = next((i for i, c in enumerate(cards) if c["state"] not in READY), 0)
@@ -291,9 +290,13 @@ def convert(api: ApiClient, pid: str, result: dict | None) -> None:
             col.metric(k.replace("_", " "), n)
     st.dataframe([{"pipeline": p["name"], "status": p["status"], "structurally valid": "✅" if p["structurally_valid"] else "❌",
                    "ready to run": "✅" if p["runtime_ready"] else "⬜"} for p in result.get("pipelines", [])], hide_index=True)
+    for f in result.get("preflight", []):
+        (st.error if f.get("severity") == "error" else st.info)(f"**{f['subject']}**: {f['message']}  \n*Fix:* {f['fix']}")
     if result.get("unbound"):
-        st.warning("Still unbound (pipelines that need these won't be ready to run):\n" +
+        st.warning("You still need to supply (pipelines that need these won't be ready to run):\n" +
                    "".join(f"\n- `{u}`" for u in result["unbound"]))
+    if result.get("filled_at_deploy"):
+        st.caption(f"{len(result['filled_at_deploy'])} child pipeline id(s) are filled in automatically when you deploy.")
 
 
 # ---- 4. deploy ------------------------------------------------------------------------------------------------------------

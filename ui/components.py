@@ -120,11 +120,11 @@ def _sign_in_panel(provider: str, label: str, key: str, *, device_option: bool =
     api = client()
     with st.container(border=True):
         st.markdown(f"**Sign in with {label}**")
-        st.caption("You get a short code and a link here. Open the link on any device, enter the code, then sign in and "
-                   "approve with Authenticator.")
-        device = st.checkbox("Use a device code (recommended)", key=f"{key}-device", value=True,
-                             help="Shows a code to enter at microsoft.com/devicelogin from any device. Untick it to sign in "
-                                  "through a browser tab on the machine running the accelerator.") if device_option else False
+        st.caption("A Microsoft sign-in page opens in the browser on the machine running the accelerator. Sign in and approve "
+                   "with Authenticator. Tick the box below to get a code to enter on another device instead.")
+        device = st.checkbox("Use a device code instead of the browser", key=f"{key}-device", value=False,
+                             help="Shows a code to enter at microsoft.com/devicelogin from any device. Many directories "
+                                  "block this (security defaults, error AADSTS530035): then use the browser sign-in.") if device_option else False
         a, b = st.columns(2)
         go = a.button("Start sign-in", key=f"{key}-go", type="primary", width="stretch")
         cancel = b.button("Cancel", key=f"{key}-cancel", width="stretch")
