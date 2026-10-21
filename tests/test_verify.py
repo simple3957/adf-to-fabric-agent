@@ -31,7 +31,7 @@ def test_foreach_iterations_are_summed_and_order_does_not_matter():
     b = V.summarize([act("C", rowsRead=4), act("C", rowsRead=3), act("L", "Lookup", firstRow={"v": "y"}),
                      act("L", "Lookup", firstRow={"v": "x"})])
     assert a["C"]["metrics"]["rowsRead"] == 7 and a["C"]["runs"] == 2
-    assert V.compare(a, b) == ([], 4)
+    assert V.compare(a, b) == ([], 6)  # per activity: runs, status, and each fact
 
 
 def test_a_failed_iteration_makes_the_activity_failed():
@@ -41,7 +41,7 @@ def test_a_failed_iteration_makes_the_activity_failed():
 
 def test_differences_name_the_activity_the_fact_and_both_values():
     diffs, matched = V.compare(V.summarize([act("C", rowsRead=9)]), V.summarize([act("C", rowsRead=10)]))
-    assert diffs == [{"activity": "C", "fact": "rowsRead", "baseline": 10, "fabric": 9}] and matched == 1
+    assert diffs == [{"activity": "C", "fact": "rowsRead", "baseline": 10, "fabric": 9}] and matched == 2
 
 
 def test_hash_differences_never_show_the_values():
@@ -85,7 +85,7 @@ def runner(*acts, status="Completed", job="job-2"):
 def test_matches_against_adf_when_every_activity_lines_up():
     v = V.verify_pipeline(None, "ws", "P", start=True, adf=FakeAdf([act("C", rowsRead=10)]),
                           runner=runner(act("C", rowsRead=10)))
-    assert (v.verdict, v.baseline, v.matched) == ("matches", "adf", 2)
+    assert (v.verdict, v.baseline, v.matched) == ("matches", "adf", 3)
 
 
 def test_partial_when_an_activity_exists_on_one_side_only():
@@ -264,3 +264,92 @@ def test_a_time_without_a_zone_is_utc():
     from datetime import timezone
 
     assert V._parse("2026-10-21T05:19:29.14").tzinfo == timezone.utc
+
+
+# --- a pipeline another one calls is compared as a batch ------------------------------------------------------------
+def _child_runs(*rows):
+    return [RunResult(pipeline="C", item_id="i", job_id=f"j{i}", status="Completed", started="2026-10-21T06:13:4{i}",
+                      activities=[act("Copy", rowsCopied=n)]) for i, n in enumerate(rows)]
+
+
+class BatchAdf(FakeAdf):
+    def __init__(self, *rows):
+        self.rows = rows
+
+    def last_success(self, pipeline):
+        return {"runId": "r0", "runEnd": "2026-10-21T06:11:00Z", "runStart": "2026-10-21T06:10:00Z", "pipelineName": pipeline,
+                "invokedBy": {"invokedByType": "PipelineActivity", "pipelineRunId": "parent-1"}}
+
+    def successes_near(self, run):
+        return [{"runId": f"r{i}"} for i in range(len(self.rows))]
+
+    def activities(self, run):
+        return [act("Copy", rowsCopied=self.rows[int(run["runId"][1:])])]
+
+
+def test_a_child_batch_matches_whatever_order_its_items_ran_in(monkeypatch):
+    monkeypatch.setattr(V, "recent_runs", lambda *a, **k: _child_runs(10, 4, 5))
+    v = V.verify_pipeline(None, "ws", "C", start=True, adf=BatchAdf(4, 5, 10), called_by=["Parent"])
+    assert v.verdict == "matches" and "batch of 3" in v.detail and "Parent" in v.detail
+
+
+def test_a_child_batch_with_a_missing_item_differs_on_runs_and_rows(monkeypatch):
+    monkeypatch.setattr(V, "recent_runs", lambda *a, **k: _child_runs(10, 4))
+    v = V.verify_pipeline(None, "ws", "C", start=False, adf=BatchAdf(4, 5, 10), called_by=["Parent"])
+    assert v.verdict == "differs" and {d["fact"] for d in v.differences} == {"runs", "rowsCopied"}
+
+
+def test_a_child_is_never_started_on_its_own(monkeypatch):
+    monkeypatch.setattr(V, "recent_runs", lambda *a, **k: [])
+    started = []
+    v = V.verify_pipeline(None, "ws", "C", start=True, called_by=["Parent"], runner=lambda *a, **k: started.append(1))
+    assert v.verdict == "not_run" and "Parent" in v.detail and not started
+
+
+def test_callers_are_read_from_the_converted_json(tmp_path):
+    class P:
+        def __init__(self, name, path):
+            self.source_pipeline, self.artifact_path = name, path
+
+    (tmp_path / "a.json").write_text(json.dumps({"x": "<item:pipeline:Child>"}), encoding="utf-8")
+    (tmp_path / "b.json").write_text("{}", encoding="utf-8")
+    assert V.callers(tmp_path, [P("Parent", "a.json"), P("Child", "b.json"), P("Gone", None)]) == {"Child": ["Parent"]}
+
+
+def test_a_called_pipeline_last_run_by_hand_in_adf_is_compared_run_for_run(monkeypatch):
+    seen = {}
+
+    def runs(*a, window_minutes=10, **k):
+        seen["window"] = window_minutes
+        return _child_runs(10)
+
+    class ByHand(BatchAdf):
+        def last_success(self, pipeline):
+            return {"runId": "r0", "runEnd": "x", "invokedBy": {"invokedByType": "Manual"}}
+
+        def successes_near(self, run):
+            return [run]
+
+    monkeypatch.setattr(V, "recent_runs", runs)
+    v = V.verify_pipeline(None, "ws", "C", start=False, adf=ByHand(10), called_by=["Parent"])
+    assert v.verdict == "matches" and seen["window"] == 0 and "started by hand" in v.detail
+
+
+def test_adf_groups_a_batch_by_its_parent_run():
+    class S:
+        def post(self, url, **kw):
+            class R:
+                status_code = 200
+
+                def json(self):
+                    return {"value": [{"runId": "a", "runStart": "2026-10-21T06:10:00Z", "invokedBy": {"pipelineRunId": "p1"}},
+                                      {"runId": "b", "runStart": "2026-10-21T06:10:05Z", "invokedBy": {"pipelineRunId": "p1"}},
+                                      {"runId": "c", "runStart": "2026-10-21T06:10:06Z", "invokedBy": {"pipelineRunId": "p2"}}]}
+            return R()
+
+    from adf2fabric.cloud import ARM_ENDPOINT  # noqa: F401 - the base URL is built from it
+    adf = V.AdfRuns(V.Factory("s", "r", "f"), "t", session=S())
+    run = {"runId": "a", "runStart": "2026-10-21T06:10:00Z", "pipelineName": "C",
+           "invokedBy": {"invokedByType": "PipelineActivity", "pipelineRunId": "p1"}}
+    assert [r["runId"] for r in adf.successes_near(run)] == ["a", "b"]
+    assert adf.successes_near({"runId": "m", "invokedBy": {"invokedByType": "Manual"}}) == [{"runId": "m", "invokedBy": {"invokedByType": "Manual"}}]

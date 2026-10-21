@@ -1202,6 +1202,7 @@ def verify_cmd(project_name: str, workspace_id: str, pipelines: tuple[str, ...],
     """Prove converted pipelines: compare each Fabric run with the last successful ADF run (or the previous Fabric run)."""
     from adf2fabric.agent.deployment.fabric_deploy import FABRIC_SCOPE, DeployError, FabricClient
     from adf2fabric.agent.deployment.verify import AdfRuns, Factory, load_record, render_report, save_record, verify_pipeline
+    from adf2fabric.agent.deployment.verify import callers as verify_callers
     from adf2fabric.agent.deployment.verify import record_path as verify_record_path
     from adf2fabric.connections.providers.azure_cli import AzureCliProvider, ProviderError
     from adf2fabric.connectivity._azure import CredentialUnavailable, build_credential
@@ -1212,7 +1213,9 @@ def verify_cmd(project_name: str, workspace_id: str, pipelines: tuple[str, ...],
     if not store.has_conversion(pid):
         click.secho(f"Verify failed: project '{pid}' has no conversion. Run `adf2fabric convert` first.", fg="red", err=True)
         sys.exit(1)
-    names = list(pipelines) or [p.source_pipeline for p in store.load_conversion(pid).pipelines]
+    conv = store.load_conversion(pid)
+    names = list(pipelines) or [p.source_pipeline for p in conv.pipelines]
+    called = verify_callers(store.conversion_dir(pid), conv.pipelines)
     record_path = verify_record_path(store.project_dir(pid))
     previous = load_record(record_path)
     adf = None
@@ -1230,7 +1233,7 @@ def verify_cmd(project_name: str, workspace_id: str, pipelines: tuple[str, ...],
         results = []
         for n in names:
             v = verify_pipeline(client, workspace_id, n, start=apply_, adf=adf, previous=previous.get(n),
-                                timeout_seconds=timeout_seconds)
+                                timeout_seconds=timeout_seconds, called_by=called.get(n))
             results.append(v)
             colour = {"matches": "green", "partial": "yellow", "differs": "yellow", "no_baseline": None, "failed": "red",
                       "not_run": None}[v.verdict]

@@ -80,7 +80,8 @@ def conversion_summary(store: ProjectStore, pid: str, conv=None) -> dict[str, An
 
 def _verify(c: Container, session: Session, pid: str, options: dict, log: Log) -> dict[str, Any]:
     """Run-and-compare on the latest finished Fabric runs. Read-only: from the UI it never starts a run."""
-    from adf2fabric.agent.deployment.verify import AdfRuns, Factory, load_record, record_path, render_report, save_record, verify_pipeline
+    from adf2fabric.agent.deployment.verify import (AdfRuns, Factory, callers, load_record, record_path, render_report,
+                                                    save_record, verify_pipeline)
 
     dest = session.destination
     workspace = options.get("workspace_id") or dest.get("workspace_id")
@@ -88,7 +89,9 @@ def _verify(c: Container, session: Session, pid: str, options: dict, log: Log) -
         raise StageError("No destination workspace is selected.", ["Choose a workspace on the Connections screen."])
     if not c.store.has_conversion(pid):
         raise StageError("Nothing converted yet.", ["Run the convert stage first."])
-    names = options.get("pipelines") or [p.source_pipeline for p in c.store.load_conversion(pid).pipelines]
+    conv = c.store.load_conversion(pid)
+    names = options.get("pipelines") or [p.source_pipeline for p in conv.pipelines]
+    called = callers(c.store.conversion_dir(pid), conv.pipelines)
     path = record_path(c.store.project_dir(pid))
     previous = load_record(path)
     project = c.store.load(pid)
@@ -110,7 +113,8 @@ def _verify(c: Container, session: Session, pid: str, options: dict, log: Log) -
         results = []
         for n in names:
             log(f"comparing {n}")
-            results.append(verify_pipeline(client, workspace, n, start=False, adf=adf, previous=previous.get(n)))
+            results.append(verify_pipeline(client, workspace, n, start=False, adf=adf, previous=previous.get(n),
+                                           called_by=called.get(n)))
     except DeployError as exc:
         raise StageError(str(exc)) from None
     record = save_record(path, results)

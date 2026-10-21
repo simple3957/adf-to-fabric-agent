@@ -91,6 +91,13 @@ def _query_activities(client: FabricClient, workspace: str, job_id: str, started
 
 def latest_run(client: FabricClient, workspace: str, name: str) -> Optional[RunResult]:
     """The most recent finished run of a pipeline, read-only (``GET .../jobs/instances``). None when it never ran."""
+    runs = recent_runs(client, workspace, name, window_minutes=0)
+    return runs[0] if runs else None
+
+
+def recent_runs(client: FabricClient, workspace: str, name: str, window_minutes: int = 10) -> list[RunResult]:
+    """The most recent finished run and every other finished run that started within ``window_minutes`` of it, newest
+    first, read-only. A child pipeline that a parent calls once per item runs as such a batch."""
     ids = client.list_pipelines(workspace)
     item_id = ids.get(name.lower())
     if item_id is None:
@@ -109,13 +116,30 @@ def latest_run(client: FabricClient, workspace: str, name: str) -> Optional[RunR
     # Completed or Failed only: a Deduped or Cancelled job says nothing about what the pipeline does
     done = [j for j in jobs if str(j.get("status", "")).lower() in ("completed", "failed")]
     if not done:
+        return []
+    done.sort(key=lambda j: str(j.get("startTimeUtc") or j.get("endTimeUtc") or ""), reverse=True)
+    newest = _utc(done[0].get("startTimeUtc"))
+    if newest is not None:
+        done = [j for j in done if (t := _utc(j.get("startTimeUtc"))) is not None
+                and abs((newest - t).total_seconds()) <= window_minutes * 60]
+    else:
+        done = done[:1]
+    out = []
+    for job in done:
+        result = RunResult(pipeline=name, item_id=item_id, job_id=str(job.get("id", "")), status=str(job.get("status", "")),
+                           started=str(job.get("startTimeUtc") or ""), ended=str(job.get("endTimeUtc") or ""),
+                           failure=_failure_text(job.get("failureReason")))
+        result.activities = _query_activities(client, workspace, result.job_id, result.started)
+        out.append(result)
+    return out
+
+
+def _utc(s: Any) -> Optional[datetime]:
+    try:
+        d = datetime.fromisoformat(str(s).replace("Z", "+00:00")) if s else None
+    except ValueError:
         return None
-    job = max(done, key=lambda j: str(j.get("endTimeUtc") or j.get("startTimeUtc") or ""))
-    result = RunResult(pipeline=name, item_id=item_id, job_id=str(job.get("id", "")), status=str(job.get("status", "")),
-                       started=str(job.get("startTimeUtc") or ""), ended=str(job.get("endTimeUtc") or ""),
-                       failure=_failure_text(job.get("failureReason")))
-    result.activities = _query_activities(client, workspace, result.job_id, result.started)
-    return result
+    return d.replace(tzinfo=timezone.utc) if d is not None and d.tzinfo is None else d
 
 
 def run_pipeline(client: FabricClient, workspace: str, name: str, *, parameters: Optional[dict[str, Any]] = None,

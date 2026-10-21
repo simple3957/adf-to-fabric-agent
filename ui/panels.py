@@ -212,12 +212,16 @@ def connect(api: ApiClient, pid: str, cards: list[dict] | None, workspace_id: st
 
     rows = [{"Linked service": c["name"], "Type": c.get("adf_type") or "?",
              "Fabric connector": c.get("connector_label") or "none", "Status": STATE_LABELS.get(c["state"], (c["state"],))[0]} for c in cards]
-    event = st.dataframe(rows, hide_index=True, on_select="rerun", selection_mode="single-row", key="conn-table", width="stretch")
+    event = st.dataframe(rows, hide_index=True, on_select="rerun", selection_mode="single-row", key="conn-table", width="stretch",
+                         column_config={"Linked service": st.column_config.TextColumn(width="medium"),
+                                        "Type": st.column_config.TextColumn(width="small"),
+                                        "Status": st.column_config.TextColumn(width="medium")})
     picked = event.selection.rows
-    first_open = next((i for i, c in enumerate(cards) if c["state"] not in READY), 0)
-    card = cards[picked[0] if picked else first_open]
+    first_open = next((i for i, c in enumerate(cards) if c["state"] not in READY), None)
+    card = cards[picked[0] if picked else (first_open or 0)]
     if not picked:
-        st.caption("Showing the first one still to do. Select a row above to set up another.")
+        st.caption("Showing the first one still to do. Select a row above to set up another." if first_open is not None
+                   else "Every linked service is set. Select a row above to change one.")
     with st.container(border=True):
         _editor(api, pid, card, known.get(card.get("fabric_connection_type") or "?", {}))
 
@@ -363,7 +367,9 @@ def _compare(api: ApiClient, pid: str) -> None:
     st.dataframe([{"pipeline": r["pipeline"], "verdict": VERDICT_LABELS.get(r["verdict"], r["verdict"]),
                    "Fabric run": r.get("ran_at") or "-", "baseline": f"{r.get('baseline') or '-'} {r.get('baseline_at') or ''}",
                    "facts matched": r.get("matched", 0), "detail": r.get("detail") or ""} for r in res["results"]],
-                 hide_index=True)
+                 hide_index=True, column_config={"Fabric run": st.column_config.TextColumn(width="small"),
+                                                 "baseline": st.column_config.TextColumn(width="small"),
+                                                 "facts matched": st.column_config.NumberColumn(width="small")})
     for r in res["results"]:
         for d in r.get("differences") or []:
             st.warning(f"**{r['pipeline']}** · `{d['activity']}` {d['fact']}: ADF {d['baseline']} → Fabric {d['fabric']}")

@@ -26,7 +26,7 @@ from typing import Any, Callable, Optional
 from urllib.parse import urlsplit
 
 from adf2fabric.agent.deployment.fabric_deploy import DeployError, FabricClient
-from adf2fabric.agent.deployment.fabric_run import ActivityRun, RunResult, latest_run, run_pipeline
+from adf2fabric.agent.deployment.fabric_run import ActivityRun, RunResult, latest_run, recent_runs, run_pipeline
 from adf2fabric.cloud import ARM_ENDPOINT
 
 ADF_API_VERSION = "2018-06-01"
@@ -98,6 +98,10 @@ def compare(fabric: dict[str, dict], base: dict[str, dict]) -> tuple[list[dict],
     diffs, matched = [], 0
     for name in sorted(set(fabric) & set(base), key=str.lower):
         f, b = fabric[name], base[name]
+        if f.get("runs") != b.get("runs"):
+            diffs.append({"activity": name, "fact": "runs", "baseline": b.get("runs"), "fabric": f.get("runs")})
+        else:
+            matched += 1
         if f["status"] != b["status"]:
             diffs.append({"activity": name, "fact": "status", "baseline": b["status"], "fabric": f["status"]})
         else:
@@ -171,6 +175,23 @@ class AdfRuns:
         runs = self._post(f"{self.factory.base}/queryPipelineRuns?api-version={ADF_API_VERSION}", body).get("value", [])
         return runs[0] if runs else None
 
+    def successes_near(self, run: dict, window_minutes: int = 10) -> list[dict]:
+        """The batch ``run`` belongs to: when a parent pipeline started it, every Succeeded run of the same pipeline that
+        the same parent run started; when it was started by hand or by a trigger, ``run`` alone."""
+        parent = (run.get("invokedBy") or {})
+        if parent.get("invokedByType") != "PipelineActivity" or not parent.get("pipelineRunId"):
+            return [run]
+        start = _parse(run.get("runStart"))
+        if start is None:
+            return [run]
+        body = {"lastUpdatedAfter": _stamp(start - timedelta(minutes=window_minutes)),
+                "lastUpdatedBefore": _stamp(min(start + timedelta(days=1), datetime.now(timezone.utc))),
+                "filters": [{"operand": "PipelineName", "operator": "Equals", "values": [run.get("pipelineName", "")]},
+                            {"operand": "Status", "operator": "Equals", "values": ["Succeeded"]}]}
+        rows = self._post(f"{self.factory.base}/queryPipelineRuns?api-version={ADF_API_VERSION}", body).get("value", [])
+        same = [r for r in rows if (r.get("invokedBy") or {}).get("pipelineRunId") == parent["pipelineRunId"]]
+        return same or [run]
+
     def activities(self, run: dict) -> list[ActivityRun]:
         start = _parse(run.get("runStart")) or datetime.now(timezone.utc) - timedelta(days=45)
         end = _parse(run.get("runEnd")) or datetime.now(timezone.utc)
@@ -219,11 +240,13 @@ class Verification:
 
 def verify_pipeline(client: FabricClient, workspace: str, pipeline: str, *, start: bool,
                     adf: Optional[AdfRuns] = None, previous: Optional[dict] = None, timeout_seconds: int = 1800,
-                    runner: Callable[..., RunResult] = run_pipeline) -> Verification:
+                    runner: Callable[..., RunResult] = run_pipeline, called_by: Optional[list[str]] = None) -> Verification:
     """Run (``start``) or read the latest run of one pipeline in Fabric and compare it with the best baseline there is.
 
     Nothing raised here stops the caller's loop: a pipeline that is not deployed, or a Fabric or ADF call that fails, is
     reported on that pipeline's own verdict."""
+    if called_by:
+        return _verify_batch(client, workspace, pipeline, called_by, adf, previous)
     try:
         if start:
             run = runner(client, workspace, pipeline, wait=True, timeout_seconds=timeout_seconds)
@@ -257,21 +280,81 @@ def verify_pipeline(client: FabricClient, workspace: str, pipeline: str, *, star
         v.verdict = "no_baseline"
         v.detail = v.detail or "No successful ADF run in the last 45 days and no earlier Fabric run: this run is the baseline."
         return v
+    return _judge(v, base)
+
+
+def _judge(v: Verification, base: dict[str, dict], how: str = "") -> Verification:
+    """The verdict from comparing ``v.activities`` with ``base``; ``how`` says what was compared (for a batch)."""
     v.differences, v.matched = compare(v.activities, base)
     v.baseline_only = sorted(set(base) - set(v.activities), key=str.lower)
     v.fabric_only = sorted(set(v.activities) - set(base), key=str.lower)
+    notes = [how] if how else []
     if v.differences:
         v.verdict = "differs"
     elif not v.matched:
-        v.verdict, v.detail = "no_baseline", "The baseline run has no activity in common with this one."
+        v.verdict = "no_baseline"
+        notes.append("The baseline run has no activity in common with this one.")
     else:
         v.verdict = "partial" if (v.baseline_only or v.fabric_only) else "matches"
     if v.verdict == "partial":
-        v.detail = ("Not every activity could be compared: "
-                    + "; ".join(x for x in (f"only in the baseline: {', '.join(v.baseline_only)}" if v.baseline_only else "",
-                                            f"only in Fabric: {', '.join(v.fabric_only)}" if v.fabric_only else "") if x)
-                    + ". A renamed activity, a branch that did not run, or a run of an older deployed version can cause this.")
+        notes.append("Not every activity could be compared: "
+                     + "; ".join(x for x in (f"only in the baseline: {', '.join(v.baseline_only)}" if v.baseline_only else "",
+                                             f"only in Fabric: {', '.join(v.fabric_only)}" if v.fabric_only else "") if x)
+                     + ". A renamed activity, a branch that did not run, or a run of an older deployed version can cause this.")
+    v.detail = " ".join(notes) or v.detail
     return v
+
+
+def _verify_batch(client: FabricClient, workspace: str, pipeline: str, called_by: list[str], adf: Optional[AdfRuns],
+                  previous: Optional[dict]) -> Verification:
+    """A pipeline another one calls (often once per item, with different parameters) is compared as a batch: every run
+    that started together, merged. Comparing one run with one run would pair different items. It is never started on its
+    own here (it needs its parent's parameters): run the parent."""
+    parents = ", ".join(called_by)
+    adf_runs: Optional[list[dict]] = None
+    adf_error = ""
+    if adf is not None:
+        try:
+            last = adf.last_success(pipeline)
+            adf_runs = adf.successes_near(last) if last else None
+        except DeployError as exc:
+            adf_error = f"ADF history not read: {exc}"
+    # Fabric records every run as Manual: a single ADF run started by hand means compare single runs
+    by_hand = adf_runs is not None and len(adf_runs) == 1 and         (adf_runs[0].get("invokedBy") or {}).get("invokedByType") != "PipelineActivity"
+    try:
+        runs = recent_runs(client, workspace, pipeline, window_minutes=0 if by_hand else 10)
+    except DeployError as exc:
+        return Verification(pipeline, "not_run", detail=f"Could not read it in Fabric: {getattr(exc, 'detail', None) or exc}")
+    except Exception as exc:  # noqa: BLE001
+        return Verification(pipeline, "not_run", detail=f"Could not reach Fabric for it ({type(exc).__name__}).")
+    if not runs:
+        return Verification(pipeline, "not_run", detail=f"No finished Fabric run yet. It is called by {parents}: run that.")
+    newest = runs[0]
+    v = Verification(pipeline, "failed", fabric_status="Completed" if all(r.ok for r in runs) else "Failed",
+                     job_id=newest.job_id, ran_at=newest.ended or newest.started)
+    v.activities = summarize([a for r in runs for a in r.activities])
+    bad = next((r for r in runs if not r.ok), None)
+    if bad is not None:
+        v.detail = short_failure(bad.failure or f"a run ended {bad.status}")
+        return v
+    batch = ("its latest run (the ADF baseline was started by hand)" if by_hand else
+             f"a batch of {len(runs)} run(s) started together (it is called by {parents})")
+    base: Optional[dict[str, dict]] = None
+    v.detail = adf_error
+    if adf_runs:
+        try:
+            base = summarize([a for r in adf_runs for a in adf.activities(r)])
+            v.baseline, v.baseline_run, v.baseline_at = "adf", str(adf_runs[0].get("runId", "")), str(adf_runs[0].get("runEnd", ""))
+        except DeployError as exc:
+            base, v.detail = None, f"ADF history not read: {exc}"
+    good = last_completed(previous)
+    if base is None and good and good.get("job_id") != v.job_id:
+        base = good.get("activities") or {}
+        v.baseline, v.baseline_run, v.baseline_at = "fabric", str(good.get("job_id", "")), str(good.get("ran_at", ""))
+    if base is None:
+        v.verdict, v.detail = "no_baseline", v.detail or f"Nothing to compare {batch} with yet."
+        return v
+    return _judge(v, base, f"Compared as {batch}.")
 
 
 def short_failure(text: str) -> str:
@@ -282,6 +365,23 @@ def short_failure(text: str) -> str:
     best = msgs[-1] if msgs else text
     out = (f"{head}: " if head and msgs else "") + best
     return out if len(out) <= _FAILURE_CHARS else out[:_FAILURE_CHARS - 1] + "…"
+
+
+def callers(conversion_dir: Path, pipelines: list) -> dict[str, list[str]]:
+    """Pipeline -> the converted pipelines that invoke it, from the converted JSON (``pipelines`` = PipelineConversion)."""
+    from adf2fabric.agent.deployment.fabric_deploy import child_refs
+
+    out: dict[str, list[str]] = {}
+    for p in pipelines:
+        if not p.artifact_path:
+            continue
+        try:
+            content = json.loads((conversion_dir / p.artifact_path).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        for child in child_refs(content):
+            out.setdefault(child, []).append(p.source_pipeline)
+    return out
 
 
 # --- the record -------------------------------------------------------------------------------------------------------
