@@ -1201,7 +1201,7 @@ def verify_cmd(project_name: str, workspace_id: str, pipelines: tuple[str, ...],
                apply_: bool, auth: str, **auth_env: str | None) -> None:
     """Prove converted pipelines: compare each Fabric run with the last successful ADF run (or the previous Fabric run)."""
     from adf2fabric.agent.deployment.fabric_deploy import FABRIC_SCOPE, DeployError, FabricClient
-    from adf2fabric.agent.deployment.verify import AdfRuns, Factory, load_record, render_report, save_record, verify_pipeline
+    from adf2fabric.agent.deployment.verify import AdfRuns, Factory, load_record, render_report, save_record, verify_all
     from adf2fabric.agent.deployment.verify import callers as verify_callers
     from adf2fabric.agent.deployment.verify import record_path as verify_record_path
     from adf2fabric.connections.providers.azure_cli import AzureCliProvider, ProviderError
@@ -1227,14 +1227,12 @@ def verify_cmd(project_name: str, workspace_id: str, pipelines: tuple[str, ...],
             click.secho(f"  ADF run history not available ({exc}); comparing with earlier Fabric runs only.", fg="yellow")
     try:
         credential, _ = build_credential(credential_from(auth, **auth_env))
-        client = FabricClient(credential.get_token(FABRIC_SCOPE).token)
+        fabric_token = credential.get_token(FABRIC_SCOPE).token
         click.echo(f"RUN AND COMPARE ({'new runs' if apply_ else 'latest finished runs; nothing started, add --apply to run'})"
                    f"  workspace: {workspace_id}")
-        results = []
-        for n in names:
-            v = verify_pipeline(client, workspace_id, n, start=apply_, adf=adf, previous=previous.get(n),
-                                timeout_seconds=timeout_seconds, called_by=called.get(n))
-            results.append(v)
+        results = verify_all(lambda: FabricClient(fabric_token), workspace_id, names, start=apply_, adf=adf,
+                             previous=previous, called=called, timeout_seconds=timeout_seconds)
+        for n, v in zip(names, results):
             colour = {"matches": "green", "partial": "yellow", "differs": "yellow", "no_baseline": None, "failed": "red",
                       "not_run": None}[v.verdict]
             ran = f" - Fabric run {v.ran_at}" if v.ran_at else ""

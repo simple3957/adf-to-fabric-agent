@@ -300,3 +300,43 @@ def test_a_failed_conversion_reports_why_instead_of_crashing_the_stage():
     pid = c.store.list_ids()[0]
     with pytest.raises(StageError, match="Pipeline\(s\) not found"):
         run_stage(c, Session(id="s"), pid, "convert", lambda *_: None, {"pipelines": ["Nope"]})
+
+
+# --- tokens are reused until shortly before they expire -----------------------------------------------------------
+def _token_provider(now, expires=10_000.0):
+    runner = FakeRunner({LIST: ok(json.dumps(ROWS)), "az account get-access-token": ok(json.dumps({"t": "TOK", "e": expires})),
+                         "az logout": ok()})
+    return AzureCliProvider(runner=runner, wall_clock=lambda: now[0]), runner
+
+
+def test_a_token_is_reused_until_five_minutes_before_it_expires():
+    now = [1_000.0]
+    p, runner = _token_provider(now)
+    assert p.token(account=GMAIL) == "TOK" and p.token(account=GMAIL) == "TOK"
+    assert count(runner, "az account get-access-token") == 1
+    now[0] = 10_000.0 - 299  # inside the 5-minute margin: a fresh one is fetched
+    p.token(account=GMAIL)
+    assert count(runner, "az account get-access-token") == 2
+
+
+def test_tokens_are_kept_per_service_and_per_account():
+    p, runner = _token_provider([0.0])
+    p.token(account=GMAIL), p.token(account=GMAIL, resource="https://api.fabric.microsoft.com"), p.token(account=PAL)
+    p.token(account=GMAIL, resource="https://api.fabric.microsoft.com")
+    assert count(runner, "az account get-access-token") == 3
+
+
+def test_a_sign_out_drops_every_held_token():
+    p, runner = _token_provider([0.0])
+    p.token(account=GMAIL)
+    p.logout(GMAIL)
+    p.token(account=GMAIL)
+    assert count(runner, "az account get-access-token") == 2
+
+
+def test_a_failed_token_is_never_held():
+    p, runner = provider({"az account get-access-token": bad("ERROR: AADSTS700082: expired")})
+    for _ in range(2):
+        with pytest.raises(ProviderError):
+            p.token(account=GMAIL)
+    assert count(runner, "az account get-access-token") == 2

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Optional
@@ -65,6 +66,9 @@ class ConnectionService:
         self.tester = tester or ConnectorTester(secret_reader=secret_reader)
         self._states: dict[tuple[str, str], ConnectionState] = {}
         self.last_tests: dict[tuple[str, str], TestReport] = {}
+        # Fabric's list of supported connection types (~290 entries) is the same for everyone and changes with Fabric
+        # releases, not with a user's actions: it is fetched once an hour instead of on every screen.
+        self._supported: Optional[tuple[float, Any]] = None
 
     # ---- paths + persistence ---------------------------------------------------------------------------------------
     def _dir(self, pid: str) -> Path:
@@ -135,9 +139,16 @@ class ConnectionService:
         d = self.semantic(pid)
         supported = conns = gws = None
         if fabric is not None:
-            supported = _soft(fabric.supported_connection_types)
-            conns = _soft(fabric.connections)
-            gws = _soft(fabric.gateways)
+            from concurrent.futures import ThreadPoolExecutor
+
+            held = self._supported if self._supported and time.monotonic() - self._supported[0] < SUPPORTED_TYPES_SECONDS else None
+            with ThreadPoolExecutor(max_workers=3) as pool:  # three independent Fabric calls, made at the same time
+                f_sup = None if held else pool.submit(_soft, fabric.supported_connection_types)
+                f_con, f_gws = pool.submit(_soft, fabric.connections), pool.submit(_soft, fabric.gateways)
+                supported = held[1] if held else f_sup.result()
+                conns, gws = f_con.result(), f_gws.result()
+            if not held and supported is not None:
+                self._supported = (time.monotonic(), supported)
         states = {name: s for (p, name), s in self._states.items() if p == pid}
         return build_cards(d, choices=self.load_choices(pid), supported_types=supported, connections=conns, gateways=gws,
                            secrets_held=self._held(session, d), network_hints=network_hints, states=states)
@@ -343,6 +354,9 @@ class ConnectionService:
         (out_dir / "connections-report.json").write_text(json.dumps(rows, indent=2) + "\n", encoding="utf-8")
         (out_dir / "connections-report.md").write_text(_render_md(rows), encoding="utf-8")
         return {"markdown": "connections-report.md", "json": "connections-report.json"}
+
+
+SUPPORTED_TYPES_SECONDS = 3600.0
 
 
 def _soft(fn: Callable[[], Any]) -> Any:

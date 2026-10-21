@@ -81,7 +81,7 @@ def conversion_summary(store: ProjectStore, pid: str, conv=None) -> dict[str, An
 def _verify(c: Container, session: Session, pid: str, options: dict, log: Log) -> dict[str, Any]:
     """Run-and-compare on the latest finished Fabric runs. Read-only: from the UI it never starts a run."""
     from adf2fabric.agent.deployment.verify import (AdfRuns, Factory, callers, load_record, record_path, render_report,
-                                                    save_record, verify_pipeline)
+                                                    save_record, verify_all)
 
     dest = session.destination
     workspace = options.get("workspace_id") or dest.get("workspace_id")
@@ -109,12 +109,8 @@ def _verify(c: Container, session: Session, pid: str, options: dict, log: Log) -
     except ProviderError as exc:
         raise StageError(str(exc), getattr(exc, "actions", None) or ["Sign in to Fabric on the Connections page."]) from None
     try:
-        client = FabricClient(token)
-        results = []
-        for n in names:
-            log(f"comparing {n}")
-            results.append(verify_pipeline(client, workspace, n, start=False, adf=adf, previous=previous.get(n),
-                                           called_by=called.get(n)))
+        results = verify_all(lambda: FabricClient(token), workspace, names, start=False, adf=adf, previous=previous,
+                             called=called, log=log)
     except DeployError as exc:
         raise StageError(str(exc)) from None
     record = save_record(path, results)

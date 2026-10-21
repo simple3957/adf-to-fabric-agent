@@ -89,16 +89,18 @@ def _query_activities(client: FabricClient, workspace: str, job_id: str, started
     return sorted(out, key=lambda r: r.name.lower())
 
 
-def latest_run(client: FabricClient, workspace: str, name: str) -> Optional[RunResult]:
+def latest_run(client: FabricClient, workspace: str, name: str, ids: Optional[dict[str, str]] = None) -> Optional[RunResult]:
     """The most recent finished run of a pipeline, read-only (``GET .../jobs/instances``). None when it never ran."""
-    runs = recent_runs(client, workspace, name, window_minutes=0)
+    runs = recent_runs(client, workspace, name, window_minutes=0, ids=ids)
     return runs[0] if runs else None
 
 
-def recent_runs(client: FabricClient, workspace: str, name: str, window_minutes: int = 10) -> list[RunResult]:
+def recent_runs(client: FabricClient, workspace: str, name: str, window_minutes: int = 10,
+                ids: Optional[dict[str, str]] = None) -> list[RunResult]:
     """The most recent finished run and every other finished run that started within ``window_minutes`` of it, newest
-    first, read-only. A child pipeline that a parent calls once per item runs as such a batch."""
-    ids = client.list_pipelines(workspace)
+    first, read-only. A child pipeline that a parent calls once per item runs as such a batch. ``ids`` (lower-cased
+    name -> item id) saves listing the workspace's pipelines again when many are checked."""
+    ids = ids if ids is not None else client.list_pipelines(workspace)
     item_id = ids.get(name.lower())
     if item_id is None:
         raise DeployError(f"No pipeline named '{name}' in the workspace.")

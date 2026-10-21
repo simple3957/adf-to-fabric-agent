@@ -147,8 +147,32 @@ class AdfRuns:
             import requests
 
             session = requests.Session()
-        self.factory, self._s = factory, session
+        self.factory, self._s, self._token = factory, session, token
         self._h = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+        self._latest: Optional[dict[str, dict]] = None  # pipeline (lower) -> latest Succeeded run, once prefetched
+
+    def clone(self) -> "AdfRuns":
+        """The same factory and token on its own HTTP session (one per worker thread), sharing what was prefetched."""
+        other = AdfRuns(self.factory, self._token)
+        other._latest = self._latest
+        return other
+
+    def prefetch(self, days: int = 45) -> None:
+        """Every pipeline's latest Succeeded run in one query (paged), instead of one query per pipeline."""
+        now = datetime.now(timezone.utc)
+        body: dict[str, Any] = {"lastUpdatedAfter": _stamp(now - timedelta(days=days)), "lastUpdatedBefore": _stamp(now),
+                                "filters": [{"operand": "Status", "operator": "Equals", "values": ["Succeeded"]}]}
+        latest: dict[str, dict] = {}
+        for _ in range(50):
+            data = self._post(f"{self.factory.base}/queryPipelineRuns?api-version={ADF_API_VERSION}", body)
+            for r in data.get("value", []):
+                key = str(r.get("pipelineName", "")).lower()
+                if key and str(r.get("runEnd") or "") > str(latest.get(key, {}).get("runEnd") or ""):
+                    latest[key] = r
+            if not data.get("continuationToken"):
+                break
+            body["continuationToken"] = data["continuationToken"]
+        self._latest = latest
 
     def _post(self, url: str, body: dict) -> dict:
         if urlsplit(url).netloc != urlsplit(ARM_ENDPOINT).netloc:  # the ARM token only ever goes to ARM
@@ -167,6 +191,8 @@ class AdfRuns:
 
     def last_success(self, pipeline: str, days: int = 45) -> Optional[dict]:
         """The latest Succeeded run of ``pipeline`` in the last ``days`` days (ADF keeps 45), or None."""
+        if self._latest is not None:
+            return self._latest.get(pipeline.lower())
         now = datetime.now(timezone.utc)
         body = {"lastUpdatedAfter": _stamp(now - timedelta(days=days)), "lastUpdatedBefore": _stamp(now),
                 "filters": [{"operand": "PipelineName", "operator": "Equals", "values": [pipeline]},
@@ -240,18 +266,19 @@ class Verification:
 
 def verify_pipeline(client: FabricClient, workspace: str, pipeline: str, *, start: bool,
                     adf: Optional[AdfRuns] = None, previous: Optional[dict] = None, timeout_seconds: int = 1800,
-                    runner: Callable[..., RunResult] = run_pipeline, called_by: Optional[list[str]] = None) -> Verification:
+                    runner: Callable[..., RunResult] = run_pipeline, called_by: Optional[list[str]] = None,
+                    ids: Optional[dict[str, str]] = None) -> Verification:
     """Run (``start``) or read the latest run of one pipeline in Fabric and compare it with the best baseline there is.
 
     Nothing raised here stops the caller's loop: a pipeline that is not deployed, or a Fabric or ADF call that fails, is
     reported on that pipeline's own verdict."""
     if called_by:
-        return _verify_batch(client, workspace, pipeline, called_by, adf, previous)
+        return _verify_batch(client, workspace, pipeline, called_by, adf, previous, ids)
     try:
         if start:
             run = runner(client, workspace, pipeline, wait=True, timeout_seconds=timeout_seconds)
         else:
-            run = latest_run(client, workspace, pipeline)
+            run = latest_run(client, workspace, pipeline, ids) if ids is not None else latest_run(client, workspace, pipeline)
     except DeployError as exc:
         return Verification(pipeline, "not_run", detail=f"Could not run or read it in Fabric: {getattr(exc, 'detail', None) or exc}")
     except Exception as exc:  # noqa: BLE001 - network errors and the like: this pipeline only
@@ -305,8 +332,43 @@ def _judge(v: Verification, base: dict[str, dict], how: str = "") -> Verificatio
     return v
 
 
+def verify_all(make_client: Callable[[], FabricClient], workspace: str, names: list[str], *, start: bool,
+               adf: Optional[AdfRuns] = None, previous: Optional[dict[str, dict]] = None,
+               called: Optional[dict[str, list[str]]] = None, timeout_seconds: int = 1800, workers: int = 10,
+               log: Callable[[str], None] = lambda _m: None) -> list[Verification]:
+    """Verify ``names`` and return the results in the same order.
+
+    The workspace's pipeline list and the factory's run history are read once for all of them. Reading is done in
+    parallel (each worker has its own HTTP sessions); starting runs (``start``) stays one at a time so a verification
+    never floods the capacity."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    previous, called = previous or {}, called or {}
+    first = make_client()
+    try:
+        ids: Optional[dict[str, str]] = first.list_pipelines(workspace)
+    except Exception:  # noqa: BLE001 - each pipeline then reports its own problem
+        ids = None
+    if adf is not None:
+        try:
+            adf.prefetch()
+        except DeployError as exc:
+            log(f"ADF history not prefetched ({exc}); reading it per pipeline")
+
+    def one(name: str) -> Verification:
+        log(f"comparing {name}")
+        return verify_pipeline(make_client(), workspace, name, start=start, adf=adf.clone() if adf else None,
+                               previous=previous.get(name), timeout_seconds=timeout_seconds,
+                               called_by=called.get(name), ids=ids)
+
+    if start or workers <= 1 or len(names) <= 1:
+        return [one(n) for n in names]
+    with ThreadPoolExecutor(max_workers=min(workers, len(names))) as pool:
+        return list(pool.map(one, names))
+
+
 def _verify_batch(client: FabricClient, workspace: str, pipeline: str, called_by: list[str], adf: Optional[AdfRuns],
-                  previous: Optional[dict]) -> Verification:
+                  previous: Optional[dict], ids: Optional[dict[str, str]] = None) -> Verification:
     """A pipeline another one calls (often once per item, with different parameters) is compared as a batch: every run
     that started together, merged. Comparing one run with one run would pair different items. It is never started on its
     own here (it needs its parent's parameters): run the parent."""
@@ -322,7 +384,7 @@ def _verify_batch(client: FabricClient, workspace: str, pipeline: str, called_by
     # Fabric records every run as Manual: a single ADF run started by hand means compare single runs
     by_hand = adf_runs is not None and len(adf_runs) == 1 and         (adf_runs[0].get("invokedBy") or {}).get("invokedByType") != "PipelineActivity"
     try:
-        runs = recent_runs(client, workspace, pipeline, window_minutes=0 if by_hand else 10)
+        runs = recent_runs(client, workspace, pipeline, window_minutes=0 if by_hand else 10, ids=ids)
     except DeployError as exc:
         return Verification(pipeline, "not_run", detail=f"Could not read it in Fabric: {getattr(exc, 'detail', None) or exc}")
     except Exception as exc:  # noqa: BLE001

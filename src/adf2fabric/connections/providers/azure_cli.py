@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import re
+import threading
 import time
 from typing import Any, Callable, Optional
 from urllib.parse import quote
@@ -78,6 +79,27 @@ DUPLICATE_ACTIONS = [
 ]
 
 
+TOKEN_MARGIN_SECONDS = 300  # a held token is replaced 5 minutes before it expires
+_UNKNOWN_EXPIRY_SECONDS = 600  # an answer without an expiry is held this long (well within any token's life)
+
+
+def _token_and_expiry(stdout: str, now: float) -> tuple[str, float]:
+    """The token and its expiry (epoch seconds) from `az account get-access-token`. Accepts the JSON this provider asks
+    for, and a bare token (older CLIs, test fakes), which is held for a short time only."""
+    text = stdout.strip()
+    try:
+        data = json.loads(text)
+    except ValueError:
+        return text, now + TOKEN_MARGIN_SECONDS + _UNKNOWN_EXPIRY_SECONDS
+    if not isinstance(data, dict) or not data.get("t"):
+        raise ProviderError("`az account get-access-token` returned no token.", ["Sign in again (`az login`)."])
+    try:
+        expires = float(data.get("e"))
+    except (TypeError, ValueError):
+        expires = now + TOKEN_MARGIN_SECONDS + _UNKNOWN_EXPIRY_SECONDS
+    return str(data["t"]), expires
+
+
 def token_failure(text: str) -> tuple[str, list[str]]:
     """A message and next step for a failed `az account get-access-token`, from what Azure said (never a token)."""
     if _DUPLICATE.search(text or ""):
@@ -106,20 +128,28 @@ class AzureCliProvider:
     def __init__(self, runner: Runner = run_cli, login_manager: Optional[LoginManager] = None,
                  transport_factory: Optional[Callable[[], Any]] = None,
                  fetcher_factory: Optional[Callable[[str], ArmFetcher]] = None,
-                 cache_seconds: float = 20.0, clock: Callable[[], float] = time.monotonic):
+                 cache_seconds: float = 20.0, clock: Callable[[], float] = time.monotonic,
+                 wall_clock: Callable[[], float] = time.time):
         self._run = runner
         self.logins = login_manager or LoginManager()
         self._transport_factory = transport_factory
         self._fetcher_factory = fetcher_factory
         # `az account list` and `az account show` each take seconds, and a page asks for them on every click. Their
         # answers change only when someone signs in or out, so they are kept briefly and dropped at once on a sign-in or
-        # sign-out (or when a caller asks for `refresh`). Only the account list is cached, never a token.
+        # sign-out (or when a caller asks for `refresh`).
         self._ttl, self._clock = cache_seconds, clock
         self._rows_cache: Optional[tuple[float, list[dict]]] = None
         self._status_cache: Optional[tuple[float, ProviderStatus]] = None
+        # A token costs a CLI call (about a second) and is valid for about an hour, so it is reused until 5 minutes
+        # before it expires. It is kept in this process's memory only: never written, logged or returned to a client.
+        self._now = wall_clock
+        self._tokens: dict[tuple, tuple[float, str]] = {}
+        self._token_lock = threading.Lock()
 
     def invalidate(self) -> None:
         self._rows_cache = self._status_cache = None
+        with self._token_lock:
+            self._tokens.clear()
 
     # ---- availability + sign-in state ---------------------------------------------------------------------
     def version(self) -> Optional[str]:
@@ -223,7 +253,13 @@ class AzureCliProvider:
             subscription = self.subscription_for(account, tenant)
             if subscription is None:
                 raise ProviderError(f"{account} is not signed in on this machine.", ["Sign in with that account first."])
-        argv = ["az", "account", "get-access-token", "--resource", resource, "--query", "accessToken", "-o", "tsv"]
+        key = (resource, subscription or "", "" if subscription else (tenant or ""))
+        with self._token_lock:
+            held = self._tokens.get(key)
+        if held and held[0] - TOKEN_MARGIN_SECONDS > self._now():
+            return held[1]
+        argv = ["az", "account", "get-access-token", "--resource", resource,
+                "--query", "{t:accessToken,e:expires_on}", "-o", "json"]
         if subscription:
             argv += ["--subscription", subscription]
         elif tenant:
@@ -231,7 +267,10 @@ class AzureCliProvider:
         r = self._run(argv, timeout=60, raw=True)  # the only call that keeps stdout unredacted: the token stays local
         if not r.ok or not r.stdout.strip():
             raise ProviderError(*token_failure(r.text))
-        return r.stdout.strip()
+        token, expires = _token_and_expiry(r.stdout, self._now())
+        with self._token_lock:
+            self._tokens[key] = (expires, token)
+        return token
 
     # ---- subscriptions + discovery ---------------------------------------------------------------------------
     def _rows(self, refresh: bool = False) -> list[dict]:

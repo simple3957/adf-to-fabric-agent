@@ -46,6 +46,15 @@ SOURCE_DIRNAME = "source"
 DISCOVERY_DIRNAME = "discovery"
 
 
+# The C (libyaml) safe loader reads the same YAML several times faster than the pure-Python one (a project's discovery
+# record is read on most screens); it is equally safe. Without libyaml installed, the pure-Python loader is used.
+_SAFE_LOADER = getattr(yaml, "CSafeLoader", yaml.SafeLoader)
+
+
+def _safe_load(stream):
+    return yaml.load(stream, Loader=_SAFE_LOADER)  # noqa: S506 - a safe loader, never the full one
+
+
 def slugify(name: str) -> str:
     slug = re.sub(r"[^a-zA-Z0-9]+", "-", name.strip().lower()).strip("-")
     if not slug:
@@ -92,7 +101,7 @@ class ProjectStore:
                 "Run `adf2fabric intake` first."
             )
         with path.open(encoding="utf-8") as f:
-            data = yaml.safe_load(f)
+            data = _safe_load(f)
         return SourceManifest.model_validate(data)
 
     def source_root(self, project_id: str) -> Path:
@@ -133,7 +142,7 @@ class ProjectStore:
                 "Run `adf2fabric intake` first."
             )
         with path.open(encoding="utf-8") as f:
-            data = yaml.safe_load(f)
+            data = _safe_load(f)
         return Project.model_validate(data)
 
     def list_ids(self) -> list[str]:
@@ -172,7 +181,7 @@ class ProjectStore:
                 "Run `adf2fabric consultation` first."
             )
         with path.open(encoding="utf-8") as f:
-            data = yaml.safe_load(f)
+            data = _safe_load(f)
         return Consultation.model_validate(data)
 
     # --- Repository Discovery record ----------------------------------------
@@ -207,7 +216,7 @@ class ProjectStore:
                 f"{self.projects_root}. Run `adf2fabric discovery` first."
             )
         with path.open(encoding="utf-8") as f:
-            data = yaml.safe_load(f)
+            data = _safe_load(f)
         return RepositoryDiscovery.model_validate(data)
 
     # --- ADLS Gen2 Discovery record -----------------------------------------
@@ -237,7 +246,7 @@ class ProjectStore:
                 "Run `adf2fabric discovery-adls` first."
             )
         with path.open(encoding="utf-8") as f:
-            data = yaml.safe_load(f)
+            data = _safe_load(f)
         return AdlsDiscovery.model_validate(data)
 
     # --- ADLS Gen2 Discovery Phase 2 record (paths) -------------------------
@@ -269,7 +278,7 @@ class ProjectStore:
                 f"{self.projects_root}. Run `adf2fabric discovery-adls-paths` first."
             )
         with path.open(encoding="utf-8") as f:
-            data = yaml.safe_load(f)
+            data = _safe_load(f)
         return AdlsPathsDiscovery.model_validate(data)
 
     # --- SQL Server Discovery record ----------------------------------------
@@ -299,7 +308,7 @@ class ProjectStore:
                 "Run `adf2fabric discovery-sql` first."
             )
         with path.open(encoding="utf-8") as f:
-            data = yaml.safe_load(f)
+            data = _safe_load(f)
         return SqlDiscovery.model_validate(data)
 
     # --- SQL Server Discovery Phase 2 record (structural) -------------------
@@ -331,7 +340,7 @@ class ProjectStore:
                 f"{self.projects_root}. Run `adf2fabric discovery-sql-structural` first."
             )
         with path.open(encoding="utf-8") as f:
-            data = yaml.safe_load(f)
+            data = _safe_load(f)
         return SqlStructuralDiscovery.model_validate(data)
 
     # --- ADF Live Discovery record ------------------------------------------
@@ -361,7 +370,7 @@ class ProjectStore:
                 "Run `adf2fabric discovery-adf` first."
             )
         with path.open(encoding="utf-8") as f:
-            data = yaml.safe_load(f)
+            data = _safe_load(f)
         return AdfDiscovery.model_validate(data)
 
     # --- ADF Semantic Discovery record --------------------------------------
@@ -393,7 +402,7 @@ class ProjectStore:
                 f"{self.projects_root}. Run `adf2fabric discovery-adf-semantic` first."
             )
         with path.open(encoding="utf-8") as f:
-            data = yaml.safe_load(f)
+            data = _safe_load(f)
         return AdfSemanticDiscovery.model_validate(data)
 
     # --- Conversion record + generated Fabric artifacts ----------------------
@@ -425,7 +434,7 @@ class ProjectStore:
                 "Run `adf2fabric convert` first."
             )
         with path.open(encoding="utf-8") as f:
-            data = yaml.safe_load(f)
+            data = _safe_load(f)
         return ProjectConversion.model_validate(data)
 
     def write_conversion_file(self, project_id: str, relative_path: str, text: str) -> Path:
@@ -465,7 +474,7 @@ class ProjectStore:
                 "Run `adf2fabric reconstruct` first."
             )
         with path.open(encoding="utf-8") as f:
-            data = yaml.safe_load(f)
+            data = _safe_load(f)
         return ProjectReconstruction.model_validate(data)
 
     def write_reconstruction_file(self, project_id: str, relative_path: str, text: str) -> Path:
