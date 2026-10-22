@@ -16,8 +16,11 @@ from __future__ import annotations
 import json
 import re
 from pathlib import Path
+from typing import Any
+
 
 import yaml
+from pydantic import BaseModel
 
 from adf2fabric.project.dependencies import DependencyInventory
 from adf2fabric.project.workloads import WorkloadManifest
@@ -467,6 +470,34 @@ class ProjectStore:
                 "Run `adf2fabric workloads-assess` first.")
         with path.open(encoding="utf-8") as f:
             return WorkloadManifest.model_validate(_safe_load(f))
+
+    # --- Fabric target provisioning records (target spec, state, plan, approval, run journal, verification) -------
+
+    def provisioning_dir(self, project_id: str) -> Path:
+        return self.project_dir(project_id) / "provisioning"
+
+    def provisioning_path(self, project_id: str, name: str) -> Path:
+        return self.provisioning_dir(project_id) / f"{name}.yaml"
+
+    def has_provisioning(self, project_id: str, name: str) -> bool:
+        return self.provisioning_path(project_id, name).exists()
+
+    def save_provisioning(self, project_id: str, name: str, model: BaseModel) -> Path:
+        """Atomically replace one provisioning record (write a temp file, then rename), so a crash never leaves half a journal."""
+        self.provisioning_dir(project_id).mkdir(parents=True, exist_ok=True)
+        path = self.provisioning_path(project_id, name)
+        tmp = path.with_suffix(".yaml.tmp")
+        with tmp.open("w", encoding="utf-8") as f:
+            yaml.safe_dump(json.loads(model.model_dump_json()), f, sort_keys=False)
+        tmp.replace(path)
+        return path
+
+    def load_provisioning(self, project_id: str, name: str, cls: Any) -> Any:
+        path = self.provisioning_path(project_id, name)
+        if not path.exists():
+            raise ProjectNotFoundError(f"No provisioning '{name}' for '{project_id}'. Run `adf2fabric provision-plan` first.")
+        with path.open(encoding="utf-8") as f:
+            return cls.model_validate(_safe_load(f))
 
     # --- Conversion record + generated Fabric artifacts ----------------------
 

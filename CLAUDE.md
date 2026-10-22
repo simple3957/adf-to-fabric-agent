@@ -14,7 +14,7 @@ streamlit run ui/app.py                 # UI on http://localhost:8501 (add ?demo
 adf2fabric --help                       # CLI
 ```
 
-CLI commands (`src/adf2fabric/cli.py`): `intake`, `consultation`, `discovery`, `discovery-adls`, `discovery-adls-paths`, `discovery-sql`, `discovery-sql-structural`, `discovery-adf`, `discovery-adf-semantic`, `discovery-dependencies`, `workloads-assess`, `workloads-generate`, `workloads-approve`, `workloads-deploy`, `workloads-record-run`, `convert`, `reconstruct`, `deploy`, `deploy-notebook`, `create-shortcut`, `fetch-databricks-notebooks`, `run`, `verify`, `handover`, `compute-deploy`, `assess-compute`. Each takes `--project <name>`; state lives under `projects/<name>/` (see `project/store.py`).
+CLI commands (`src/adf2fabric/cli.py`): `intake`, `consultation`, `discovery`, `discovery-adls`, `discovery-adls-paths`, `discovery-sql`, `discovery-sql-structural`, `discovery-adf`, `discovery-adf-semantic`, `discovery-dependencies`, `workloads-assess`, `workloads-generate`, `workloads-approve`, `workloads-deploy`, `workloads-record-run`, `provision-plan`, `provision-approve`, `provision-apply`, `provision-verify`, `convert`, `reconstruct`, `deploy`, `deploy-notebook`, `create-shortcut`, `fetch-databricks-notebooks`, `run`, `verify`, `handover`, `compute-deploy`, `assess-compute`. Each takes `--project <name>`; state lives under `projects/<name>/` (see `project/store.py`).
 
 ## Layout (`src/adf2fabric/`)
 
@@ -26,6 +26,7 @@ CLI commands (`src/adf2fabric/cli.py`): `intake`, `consultation`, `discovery`, `
 | `agent/discovery/` | Repository, ADF, semantic parser, ADLS, SQL discovery |
 | `agent/dependencies/` | Dependency inventory and migration order from the semantic record + source manifest; opt-in per-provider access checks ([docs](docs/dependency-inventory.md)) |
 | `agent/workloads/` | Spark workload migration: retrieve code (only when authorised), analyze, classify, generate Fabric notebook / Spark job definition, manifest ([docs](docs/workload-migration.md)) |
+| `agent/provisioning/` | Approval-gated Fabric target provisioning: requirements, read-only state, plan, apply, verify; separate Fabric and ARM transports ([docs](docs/fabric-provisioning.md)) |
 | `agent/reconstruction/` | Incomplete-pipeline detection and proposals |
 | `agent/conversion/` | Activity handler registry (`handlers/`), expression converter, triggers, validation |
 | `agent/assessment/` | Compute and capacity assessment |
@@ -45,6 +46,7 @@ Per-agent operating instructions are in `skills/`. Per-stage references are in `
 - An unregistered activity type becomes an explicit blocker, never silently dropped. Keep it that way when adding handlers.
 - Discovery accounts for everything it sees: each activity is a record (checked by an independent raw scan, `AdfPipeline.inventory`) and each source artifact is a record or an `unprocessed_artifacts` entry with a reason. A new activity type needs an `ActivitySpec` taken from Microsoft's schema AND a fixture in `tests/fixtures/adf_activities/` (a test enforces both).
 - Fabric compute migration of Spark workloads is opt-in and approval-gated; `convert` keeps Databricks as the default. A generated artifact is not a verified one: only `workloads-record-run` sets `execution.status`. Never generate a placeholder for an unconvertible workload.
+- Provisioning never writes during discovery, planning or verification; only approved steps of an unchanged plan are applied, every write re-reads live state first, nothing is deleted or modified, and only `provision-verify` may say a resource exists. A read that fails is `unknown`, never "absent".
 - Deploy defaults to dry run. It refuses unbound placeholders (notebook, dataflow, Spark job ids) unless `--allow-unbound`.
 - Triggers are created disabled and never duplicated.
 - `agent/conversion/preflight.py` reports source problems conversion cannot fix (reserved SQL aliases from Microsoft's keyword list, linked-service parameters with no value, Wait-only pipelines). They are findings, never blockers.

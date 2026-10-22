@@ -820,6 +820,162 @@ def workloads_record_run(project_name, workspace_id, pipeline, workload, auth, *
     click.echo(f"{w.id}: execution {w.execution.status} (run {w.execution.run_id}) {w.execution.detail}")
 
 
+def _provision_gateways(auth: str, auth_env: dict, need_arm: bool):
+    """Fabric and (when an Azure capacity is involved) ARM gateways. Each gets a token provider for its own audience."""
+    from adf2fabric import cloud
+    from adf2fabric.agent.provisioning.transport import ArmGateway, FabricGateway
+    from adf2fabric.connectivity._azure import build_credential
+
+    credential, _ = build_credential(credential_from(auth, **auth_env))
+    fab = FabricGateway(lambda: credential.get_token(cloud.FABRIC_SCOPE).token)
+    arm = ArmGateway(lambda: credential.get_token(cloud.ARM_SCOPE).token) if need_arm else None
+    return fab, arm
+
+
+@cli.command(name="provision-plan")
+@click.option("--project", "project_name", required=True)
+@click.option("--tenant-id", default=None, help="The tenant the migration must land in; checked against the token actually used.")
+@click.option("--workspace-name", default=None, help="Use this workspace, or plan to create it.")
+@click.option("--workspace-id", default=None, help="An existing workspace id (GUID).")
+@click.option("--capacity-id", default=None, help="An existing Fabric capacity id (from `GET /capacities`).")
+@click.option("--capacity-name", default=None, help="An existing Fabric capacity, by display name.")
+@click.option("--create-capacity", is_flag=True, help="Plan a NEW Azure Fabric capacity (billable while running). Needs the --azure-* options.")
+@click.option("--azure-subscription", default=None)
+@click.option("--azure-resource-group", default=None)
+@click.option("--azure-capacity-name", default=None)
+@click.option("--azure-region", default=None, help="Azure location, for example westeurope.")
+@click.option("--azure-sku", default=None, help="F2 ... F2048.")
+@click.option("--capacity-admin", "capacity_admins", multiple=True, help="UPN of a capacity administrator. Repeatable.")
+@click.option("--provision-identity", is_flag=True, help="Plan a workspace identity.")
+@click.option("--role", "roles", multiple=True, help="PRINCIPAL_ID:TYPE:ROLE, for example 0000...:User:Contributor. Repeatable.")
+@click.option("--lakehouse", "lakehouses", multiple=True, help="A lakehouse to create or reuse. Repeatable.")
+@click.option("--lakehouse-schemas", is_flag=True, help="Create lakehouses with schemas enabled (preview).")
+@click.option("--warehouse", "warehouses", multiple=True, help="A warehouse to create or reuse. Repeatable.")
+@azure_auth_options()
+def provision_plan(project_name, tenant_id, workspace_name, workspace_id, capacity_id, capacity_name, create_capacity, azure_subscription,
+                   azure_resource_group, azure_capacity_name, azure_region, azure_sku, capacity_admins, provision_identity, roles, lakehouses,
+                   lakehouse_schemas, warehouses, auth, **auth_env) -> None:
+    """Discover what exists and plan what the migration needs in Fabric. Read-only: nothing is created."""
+    from adf2fabric.agent.provisioning import service
+    from adf2fabric.project.provisioning import TargetSpec
+
+    store = ProjectStore(projects_root(load_config()))
+    role_list = []
+    for r in roles:
+        parts = r.split(":")
+        if len(parts) != 3:
+            raise click.UsageError(f"--role must look like PRINCIPAL_ID:TYPE:ROLE, got '{r}'.")
+        role_list.append({"principal_id": parts[0], "principal_type": parts[1], "role": parts[2]})
+    given = any([tenant_id, workspace_name, workspace_id, capacity_id, capacity_name, create_capacity, azure_subscription, provision_identity,
+                 roles, lakehouses, warehouses])
+    spec = service.load_spec(store, project_name) if not given else None
+    if spec is None:
+        spec = TargetSpec(tenant_id=tenant_id, workspace_name=workspace_name, workspace_id=workspace_id, capacity_id=capacity_id, capacity_name=capacity_name,
+                          create_capacity=create_capacity, azure_subscription_id=azure_subscription, azure_resource_group=azure_resource_group,
+                          azure_capacity_name=azure_capacity_name, azure_region=azure_region, azure_sku=azure_sku, capacity_admins=list(capacity_admins),
+                          provision_workspace_identity=provision_identity, role_assignments=role_list, lakehouse_names=list(lakehouses),
+                          warehouse_names=list(warehouses), lakehouse_schemas_enabled=lakehouse_schemas)
+    try:
+        fab, arm = _provision_gateways(auth, auth_env, need_arm=bool(spec.create_capacity or spec.azure_subscription_id))
+        p = service.plan(store, project_name, spec, fab, arm)
+    except Exception as exc:  # noqa: BLE001 - messages carry no token
+        click.secho(f"Provisioning plan failed: {type(exc).__name__}: {exc}", fg="red", err=True)
+        sys.exit(1)
+    s = p.summary
+    click.echo("PROVISIONING PLAN (read-only: nothing was created)")
+    click.echo(f"  steps: {s.total}   create: {s.to_create}   configure: {s.to_configure}   reuse: {s.reused}   delegated: {s.delegated}   "
+               f"blocked: {s.blocked}   conflicts: {s.conflicts}   unknown: {s.unknown}")
+    for st in p.steps:
+        click.echo(f"  - {st.action.value:9} {st.type.value} '{st.name}'" + (f"  [{'; '.join(st.blockers)[:110]}]" if st.blockers else ""))
+    for c in p.checks:
+        click.echo(f"  check {c.name}: {c.status.value}" + (f" ({c.detail[:100]})" if c.detail else ""))
+    for b in p.blockers:
+        click.secho(f"  BLOCKER {b}", fg="red")
+    click.echo(f"  plan: {store.provisioning_dir(project_name) / 'plan.md'}   hash {p.plan_hash[:16]}")
+
+
+@cli.command(name="provision-approve")
+@click.option("--project", "project_name", required=True)
+@click.option("--step", "steps", multiple=True, help="A step id from the plan (for example workspace:my-ws). Repeatable.")
+@click.option("--all-approvable", is_flag=True, help="Approve every create/configure step that is not blocked.")
+@click.option("--by", required=True, help="Who is approving.")
+@click.option("--note", default="")
+def provision_approve(project_name: str, steps: tuple, all_approvable: bool, by: str, note: str) -> None:
+    """Approve named steps of the CURRENT plan. Nothing is created by approving."""
+    from adf2fabric.agent.provisioning import service
+    from adf2fabric.agent.provisioning.executor import ApplyRefused
+
+    store = ProjectStore(projects_root(load_config()))
+    if not steps and not all_approvable:
+        raise click.UsageError("Name the steps to approve with --step, or pass --all-approvable.")
+    try:
+        a = service.approve(store, project_name, None if all_approvable else list(steps), by, note)
+    except (ApplyRefused, ProjectNotFoundError) as exc:
+        click.secho(str(exc), fg="red", err=True)
+        sys.exit(1)
+    click.echo(f"Approved {len(a.step_ids)} step(s) of plan {a.plan_hash[:16]} by {a.approved_by}:")
+    for i in a.step_ids:
+        click.echo(f"  - {i}")
+    click.echo("Nothing was created. Run provision-apply (dry run) and then provision-apply --apply.")
+
+
+@cli.command(name="provision-apply")
+@click.option("--project", "project_name", required=True)
+@click.option("--apply", "apply_", is_flag=True, help="Actually create / configure the approved steps. Without it nothing is written.")
+@azure_auth_options()
+def provision_apply(project_name: str, apply_: bool, auth: str, **auth_env) -> None:
+    """Apply the approved steps (dry run unless --apply), then read the target back to verify. Never deletes."""
+    from adf2fabric.agent.provisioning import service
+    from adf2fabric.agent.provisioning.executor import ApplyRefused
+    from adf2fabric.project.provisioning import ProvisioningPlan
+
+    store = ProjectStore(projects_root(load_config()))
+    try:
+        p = store.load_provisioning(project_name, "plan", ProvisioningPlan)
+        fab, arm = _provision_gateways(auth, auth_env, need_arm=bool(p.target.create_capacity or p.target.azure_subscription_id))
+        run, report = service.apply(store, project_name, fab, arm, do_apply=apply_)
+    except (ApplyRefused, ProjectNotFoundError) as exc:
+        click.secho(str(exc), fg="red", err=True)
+        sys.exit(1)
+    except Exception as exc:  # noqa: BLE001
+        click.secho(f"Provisioning failed: {type(exc).__name__}: {exc}", fg="red", err=True)
+        sys.exit(1)
+    click.echo(("PROVISIONING APPLIED" if apply_ else "PROVISIONING (dry run - nothing was changed; add --apply)") + f"  plan {run.plan_hash[:16]}")
+    for r in run.results:
+        click.echo(f"  - {r.step_id}: {r.status.value}" + (f" ({r.attempts} attempt(s))" if r.attempts else "") + f" {r.detail[:140]}")
+    if report is not None:
+        click.echo(f"  verification: {'ALL VERIFIED' if report.all_verified else 'NOT all verified: see provisioning/verification.md'}")
+    failed = [r for r in run.results if r.status.value in ("failed", "mismatch")]
+    if failed:
+        sys.exit(2)
+
+
+@cli.command(name="provision-verify")
+@click.option("--project", "project_name", required=True)
+@azure_auth_options()
+def provision_verify(project_name: str, auth: str, **auth_env) -> None:
+    """Read the target back and compare it with the plan (read-only). The only command that may say a resource exists."""
+    from adf2fabric.agent.provisioning import service
+    from adf2fabric.project.provisioning import ProvisioningPlan
+
+    store = ProjectStore(projects_root(load_config()))
+    try:
+        p = store.load_provisioning(project_name, "plan", ProvisioningPlan)
+        fab, arm = _provision_gateways(auth, auth_env, need_arm=bool(p.target.create_capacity or p.target.azure_subscription_id))
+        report = service.verify(store, project_name, fab, arm)
+    except ProjectNotFoundError as exc:
+        click.secho(str(exc), fg="red", err=True)
+        sys.exit(1)
+    except Exception as exc:  # noqa: BLE001
+        click.secho(f"Verification failed: {type(exc).__name__}: {exc}", fg="red", err=True)
+        sys.exit(1)
+    click.echo(f"VERIFICATION {'ALL VERIFIED' if report.all_verified else 'NOT all verified'}")
+    for r in report.results:
+        click.echo(f"  - {r.step_id}: {r.status.value} {r.detail[:120]}")
+    if not report.all_verified:
+        sys.exit(2)
+
+
 @cli.command(name="discovery-dependencies")
 @click.option("--project", "project_name", required=True, help="Project name (`discovery-adf-semantic` must have run).")
 @click.option("--check", "checks", multiple=True, type=click.Choice(["databricks", "key_vault", "storage", "network"]),
