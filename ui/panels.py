@@ -10,7 +10,7 @@ import streamlit as st
 
 import theme
 from api_client import ApiClient
-from components import STATE_LABELS, call, can, run_job, short_source, state_badge, status_badge, test_report
+from components import STATE_LABELS, call, can, empty_state, intent, run_job, short_source, state_badge, status_badge, test_report, typed_confirm
 
 
 # ---- 1. discover ----------------------------------------------------------------------------------------------------------
@@ -21,12 +21,13 @@ def discover(api: ApiClient, pid: str, project: dict | None, found: dict | None)
     if (project or {}).get("semantic_stale"):
         st.warning("The source changed after discovery last ran, so conversion would use old data. Run discovery again.")
     if st.button(label, type="primary", key="run-discover"):
-        for stage in ("discovery", "semantic"):
-            job = run_job(lambda s=stage: api.run_stage(pid, s), f"Stage: {stage}")
+        for n, stage in enumerate(("discovery", "semantic"), 1):
+            job = run_job(lambda s=stage: api.run_stage(pid, s, idempotency_key=intent(f"discover-{s}")), f"Step {n} of 2: {stage}", intent_name=f"discover-{stage}")
             if not job or job["state"] != "succeeded":
                 return
         st.rerun()
     if not found:
+        empty_state("Nothing discovered yet", "Run discovery to read the pipelines, linked services and runtimes. Nothing is changed in the source.")
         return
     lss, irs = found["linked_services"], found["integration_runtimes"]
     c = st.columns(3)
@@ -178,7 +179,7 @@ def _editor(api: ApiClient, pid: str, card: dict, known: dict[str, str]) -> None
                 st.caption(f"• {o['label']}: {o.get('reason') or 'not available'}")
         if card.get("existing_matches"):
             st.markdown(f"**Existing Fabric connections that may fit ({len(card['existing_matches'])})**")
-            st.dataframe(card["existing_matches"], hide_index=True)
+            st.dataframe([{"Connection": m.get("display_name"), "Type": m.get("type") or m.get("connection_type") or ""} for m in card["existing_matches"]], hide_index=True)
         if card.get("used_by_activities"):
             st.markdown(f"**Used by {len(card['used_by_activities'])} activity(ies)**")
             st.dataframe(card["used_by_activities"], hide_index=True)
@@ -188,8 +189,7 @@ def _apply_table(res: dict) -> None:
     st.markdown(theme.badge("Preview: nothing was created", "info") if res.get("dry_run")
                 else theme.badge("Created in Fabric", "success"), unsafe_allow_html=True)
     st.dataframe([{"linked service": i["linked_service"], "action": i["action"], "bound": i["bound"],
-                   "Fabric validated": i["fabric_validated"], "connection ids": ", ".join(i["connection_ids"]),
-                   "detail": i["detail"]} for i in res.get("items", [])], hide_index=True)
+                   "Fabric validated": i["fabric_validated"], "detail": i["detail"]} for i in res.get("items", [])], hide_index=True)
     for i in res.get("items", []):
         for a in i.get("actions", []):
             st.caption(f"• {i['linked_service']}: {a}")
@@ -241,10 +241,11 @@ def connect(api: ApiClient, pid: str, cards: list[dict] | None, workspace_id: st
             st.session_state.pop("apply_result", None)
             st.rerun()
     allowed = can("migration:execute")
-    if b.button("Create in Fabric", type="primary", key="apply-go", disabled=not (workspace_id and valid and allowed),
-                help=None if (valid and allowed) else ("Your role cannot change Fabric (needs migration:execute)." if not allowed
-                                                       else "Run Preview first, and create only what it showed.")):
-        res = call(api.apply_connections, pid, names, dry_run=False, auto_match=auto, workspace_id=workspace_id)
+    sure = typed_confirm("Create these connections in Fabric", "CREATE", "apply-confirm", disabled=not (workspace_id and valid and allowed))
+    if b.button("Create in Fabric", type="primary", key="apply-go", disabled=not (workspace_id and valid and allowed and sure),
+                help=None if (valid and allowed and sure) else ("Your role cannot change Fabric (needs migration:execute)." if not allowed
+                                                              else "Run Preview first, then type CREATE.")):
+        res = call(api.apply_connections, pid, names, dry_run=False, auto_match=auto, workspace_id=workspace_id, confirm=True)
         if res:
             st.session_state.apply_result = res
             st.session_state.pop("apply_preview", None)
@@ -253,7 +254,7 @@ def connect(api: ApiClient, pid: str, cards: list[dict] | None, workspace_id: st
         st.multiselect("Only these linked services (empty = all)", [x["name"] for x in cards], key="apply-names")
         if st.button("Set up workspace identity", disabled=not workspace_id, key="apply-wi",
                      help="Needed by connections that sign in as the workspace."):
-            out = call(api.provision_workspace_identity, pid, workspace_id)
+            out = call(api.provision_workspace_identity, pid, workspace_id, True)
             if out:
                 (st.success if out.get("provisioned") else st.error)(out.get("next") or out.get("error") or str(out))
         if st.button("Build connections report", key="apply-report"):
@@ -281,7 +282,7 @@ def convert(api: ApiClient, pid: str, result: dict | None) -> None:
     raw = st.text_input("Only these pipelines (comma-separated, empty = all)", key="conv-pipes")
     if st.button("Convert again" if result else "Convert", type="primary", key="conv-go"):
         pipes = [p.strip() for p in raw.split(",") if p.strip()]
-        job = run_job(lambda: api.run_stage(pid, "convert", pipelines=pipes), "Stage: convert")
+        job = run_job(lambda: api.run_stage(pid, "convert", pipelines=pipes, idempotency_key=intent("convert-step")), "Stage: convert", intent_name="convert-step")
         if job and job["state"] == "succeeded":
             st.session_state.setdefault("conversion", {})[pid] = job["result"]
             st.rerun()
@@ -313,7 +314,7 @@ def deploy(api: ApiClient, pid: str, dest: dict, conversion: dict | None, result
         return
     if dest.get("provider", "azure_cli") != "azure_cli":
         st.warning("Deploying uses the Azure CLI sign-in. Switch the destination to Azure CLI on the **Connections** page.")
-    st.markdown(f"Target workspace: `{dest['workspace_id']}`")
+    st.markdown(f"Target: the Fabric workspace you connected (…{dest['workspace_id'][-6:]})")
     known = [p["name"] for p in (conversion or {}).get("pipelines", [])]
     pipes = st.multiselect("Pipelines (empty = all converted)", known, key="dep-pipes")
     children = st.checkbox("Include child pipelines they call", value=True, key="dep-children")
@@ -321,23 +322,27 @@ def deploy(api: ApiClient, pid: str, dest: dict, conversion: dict | None, result
                           help="Deploys pipelines whose connections aren't set yet. They won't run until fixed.")
     a, b = st.columns(2)
     stage = None
+    a.markdown(theme.badge("Dry run: changes nothing", "info"), unsafe_allow_html=True)
     if a.button("Dry run", type="primary", key="dep-dry"):
         stage = "deploy_dry_run"
-    sure = b.checkbox("I have checked the dry run and want to deploy for real", key="dep-sure")
-    if b.button("Deploy", disabled=not (sure and can("migration:execute")), key="dep-go",
+    dry_done = bool(result)
+    b.markdown(theme.badge("Deploy: changes Fabric", "warning"), unsafe_allow_html=True)
+    with b:
+        sure = typed_confirm("Deploy for real: this creates or updates pipelines in Fabric", "DEPLOY", "dep-sure", disabled=not dry_done)
+    if b.button("Deploy", disabled=not (dry_done and sure and can("migration:execute")), key="dep-go",
                 help=None if can("migration:execute") else "Your role cannot deploy (needs migration:execute)."):
         stage = "deploy_apply"
     if stage:
-        job = run_job(lambda: api.run_stage(pid, stage, pipelines=pipes, with_children=children, allow_unbound=unbound),
-                      "Deploy (dry run)" if stage == "deploy_dry_run" else "Deploy")
+        job = run_job(lambda: api.run_stage(pid, stage, pipelines=pipes, with_children=children, allow_unbound=unbound, confirm=(stage == "deploy_apply"),
+                                            idempotency_key=intent(stage)),
+                      "Deploy (dry run)" if stage == "deploy_dry_run" else "Deploy", intent_name=stage)
         if job and job["state"] == "succeeded":
             st.session_state.setdefault("deploy", {})[pid] = job["result"]
             st.rerun()
     if result:
         st.markdown(theme.badge("Deployed to Fabric", "success") if result.get("applied")
                     else theme.badge("Dry run: nothing was changed in Fabric", "info"), unsafe_allow_html=True)
-        st.dataframe([{"pipeline": x["name"], "action": x["action"], "item id": x.get("item_id") or "",
-                       "detail": x.get("detail") or "", "children": ", ".join(x.get("children") or [])}
+        st.dataframe([{"pipeline": x["name"], "action": x["action"], "detail": x.get("detail") or "", "children": ", ".join(x.get("children") or [])}
                       for x in result.get("results", [])], hide_index=True)
     _compare(api, pid)
 

@@ -94,7 +94,7 @@ def test_choice_secret_test_apply_report(client):
     assert t.status_code == 200 and SECRET not in t.text
     dry = client.post(f"{p}/apply", json={"names": ["LS_Sales_SQL"], "dry_run": True, "workspace_id": "11111111-1111-1111-1111-111111111111"})
     assert dry.status_code == 200 and dry.json()["items"][0]["action"] in ("would_create", "reused", "manual")
-    real = client.post(f"{p}/apply", json={"names": ["LS_Sales_SQL"], "workspace_id": "11111111-1111-1111-1111-111111111111"})
+    real = client.post(f"{p}/apply", json={"names": ["LS_Sales_SQL"], "workspace_id": "11111111-1111-1111-1111-111111111111", "confirm": True})
     assert real.status_code == 200 and SECRET not in real.text
     rep = client.get(f"{p}/report")
     assert rep.status_code == 200 and SECRET not in rep.text

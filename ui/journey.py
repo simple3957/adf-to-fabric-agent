@@ -20,9 +20,13 @@ class Step:
 
 STEPS: tuple[Step, ...] = (
     Step("discover", "Discover", "🔎", "Read the pipelines, linked services and runtimes in the ADF source."),
+    Step("review", "Review", "🧭", "Check discovery is complete; review pipelines, activities, dependencies, compute and compatibility."),
     Step("connect", "Connect", "🔌", "Decide how each linked service becomes a Fabric connection, and test it."),
+    Step("plan", "Plan target", "🏗️", "See what the target needs, what exists, and approve what may be created."),
     Step("convert", "Convert", "🔁", "Turn the ADF pipelines into Fabric pipelines."),
+    Step("validate", "Validate", "🧪", "Re-read the source and the generated files and compare them, independently of the converter."),
     Step("deploy", "Deploy", "🚀", "Publish the converted pipelines to the Fabric workspace."),
+    Step("report", "Report", "📋", "The honest account: what is confirmed, what is not, and what is left."),
 )
 KEYS = tuple(s.key for s in STEPS)
 
@@ -126,6 +130,59 @@ def connect_facts(cards: Optional[list[dict]]) -> StepFacts:
                          waiting=f"{open_} linked service(s) still need a sign-in method and details.")
     return StepFacts(complete=True, metric=metric, attention=attention,
                      outcome=f"{ready} of {len(cards)} linked services are configured or tested.")
+
+
+def review_facts(inv: Optional[dict]) -> StepFacts:
+    if not inv:
+        return StepFacts(waiting="Run discovery first.", metric="-")
+    c = inv["completeness"]
+    metric = f"{c['pipelines']} pipelines · {c['activities']} activities"
+    if c["complete"]:
+        return StepFacts(complete=True, metric=metric, outcome=f"Discovery is complete: {metric}.")
+    return StepFacts(complete=True, metric=metric, attention="discovery has gaps",
+                     outcome=f"{metric}, but discovery has gaps (see the Review step).")
+
+
+def plan_facts(prov: Optional[dict]) -> StepFacts:
+    """Complete only when the target is ready: nothing left to create, or everything approved was applied AND read back."""
+    if not prov or not prov.get("available"):
+        return StepFacts(waiting="Build the target plan (read-only).", metric="No plan yet")
+    s = prov["summary"]
+    changes = s["to_create"] + s["to_configure"]
+    problems = s["blocked"] + s["conflicts"]
+    attention = (f"{problems} blocked or in conflict" if problems else None)
+    if prov["blockers"]:
+        return StepFacts(metric=f"{changes} to change · {len(prov['blockers'])} blocker(s)", attention=attention or f"{len(prov['blockers'])} blocker(s)",
+                         waiting="Clear the blockers shown in the plan.")
+    if not changes:
+        return StepFacts(complete=True, metric="Nothing to create", attention=attention, outcome="The target already has everything this plan needs.")
+    ver = prov.get("verification") or {}
+    if ver.get("all_verified") and (prov.get("run") or {}).get("dry_run") is False:
+        return StepFacts(complete=True, metric=f"{changes} change(s) applied and verified", attention=attention, outcome="Everything approved was created and read back.")
+    approved = (prov.get("approval") or {}).get("current")
+    return StepFacts(metric=f"{changes} to change", attention=attention,
+                     waiting=("Dry run, apply, then verify." if approved else "Approve the steps, dry run, apply, then verify."))
+
+
+def validate_facts(val: Optional[dict]) -> StepFacts:
+    if not val or not val.get("available"):
+        return StepFacts(waiting="Run validation.", metric="Not run yet")
+    st_ = {s["stage"]: s["status"] for s in val["stages"]}
+    bad = [k for k, v in st_.items() if v in ("FAIL", "BLOCKED") and k == "static"]
+    metric = f"Static: {st_.get('static', 'NOT_RUN').replace('_', ' ').lower()}"
+    return StepFacts(complete=st_.get("static") not in (None, "NOT_RUN"), metric=metric, attention=("static checks failed or are blocked" if bad else None),
+                     outcome=f"Static validation finished ({metric}). This does not prove the pipelines run.", waiting="Run validation.")
+
+
+def report_facts(rep: Optional[dict]) -> StepFacts:
+    """Finished only when validation included the deployment stage; 'verified' only when the backend says every required check passed."""
+    if not rep or not rep.get("validation", {}).get("available"):
+        return StepFacts(waiting="Validate the migration to get the report.", metric="Not validated")
+    stages = {s["stage"]: s["status"] for s in rep["validation"]["stages"]}
+    if stages.get("deployment") in (None, "NOT_RUN"):
+        return StepFacts(waiting="Validate the deployment (it needs a connected workspace).", metric=rep["overall"].replace("_", " ").title())
+    attention = None if rep["full_success"] else rep["headline"]
+    return StepFacts(complete=True, metric=rep["overall"].replace("_", " ").title(), attention=attention, outcome=rep["headline"])
 
 
 def convert_facts(result: Optional[dict]) -> StepFacts:

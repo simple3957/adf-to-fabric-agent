@@ -98,11 +98,28 @@ outcome and a few short redacted details. **Never** secrets, tokens, request bod
 sign-in records a short hash of the address). Lines are hash-chained (`adf2fabric audit-verify`): tamper evidence, not proof. Ship the log
 to append-only storage for real assurance. Read your organisation's events with `GET /admin/audit` (`users:manage`).
 
-## Not covered by the API: provisioning, workloads and validation
+## Provisioning, validation and the guided UI routes
 
-`provision-*`, `workloads-*` and `validate` are CLI commands. Their authorisation is the operating-system user and their own approval
-gates (plan-hash-bound approvals, `--apply`, dry runs); the sensitive ones are audited. They are not exposed over HTTP, so the API's roles
-do not apply to them. Exposing them requires adding routes with permissions (`provision:approve`, `migration:execute`) and tests first.
+These are exposed over HTTP, each with its own permission (the role table in `tests/test_api_security.py` lists every one):
+
+| Route | Permission |
+|---|---|
+| `GET .../inventory`, `compatibility`, `validation`, `report`, `provisioning` | `reports:view` |
+| `POST .../provisioning/plan` (read-only) | `plans:generate` + `azure:use` |
+| `POST .../provisioning/approve` | `provision:approve` (not held by analysts or operators) |
+| `POST .../provisioning/apply` | `migration:execute`; `apply: true` also needs `confirm: true` and a finished dry run of the same, approved, unchanged plan |
+| `POST .../stages/deploy_apply` | `migration:execute`; needs `confirm: true` and a dry run of the same pipelines in the same workspace within the last hour |
+| `POST .../stages/dependencies`, `workloads`, `validate` | `discovery:run` / `plans:generate` |
+
+* Views go through `api/views.sanitize`: keys that can carry paths, tokens, connection strings, code or hashes are dropped, strings are
+  scrubbed of paths and bearer tokens and bounded, and job results and errors leave the server the same way. Provisioning steps are shown by an
+  opaque `ref` and the workspace by its display name, never by resource id. Redaction is server-side; the UI never masks.
+* `Idempotency-Key` (8-64 chars `[A-Za-z0-9_-]`) makes a repeated submission return the first job (`Idempotent-Replay: true`) for 15 minutes,
+  per person. Without it, a second job while one runs on the project is refused (409).
+* `ADF2FABRIC_ENV=production` refuses demo mode (403) and builds no stand-in Fabric: nothing canned can pass for a real result.
+* The UI hides buttons the signed-in person's role cannot use. That is a convenience; the API enforces every permission itself.
+
+The CLI commands (`provision-*`, `workloads-*`, `validate`) still rely on the operating-system user and their own approval gates, and are audited.
 
 ## Remaining limitations (do not skip these)
 

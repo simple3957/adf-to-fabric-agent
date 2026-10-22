@@ -42,7 +42,15 @@ def load_compute_plan(store: ProjectStore, pid: str) -> Optional[ComputePlan]:
     try:
         if path.is_file():
             return ComputePlan.model_validate_json(path.read_text(encoding="utf-8"))
-        return store.load_conversion(pid).compute_plan
+        conv = store.load_conversion(pid).compute_plan
+        if conv is not None:
+            return conv
+    except (ProjectNotFoundError, ValueError):
+        pass
+    try:  # nothing converted yet: the plan can still be built from what discovery found (no write, no network)
+        from adf2fabric.agent.conversion.compute_plan import build_compute_plan
+
+        return build_compute_plan(store.load_adf_semantic_discovery(pid))
     except (ProjectNotFoundError, ValueError):
         return None
 

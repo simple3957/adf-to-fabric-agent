@@ -158,9 +158,10 @@ def test_the_verify_stage_reads_latest_runs_and_never_starts_one(monkeypatch, tm
         return V.Verification(name, "no_baseline", fabric_status="Completed", job_id="j")
 
     monkeypatch.setattr(V, "verify_pipeline", fake)
+    c.fabric_http = None  # without the demo stand-in the token comes from Azure, as in a real run
     with pytest.raises(stages.StageError, match="never requests a token"):  # a sign-in problem is a readable stage error
         stages.run_stage(c, sess, pid, "verify", lambda *_: None)
-    monkeypatch.setattr(stages, "FabricClient", lambda token: object())
+    monkeypatch.setattr(stages, "FabricClient", lambda token, **kw: object())
     monkeypatch.setattr(c.azure, "token", lambda **kw: "t")
     out = stages.run_stage(c, sess, pid, "verify", lambda *_: None)
     assert seen and all(start is False for _, start in seen)

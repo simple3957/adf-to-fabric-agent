@@ -19,9 +19,10 @@ TERMINAL = ("succeeded", "failed")
 class ApiError(Exception):
     """An error response from the API, unwrapped from its ``{error, actions, details}`` envelope."""
 
-    def __init__(self, status: int, message: str, actions: Optional[list[str]] = None, details: Optional[list[Any]] = None):
+    def __init__(self, status: int, message: str, actions: Optional[list[str]] = None, details: Optional[list[Any]] = None, request_id: str = ""):
         super().__init__(message)
         self.status = status
+        self.request_id = request_id  # quote it to an administrator: the server log has the detail, the browser never does
         self.message = message
         self.actions = actions or []
         self.details = details or []
@@ -38,8 +39,10 @@ class ApiClient:
 
     # ---- transport -----------------------------------------------------------------------------------------------------
     def _request(self, method: str, path: str, *, json: Any = None, params: Optional[dict] = None,
-                 data: Optional[bytes] = None, content_type: Optional[str] = None) -> Any:
+                 data: Optional[bytes] = None, content_type: Optional[str] = None, idempotency_key: Optional[str] = None) -> Any:
         headers = {"X-Session-Id": self.session_id}
+        if idempotency_key:
+            headers["Idempotency-Key"] = idempotency_key  # a repeated submission of the same intent returns the first job instead of starting another
         if self._token:
             headers["Authorization"] = f"Bearer {self._token}"
         if content_type:
@@ -56,14 +59,14 @@ class ApiClient:
             except ValueError:
                 body = {}
             raise ApiError(resp.status_code, body.get("error") or f"HTTP {resp.status_code}",
-                           body.get("actions"), body.get("details"))
+                           body.get("actions"), body.get("details"), str(getattr(resp, "headers", {}).get("x-request-id", "") or ""))
         return resp.json() if resp.content else None
 
     def _get(self, path: str, **params: Any) -> Any:
         return self._request("GET", path, params={k: v for k, v in params.items() if v is not None} or None)
 
-    def _post(self, path: str, body: Any = None) -> Any:
-        return self._request("POST", path, json=body if body is not None else {})
+    def _post(self, path: str, body: Any = None, idempotency_key: Optional[str] = None) -> Any:
+        return self._request("POST", path, json=body if body is not None else {}, idempotency_key=idempotency_key)
 
     def _put(self, path: str, body: Any) -> Any:
         return self._request("PUT", path, json=body)
@@ -196,22 +199,53 @@ class ApiClient:
         return self._post(f"/projects/{pid}/connections/{ls}/test")
 
     def apply_connections(self, pid: str, names: Iterable[str] = (), dry_run: bool = True, auto_match: bool = False,
-                          workspace_id: Optional[str] = None) -> dict:
+                          workspace_id: Optional[str] = None, confirm: bool = False) -> dict:
         return self._post(f"/projects/{pid}/connections/apply",
-                          {"names": list(names), "dry_run": dry_run, "auto_match": auto_match, "workspace_id": workspace_id})
+                          {"names": list(names), "dry_run": dry_run, "auto_match": auto_match, "workspace_id": workspace_id, "confirm": confirm})
 
-    def provision_workspace_identity(self, pid: str, workspace_id: Optional[str] = None) -> dict:
-        return self._post(f"/projects/{pid}/connections/workspace-identity", {"workspace_id": workspace_id})
+    def provision_workspace_identity(self, pid: str, workspace_id: Optional[str] = None, confirm: bool = False) -> dict:
+        return self._post(f"/projects/{pid}/connections/workspace-identity", {"workspace_id": workspace_id, "confirm": confirm})
 
     def connections_report(self, pid: str) -> dict:
         return self._get(f"/projects/{pid}/connections/report")
 
     # ---- stages + jobs -------------------------------------------------------------------------------------------------
     def run_stage(self, pid: str, stage: str, *, pipelines: Iterable[str] = (), workspace_id: Optional[str] = None,
-                  with_children: bool = False, allow_unbound: bool = False) -> dict:
+                  with_children: bool = False, allow_unbound: bool = False, confirm: bool = False, validate_stages: Iterable[str] = (),
+                  idempotency_key: Optional[str] = None) -> dict:
         return self._post(f"/projects/{pid}/stages/{stage}",
                           {"pipelines": list(pipelines), "workspace_id": workspace_id, "with_children": with_children,
-                           "allow_unbound": allow_unbound})
+                           "allow_unbound": allow_unbound, "confirm": confirm, "validate_stages": list(validate_stages)}, idempotency_key)
+
+    # ---- views built and redacted on the server ------------------------------------------------------------------------
+    def inventory(self, pid: str) -> dict:
+        return self._get(f"/projects/{pid}/inventory")
+
+    def compatibility(self, pid: str) -> dict:
+        return self._get(f"/projects/{pid}/compatibility")
+
+    def validation(self, pid: str) -> dict:
+        return self._get(f"/projects/{pid}/validation")
+
+    def report(self, pid: str) -> dict:
+        return self._get(f"/projects/{pid}/report")
+
+    def provisioning(self, pid: str) -> dict:
+        return self._get(f"/projects/{pid}/provisioning")
+
+    def plan_provisioning(self, pid: str, *, lakehouses: Iterable[str] = (), warehouses: Iterable[str] = (), provision_identity: bool = False,
+                          workspace_id: Optional[str] = None, idempotency_key: Optional[str] = None) -> dict:
+        return self._post(f"/projects/{pid}/provisioning/plan", {"workspace_id": workspace_id, "lakehouses": list(lakehouses), "warehouses": list(warehouses),
+                                                                  "provision_identity": provision_identity}, idempotency_key)
+
+    def approve_provisioning(self, pid: str, plan_ref: str, steps: Optional[Iterable[str]] = None, note: str = "") -> dict:
+        return self._post(f"/projects/{pid}/provisioning/approve", {"plan_ref": plan_ref, "steps": list(steps) if steps is not None else None, "note": note})
+
+    def apply_provisioning(self, pid: str, plan_ref: str, *, apply: bool = False, confirm: bool = False, idempotency_key: Optional[str] = None) -> dict:
+        return self._post(f"/projects/{pid}/provisioning/apply", {"plan_ref": plan_ref, "apply": apply, "confirm": confirm}, idempotency_key)
+
+    def verify_provisioning(self, pid: str) -> dict:
+        return self._post(f"/projects/{pid}/provisioning/verify")
 
     def jobs(self, project_id: Optional[str] = None) -> list[dict]:
         return self._get("/jobs", project_id=project_id)["jobs"]

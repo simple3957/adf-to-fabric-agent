@@ -37,7 +37,7 @@ CLI commands (`src/adf2fabric/cli.py`): `intake`, `consultation`, `discovery`, `
 | `repository/` | Git providers, scanner, auth |
 | `api/` | FastAPI backend: routes, jobs, stages, demo mode; `api/security/` holds authn, roles, tenancy, request protection, audit ([docs](docs/security.md)) |
 | `project/` | Persisted models and on-disk store; compute plan |
-| `ui/` (repo root) | Streamlit UI. No migration logic; it calls the API via `ui/api_client.py` |
+| `ui/` (repo root) | Streamlit UI, 8 guided steps ([docs](docs/ui.md)). No migration logic; it calls the API via `ui/api_client.py` |
 
 Per-agent operating instructions are in `skills/`. Per-stage references are in `docs/`.
 
@@ -50,6 +50,7 @@ Per-agent operating instructions are in `skills/`. Per-stage references are in `
 - Provisioning never writes during discovery, planning or verification; only approved steps of an unchanged plan are applied, every write re-reads live state first, nothing is deleted or modified, and only `provision-verify` may say a resource exists. A read that fails is `unknown`, never "absent".
 - `validate` never trusts the converter's success response: it re-reads source and generated files. Only a recorded real run can satisfy the runtime stage, and only `MIGRATION_VERIFIED` may be reported as full success; a clean static pass or a 200 from an API is never runtime correctness.
 - API security: every route declares its permission (`need(...)`) and the server enforces it; projects, jobs, uploads and sessions are scoped to the caller's organisation and another organisation's project is a 404; a client-chosen subscription, tenant, account or workspace must be in the caller's grants; Git URLs go through the SSRF guard. A new route needs a permission, an entry in the role table of `tests/test_api_security.py`, and (if it changes anything) an audit event. Do not call the app production-secure: see the limitations in `docs/security.md`.
+- UI/API contract ([docs/ui.md](docs/ui.md)): views are redacted server-side by `api/views.sanitize` (no paths, ids, tokens, traces); real changes need `confirm: true` after a dry run and a typed confirmation in the UI; submissions carry an `Idempotency-Key`; a completion claim comes only from the validation engine's overall status; production mode (`ADF2FABRIC_ENV=production`) refuses demo data. A new view or route follows the security rule above.
 - Deploy defaults to dry run. It refuses unbound placeholders (notebook, dataflow, Spark job ids) unless `--allow-unbound`.
 - Triggers are created disabled and never duplicated.
 - `agent/conversion/preflight.py` reports source problems conversion cannot fix (reserved SQL aliases from Microsoft's keyword list, linked-service parameters with no value, Wait-only pipelines). They are findings, never blockers.

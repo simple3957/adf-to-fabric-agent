@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 
 from adf2fabric.agent.conversion import ConversionAgent, ConversionRequest
+from adf2fabric.agent.deployment import record as deploy_record
 from adf2fabric.agent.deployment.fabric_deploy import DeployError, DeployItem, FabricClient, child_refs, deploy
 from adf2fabric.agent.discovery import DiscoveryAgent, DiscoveryRequest
 from adf2fabric.agent.discovery.adf_semantic import AdfSemanticDiscoveryRequest
@@ -19,7 +20,7 @@ from adf2fabric.agent.reconstruction.models import ReconstructionRequest
 from adf2fabric.api.container import FABRIC_RESOURCE, Container, Session
 from adf2fabric.project.store import ProjectStore
 
-STAGES = ("discovery", "semantic", "reconstruct", "convert", "compute", "deploy_dry_run", "deploy_apply", "verify")
+STAGES = ("discovery", "semantic", "dependencies", "workloads", "reconstruct", "convert", "compute", "validate", "deploy_dry_run", "deploy_apply", "verify")
 Log = Callable[[str], None]
 
 
@@ -105,11 +106,11 @@ def _verify(c: Container, session: Session, pid: str, options: dict, log: Log) -
     from adf2fabric.connections.providers.azure_cli import ProviderError
 
     try:
-        token = c.azure.token(tenant=dest.get("tenant_id"), account=dest.get("account"), resource=FABRIC_RESOURCE)
+        token = c.fabric_token(session)
     except ProviderError as exc:
         raise StageError(str(exc), getattr(exc, "actions", None) or ["Sign in to Fabric on the Connections page."]) from None
     try:
-        results = verify_all(lambda: FabricClient(token), workspace, names, start=False, adf=adf, previous=previous,
+        results = verify_all(lambda: FabricClient(token, session=c.fabric_http), workspace, names, start=False, adf=adf, previous=previous,
                              called=called, log=log)
     except DeployError as exc:
         raise StageError(str(exc)) from None
@@ -118,6 +119,41 @@ def _verify(c: Container, session: Session, pid: str, options: dict, log: Log) -
     keep = ("pipeline", "verdict", "fabric_status", "ran_at", "baseline", "baseline_at", "matched", "differences",
             "baseline_only", "fabric_only", "detail")
     return {"results": [{k: v.to_dict()[k] for k in keep} for v in results]}
+
+
+def _workloads(c: Container, pid: str, log: Log) -> dict[str, Any]:
+    """Assess Spark workloads (read-only: nothing is generated or sent to Fabric; no code is fetched without a credential)."""
+    from adf2fabric.agent.workloads.engine import Options, build_manifest
+    from adf2fabric.agent.workloads.report import render_report
+
+    if not c.store.has_adf_semantic_discovery(pid):
+        raise StageError("Run the 'semantic' stage first.")
+    m = build_manifest(c.store, pid, Options(generate=False))
+    c.store.save_workload_manifest(pid, m, render_report(m))
+    log(f"{m.summary.total} workload(s) assessed")
+    return {"message": "Workloads assessed.", "workloads": m.summary.total, "by_classification": m.summary.by_classification}
+
+
+def _validate(c: Container, session: Session, pid: str, options: dict, log: Log) -> dict[str, Any]:
+    """Independent validation. Static always; api / deployment need an authorised workspace; runtime reads recorded real runs only."""
+    from adf2fabric.agent.validation import engine
+    from adf2fabric.agent.validation.report import render
+
+    wanted = set(options.get("validate_stages") or ["static"]) & set(engine.ALL_STAGES) or {"static"}
+    workspace = options.get("workspace_id") or session.destination.get("workspace_id")
+    fab = None
+    if wanted & {"api", "deployment"}:
+        if not workspace:
+            raise StageError("Choose a Fabric workspace before validating the API and deployment stages.", ["Connect a workspace on the Connections page."])
+        fab, _ = c.gateways(session)
+    log("validating: " + ", ".join(sorted(wanted)))
+    report = engine.validate(c.store, pid, stages=wanted, fab=fab, workspace=workspace)
+    c.store.save_validation_report(pid, report)
+    d = c.store.project_dir(pid) / "validation"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "report.md").write_text(render(report), encoding="utf-8")
+    return {"message": "Validation finished.", "overall": report.overall, "stages": {s.stage.value: s.status.value for s in report.stages},
+            "checks": len(report.checks)}
 
 
 def run_stage(c: Container, session: Session, pid: str, stage: str, log: Log, options: Optional[dict] = None) -> dict[str, Any]:
@@ -165,6 +201,19 @@ def run_stage(c: Container, session: Session, pid: str, stage: str, log: Log, op
                    history_used=a.history_used if a else False, report=r.report_markdown)
     if stage == "verify":
         return _verify(c, session, pid, options, log)
+    if stage == "dependencies":
+        from adf2fabric.agent.dependencies import DependencyDiscoveryError, discover_dependencies
+
+        try:
+            inv = discover_dependencies(c.store, pid)
+        except DependencyDiscoveryError as exc:
+            raise StageError(str(exc), ["Run the 'semantic' stage first."]) from None
+        return {"message": "Dependencies resolved.", "dependencies": inv.summary.total, "blocking": inv.summary.blocking, "errors": inv.summary.findings_error,
+                "cycles": len(inv.cycles)}
+    if stage == "workloads":
+        return _workloads(c, pid, log)
+    if stage == "validate":
+        return _validate(c, session, pid, options, log)
     # deploy
     dest = session.destination
     if dest.get("provider", "azure_cli") != "azure_cli":
@@ -177,11 +226,15 @@ def run_stage(c: Container, session: Session, pid: str, stage: str, log: Log, op
     if not items:
         raise StageError("Nothing to deploy.", ["Run the convert stage first."])
     try:
-        token = c.azure.token(tenant=dest.get("tenant_id"), account=dest.get("account"), resource=FABRIC_RESOURCE)
-        results = deploy(FabricClient(token), workspace, items, apply=stage == "deploy_apply",
+        token = c.fabric_token(session)
+        results = deploy(FabricClient(token, session=c.fabric_http), workspace, items, apply=stage == "deploy_apply",
                          allow_unbound=bool(options.get("allow_unbound")))
     except DeployError as exc:
         raise StageError(str(exc)) from None
+    if stage == "deploy_apply":
+        deploy_record.note_apply(c.store.project_dir(pid), workspace, results)
+    else:
+        deploy_record.note_dry_run(c.store.project_dir(pid), workspace, [i.name for i in items], sum(1 for r in results if r.action in ("failed", "refused")))
     return {"applied": stage == "deploy_apply",
-            "results": [{"name": r.name, "action": r.action, "item_id": r.item_id, "detail": r.detail, "children": r.children}
+            "results": [{"name": r.name, "action": r.action, "detail": r.detail, "children": r.children}
                         for r in results]}

@@ -7,6 +7,7 @@ from typing import Any, Callable, Optional
 
 import streamlit as st
 
+import theme
 from api_client import ApiClient, ApiError
 from cache import ACCOUNTS_TTL, cached, forget
 
@@ -34,6 +35,47 @@ def client() -> ApiClient:
     return st.session_state.api
 
 
+PSTATE_ICON = {"discovered": "🔎", "inferred": "❓", "unsupported": "🚫", "blocked": "⛔", "converted": "🔁", "deployed": "🚀", "runtime_validated": "✅"}
+PSTATE_LABEL = {"discovered": "Discovered", "inferred": "Inferred", "unsupported": "Unsupported", "blocked": "Blocked", "converted": "Converted",
+               "deployed": "Deployed", "runtime_validated": "Runtime-validated"}
+PSTATE_TONE = {"discovered": "info", "inferred": "warning", "unsupported": "error", "blocked": "error", "converted": "info", "deployed": "success",
+              "runtime_validated": "success"}
+PSTATE_HELP = {"discovered": "Read from the source and fully understood.", "inferred": "Read, but something was dynamic or filled in: confirm it.",
+              "unsupported": "No Fabric counterpart for an activity or connector.", "blocked": "Cannot proceed until something is supplied or decided.",
+              "converted": "Fabric JSON was generated. This is not proof it works.", "deployed": "A deploy call reported success. This is not proof it runs correctly.",
+              "runtime_validated": "A real Fabric run completed and matched its baseline."}
+
+
+def state_chip(state: str) -> str:
+    """HTML for one state: an icon AND a word, so meaning never depends on colour alone."""
+    return theme.badge(f"{PSTATE_ICON.get(state, '')} {PSTATE_LABEL.get(state, state)}".strip(), PSTATE_TONE.get(state, "neutral"))
+
+
+def state_legend(counts: dict) -> None:
+    """The seven states with how many pipelines are in each and what the word does and does not promise."""
+    cols = st.columns(len(PSTATE_LABEL))
+    for col, key in zip(cols, PSTATE_LABEL):
+        col.markdown(state_chip(key), unsafe_allow_html=True)
+        col.caption(f"{counts.get(key, 0)} · {PSTATE_HELP[key]}")
+
+
+def empty_state(title: str, hint: str = "") -> None:
+    theme.html_block(f'<div class="ma-placeholder" role="status"><b>{theme.esc(title)}</b>' + (f'<br>{theme.esc(hint)}' if hint else "") + "</div>")
+
+
+def intent(name: str) -> str:
+    """A key that stays the same for one intended action until it has finished, so a second click or a rerun re-attaches to the first job."""
+    import uuid as _uuid
+
+    return st.session_state.setdefault("intents", {}).setdefault(name, _uuid.uuid4().hex[:24])
+
+
+def typed_confirm(label: str, phrase: str, key: str, disabled: bool = False) -> bool:
+    """A deliberate confirmation for something that changes the target: type the word. True only while it matches exactly."""
+    typed = st.text_input(f"{label}. Type {phrase} to confirm.", key=key, disabled=disabled, autocomplete="off")
+    return (not disabled) and typed.strip() == phrase
+
+
 def can(permission: str) -> bool:
     """Whether the signed-in person holds a permission, per the API. A CONVENIENCE for hiding buttons: the API enforces every permission
     itself, so a hidden button is never the protection. Unknown (not asked yet) counts as allowed so nothing is hidden by mistake."""
@@ -43,6 +85,10 @@ def can(permission: str) -> bool:
 
 def show_error(err: ApiError) -> None:
     st.error(err.message)
+    if err.status == 429:
+        st.info("Too many requests: wait a moment and try again.")
+    if getattr(err, "request_id", "") and err.status >= 500:
+        st.caption(f"Reference {err.request_id}: give this to your administrator; the details are in the server log.")
     for d in err.details:
         st.caption(f"• {d['field']}: {d['problem']}" if isinstance(d, dict) else f"• {d}")
     for a in err.actions:
@@ -89,12 +135,19 @@ def test_report(rep: dict) -> None:
         st.info(a)
 
 
-def run_job(start: Callable[[], dict], label: str) -> Optional[dict]:
-    """Start a background job, stream its log lines, and return the finished job (or None if it couldn't start)."""
+def run_job(start: Callable[[], dict], label: str, intent_name: Optional[str] = None) -> Optional[dict]:
+    """Start a background job, stream its log lines, and return the finished job (or None if it couldn't start).
+
+    ``intent_name`` ties the submission to one intended action: while the job runs, a repeated click sends the same idempotency key and the
+    server hands back the same job, so nothing is started twice. The key is dropped once the job has finished.
+    """
     try:
         job = start()
     except ApiError as err:
-        show_error(err)
+        if err.status == 409:
+            st.warning(err.message + " Wait for it to finish; this page will not start a second one.")
+        else:
+            show_error(err)
         return None
     with st.status(label, expanded=True) as box:
         try:
@@ -104,11 +157,13 @@ def run_job(start: Callable[[], dict], label: str) -> Optional[dict]:
             show_error(err)
             return None
         if final["state"] == "succeeded":
-            box.update(label=f"{label}: done", state="complete", expanded=False)
+            box.update(label=f"{label}: done in {final.get('elapsed', 0):g}s", state="complete", expanded=False)
         else:
-            box.update(label=f"{label}: failed", state="error")
+            box.update(label=f"{label}: failed after {final.get('elapsed', 0):g}s", state="error")
             st.error(final.get("error") or "The job failed.")
     st.session_state.setdefault("job_history", []).insert(0, final)
+    if intent_name:
+        st.session_state.get("intents", {}).pop(intent_name, None)
     return final
 
 

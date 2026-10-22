@@ -68,6 +68,7 @@ class ApplyBody(_In):
     auto_match: bool = False
     dry_run: bool = False
     workspace_id: Optional[str] = None
+    confirm: bool = False  # a real (not dry-run) apply must say it is meant
 
 
 class StageBody(_In):
@@ -75,6 +76,8 @@ class StageBody(_In):
     workspace_id: Optional[str] = None
     with_children: bool = False
     allow_unbound: bool = False
+    confirm: bool = False  # required by stages that change the target (deploy_apply)
+    validate_stages: list[str] = Field(default_factory=list, max_length=4)  # validate stage: static | api | deployment | runtime
 
 
 class WorkspaceBody(_In):
@@ -85,6 +88,30 @@ class WorkspaceBody(_In):
 
 class IdentityBody(_In):
     workspace_id: Optional[str] = None
+    confirm: bool = False
+
+
+class ProvisionPlanBody(_In):
+    workspace_id: Optional[str] = None  # an existing workspace (must be granted)
+    workspace_name: Optional[str] = Field(default=None, max_length=256)
+    capacity_id: Optional[str] = None
+    capacity_name: Optional[str] = Field(default=None, max_length=256)
+    tenant_id: Optional[str] = None
+    lakehouses: list[str] = Field(default_factory=list, max_length=20)
+    warehouses: list[str] = Field(default_factory=list, max_length=20)
+    provision_identity: bool = False
+
+
+class ProvisionApproveBody(_In):
+    plan_ref: str = Field(max_length=64)  # the plan the person reviewed: an approval of a different plan is refused
+    steps: Optional[list[str]] = Field(default=None, max_length=200)  # None = every step that can be approved
+    note: str = Field(default="", max_length=300)
+
+
+class ProvisionApplyBody(_In):
+    plan_ref: str = Field(max_length=64)
+    apply: bool = False  # False = dry run: nothing is written
+    confirm: bool = False  # required when apply is true
 
 
 class ModeBody(_In):

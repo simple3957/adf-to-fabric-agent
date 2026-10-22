@@ -32,6 +32,8 @@ from adf2fabric.agent.intake.git_source import GitIntakeRequest, GitSourceIntake
 from adf2fabric.agent.intake.models import AzureIntakeRequest
 from adf2fabric.agent.intake.zip_source import ZipIntakeRequest, ZipSourceIntake, inspect_zip
 from adf2fabric.api import schemas as S
+from adf2fabric.api import views
+from adf2fabric.agent.deployment import record as deploy_record
 from adf2fabric.api.container import Container, Session, Settings
 from adf2fabric.api.jobs import JobConflict
 from adf2fabric.api.security import AuditLog, Grants, LOCAL, Permission as P, Principal, ProjectAccess, SecuritySettings, UserError, UserStore
@@ -61,8 +63,11 @@ _LS = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 _.\-]{0,127}$")
 MAX_PENDING_UPLOADS = 5
 
 # the permission each migration stage needs (the stage route re-checks against this, on top of its baseline)
-STAGE_PERMISSION = {"discovery": P.discovery_run, "semantic": P.discovery_run, "reconstruct": P.discovery_run, "convert": P.plans_generate,
-                    "compute": P.plans_generate, "deploy_dry_run": P.plans_generate, "verify": P.plans_generate, "deploy_apply": P.migration_execute}
+STAGE_PERMISSION = {"discovery": P.discovery_run, "semantic": P.discovery_run, "dependencies": P.discovery_run, "reconstruct": P.discovery_run,
+                    "workloads": P.plans_generate, "convert": P.plans_generate, "compute": P.plans_generate, "validate": P.plans_generate,
+                    "deploy_dry_run": P.plans_generate, "verify": P.plans_generate, "deploy_apply": P.migration_execute}
+_IDEM = re.compile(r"^[A-Za-z0-9_-]{8,64}$")
+IDEMPOTENCY_TTL = 900.0
 
 
 def create_app(settings: Optional[Settings] = None, live: Optional[Container] = None, demo: Optional[Container] = None,
@@ -71,6 +76,7 @@ def create_app(settings: Optional[Settings] = None, live: Optional[Container] = 
     app = FastAPI(title="ADF to Fabric Migration Accelerator API", version="0.1.0", docs_url=None, redoc_url=None, openapi_url=None)
     app.state.containers = {"live": live or Container(settings), "demo": demo}
     app.state.modes = {}  # scoped session key -> "live" | "demo"
+    app.state.idem = {}  # (scoped session key, Idempotency-Key) -> (time, response body): a repeated submission returns the first result
     root = app.state.containers["live"].store.projects_root
     sec = security or SecuritySettings(root=root)
     users, audit, limiter = UserStore(root), AuditLog(root), RateLimiter()
@@ -78,7 +84,7 @@ def create_app(settings: Optional[Settings] = None, live: Optional[Container] = 
     path_roots = [root, Path(tempfile.gettempdir())]
 
     app.add_middleware(CORSMiddleware, allow_origins=sec.allowed_origins or settings.allowed_origins, allow_methods=["GET", "POST", "PUT", "DELETE", "PATCH"],
-                       allow_headers=["Authorization", "Content-Type", "X-Session-Id"], allow_credentials=False)
+                       allow_headers=["Authorization", "Content-Type", "X-Session-Id", "Idempotency-Key"], allow_credentials=False)
     app.add_middleware(SecurityMiddleware, sec=sec, limiter=limiter, audit=audit)
 
     def scrubbed(message: str) -> str:
@@ -215,7 +221,7 @@ def create_app(settings: Optional[Settings] = None, live: Optional[Container] = 
                 raise HTTPException(400, "X-Session-Id must be 1-64 letters, digits, '-' or '_'.")
             self.sid = sid  # what the client sent (shown back to it)
             self.key = f"{self.principal.org}|{self.principal.id}|{sid}"  # what the server stores under: sessions never cross principals
-            mode = app.state.modes.get(self.key, "live")
+            mode = "live" if sec.is_production else app.state.modes.get(self.key, "live")
             c = app.state.containers.get(mode)
             if c is None:
                 from adf2fabric.api.demo import build_demo_container
@@ -264,7 +270,7 @@ def create_app(settings: Optional[Settings] = None, live: Optional[Container] = 
     @app.get("/me")
     def me(request: Request):
         p = _principal(request)
-        return {**p.public(), "auth_mode": _mode()}
+        return {**p.public(), "auth_mode": _mode(), "production": sec.is_production, "demo_available": not sec.is_production}
 
     @app.get("/mode")
     def get_mode(ctx: Ctx = Depends(), _: Principal = need(P.projects_view)):
@@ -274,6 +280,9 @@ def create_app(settings: Optional[Settings] = None, live: Optional[Container] = 
     def set_mode(body: S.ModeBody, request: Request, _: Principal = need(P.projects_view)):
         if body.mode not in ("live", "demo"):
             raise HTTPException(422, "mode must be 'live' or 'demo'.")
+        if body.mode == "demo" and sec.is_production:
+            audit.event("mode.demo_refused", "denied", actor=_.id, org=_.org, request_id=_rid(request))
+            raise HTTPException(403, "Demo data is not available in production mode.")
         ctx = Ctx(request)
         app.state.modes[ctx.key] = body.mode
         return {"mode": body.mode}
@@ -673,6 +682,8 @@ def create_app(settings: Optional[Settings] = None, live: Optional[Container] = 
         slug = ctx.project(pid)
         if not body.dry_run:
             ctx.require(P.migration_execute)  # creating connections in the target changes it
+            if not body.confirm:
+                raise HTTPException(422, "This changes Fabric. Confirm it (confirm: true) after reading the preview.")
         ws = body.workspace_id or ctx.session.destination.get("workspace_id")
         if ws:
             guards.valid_guid(ws, "workspace id")
@@ -690,6 +701,8 @@ def create_app(settings: Optional[Settings] = None, live: Optional[Container] = 
             raise HTTPException(422, "workspace_id is required.")
         guards.valid_guid(ws, "workspace id")
         ctx.grant("workspaces", ws, "workspace")
+        if not body.confirm:
+            raise HTTPException(422, "This changes Fabric. Confirm it (confirm: true).")
         ctx.audit("workspace_identity.provision", "requested", resource="workspace", resource_id=ws, project=slug)
         return ctx.c.connections.provision_identity(ctx.c.fabric(ctx.session), ws)
 
@@ -702,8 +715,32 @@ def create_app(settings: Optional[Settings] = None, live: Optional[Container] = 
                 "rows": json.loads((base / paths["json"]).read_text(encoding="utf-8"))}
 
     # ---- migration stages ------------------------------------------------------------------------------------------------
+    def _idem_key(ctx: Ctx, request: Request) -> Optional[tuple[str, str]]:
+        raw = request.headers.get("idempotency-key")
+        if raw is None:
+            return None
+        if not _IDEM.match(raw):
+            raise HTTPException(400, "Idempotency-Key must be 8-64 letters, digits, '-' or '_'.")
+        return (ctx.key, raw)
+
+    def _idem_replay(k: Optional[tuple[str, str]]) -> Optional[JSONResponse]:
+        import time as _t
+
+        now = _t.time()
+        for old in [x for x, (at, _b) in app.state.idem.items() if now - at > IDEMPOTENCY_TTL]:
+            del app.state.idem[old]
+        hit = app.state.idem.get(k) if k else None
+        return JSONResponse(status_code=202, content=hit[1], headers={"Idempotent-Replay": "true"}) if hit else None
+
+    def _idem_remember(k: Optional[tuple[str, str]], body: dict) -> dict:
+        import time as _t
+
+        if k:
+            app.state.idem[k] = (_t.time(), body)
+        return body
+
     @app.post("/projects/{pid}/stages/{stage}", status_code=202)
-    def stage(pid: str, stage: str, body: S.StageBody, ctx: Ctx = Depends(), _: Principal = need(P.projects_view)):
+    def stage(pid: str, stage: str, body: S.StageBody, request: Request, ctx: Ctx = Depends(), _: Principal = need(P.projects_view)):
         slug = ctx.project(pid)
         if stage not in STAGES:
             raise HTTPException(404, f"Unknown stage. Use one of: {', '.join(STAGES)}.")
@@ -724,24 +761,200 @@ def create_app(settings: Optional[Settings] = None, live: Optional[Container] = 
         elif body.workspace_id:
             guards.valid_guid(body.workspace_id, "workspace id")
             ctx.grant("workspaces", body.workspace_id, "workspace")
-        if stage in ("deploy_apply",) and body.allow_unbound:
+        if stage == "deploy_apply":
+            if not body.confirm:
+                raise HTTPException(422, "This changes Fabric. Confirm it (confirm: true) after reading the dry run.")
+            if not ctx.c.store.has_conversion(slug):
+                raise HTTPException(409, "Nothing is converted yet.", )
+            conv = ctx.c.store.load_conversion(slug)
+            wanted = {n.lower() for n in body.pipelines}
+            names = [p.fabric_pipeline_name for p in conv.pipelines if not wanted or p.source_pipeline.lower() in wanted]
+            if not names:
+                raise HTTPException(409, "None of the chosen pipelines is converted.")
+            if not deploy_record.dry_run_ok(ctx.c.store.project_dir(slug), ws or "", names):
+                raise HTTPException(409, "Run a dry run of exactly these pipelines first (it must finish with nothing refused, within the last hour).")
+        if stage == "deploy_apply" and body.allow_unbound:
             ctx.require(P.migration_execute)
+        key = _idem_key(ctx, request)
+        replay = _idem_replay(key)
+        if replay is not None:
+            return replay
         opts = body.model_dump()
         ctx.audit(f"stage.{stage}", "requested", resource="project", resource_id=slug, workspace=ws or "")
-        return ctx.c.jobs.submit(stage, slug, lambda log: run_stage(ctx.c, ctx.session, slug, stage, log, opts),
-                                 org=ctx.principal.org, owner=ctx.principal.id).public()
+        job = ctx.c.jobs.submit(stage, slug, lambda log: run_stage(ctx.c, ctx.session, slug, stage, log, opts),
+                                org=ctx.principal.org, owner=ctx.principal.id).public()
+        return _idem_remember(key, job)
+
+    def _pub_job(j, since: int = 0) -> dict:
+        """A job as the browser sees it: the result passes through the same redaction as every other view (paths, secrets and code are dropped)."""
+        d = j.public(since)
+        d["result"] = views.sanitize(d.get("result"), tuple(path_roots))
+        return d
 
     @app.get("/jobs")
     def jobs(project_id: Optional[str] = None, ctx: Ctx = Depends(), _: Principal = need(P.reports_view)):
         slug = ctx.project(project_id) if project_id else None
-        return {"jobs": [j.public() for j in ctx.c.jobs.list(slug, org=ctx.principal.org)]}
+        return {"jobs": [_pub_job(j) for j in ctx.c.jobs.list(slug, org=ctx.principal.org)]}
 
     @app.get("/jobs/{job_id}")
     def job(job_id: str, since: int = 0, ctx: Ctx = Depends(), _: Principal = need(P.reports_view)):
         j = ctx.c.jobs.get(job_id)
         if j is None or (j.org is not None and j.org != ctx.principal.org):
             raise HTTPException(404, "No such job.")  # another organisation's job looks the same as none
-        return j.public(max(0, since))
+        return _pub_job(j, max(0, since))
+
+    # ---- views for the guided UI: redacted on the server ----------------------------------------------------------------
+    def _roots() -> tuple[Path, ...]:
+        return tuple(path_roots)
+
+    @app.get("/projects/{pid}/inventory")
+    def inventory_view(pid: str, ctx: Ctx = Depends(), _: Principal = need(P.reports_view)):
+        slug = ctx.project(pid)
+        if not ctx.c.store.has_adf_semantic_discovery(slug):
+            raise HTTPException(409, "Discovery has not run for this project yet.")
+        return views.inventory(ctx.c.store, slug, _roots())
+
+    @app.get("/projects/{pid}/compatibility")
+    def compatibility_view(pid: str, ctx: Ctx = Depends(), _: Principal = need(P.reports_view)):
+        slug = ctx.project(pid)
+        return views.compatibility(ctx.c.store, slug, _roots())
+
+    @app.get("/projects/{pid}/validation")
+    def validation_view(pid: str, ctx: Ctx = Depends(), _: Principal = need(P.reports_view)):
+        slug = ctx.project(pid)
+        return views.validation_summary(ctx.c.store, slug, _roots())
+
+    @app.get("/projects/{pid}/report")
+    def report_view(pid: str, ctx: Ctx = Depends(), _: Principal = need(P.reports_view)):
+        slug = ctx.project(pid)
+        if not ctx.c.store.has_adf_semantic_discovery(slug):
+            raise HTTPException(409, "Discovery has not run for this project yet.")
+        return views.report(ctx.c.store, slug, _roots())
+
+    # ---- target provisioning (plan: read-only; approve; apply: dry run unless confirmed; verify: read-only) ------------------
+    from adf2fabric.agent.provisioning import service as prov
+    from adf2fabric.agent.provisioning.executor import ApplyRefused
+    from adf2fabric.project.provisioning import ProvisioningApproval, ProvisioningPlan, ProvisioningRun, TargetSpec
+
+    @app.get("/projects/{pid}/provisioning")
+    def provisioning_view(pid: str, ctx: Ctx = Depends(), _: Principal = need(P.reports_view)):
+        return views.provisioning(ctx.c.store, ctx.project(pid), _roots())
+
+    def _target_spec(ctx: Ctx, body: S.ProvisionPlanBody) -> TargetSpec:
+        if body.workspace_id:
+            guards.valid_guid(body.workspace_id, "workspace id")
+            ctx.grant("workspaces", body.workspace_id, "workspace")
+        elif body.workspace_name:
+            guards.valid_name(body.workspace_name, "workspace name")
+            if not ctx.principal.granted("workspaces", WILDCARD):  # a name could select any workspace: only a caller with open workspace access may use one
+                raise HTTPException(403, "Choose a workspace by id: workspaces are limited for your account.")
+        else:
+            dest_ws = ctx.session.destination.get("workspace_id")
+            if not dest_ws:
+                raise HTTPException(422, "Choose the target workspace (connect one on the Connections page).")
+            ctx.grant("workspaces", dest_ws, "workspace")
+            body = body.model_copy(update={"workspace_id": dest_ws})
+        tenant = body.tenant_id or ctx.session.destination.get("tenant_id")
+        if tenant:
+            guards.valid_guid(tenant, "tenant id")
+            ctx.grant("tenants", tenant, "tenant")
+        for v, what in ((body.capacity_id, "capacity id"),):
+            if v:
+                guards.valid_guid(v, what)
+        for n in [*body.lakehouses, *body.warehouses]:
+            guards.valid_name(n, "item name")
+        return TargetSpec(tenant_id=tenant, workspace_id=body.workspace_id, workspace_name=body.workspace_name, capacity_id=body.capacity_id,
+                          capacity_name=body.capacity_name, lakehouse_names=list(body.lakehouses), warehouse_names=list(body.warehouses),
+                          provision_workspace_identity=body.provision_identity)
+
+    @app.post("/projects/{pid}/provisioning/plan", status_code=202)
+    def provisioning_plan(pid: str, body: S.ProvisionPlanBody, ctx: Ctx = Depends(), _: Principal = need(P.plans_generate, P.azure_use)):
+        slug = ctx.project(pid)
+        spec = _target_spec(ctx, body)
+        ctx.audit("provisioning.plan", "requested", resource="project", resource_id=slug)
+
+        def work(log) -> dict[str, Any]:
+            fab, _arm = ctx.c.gateways(ctx.session)
+            log("reading the target (read-only) and planning")
+            plan = prov.plan(ctx.c.store, slug, spec, fab, None)
+            return {"message": "Plan ready: nothing was created.", "steps": plan.summary.total, "to_create": plan.summary.to_create,
+                    "blocked": plan.summary.blocked, "blockers": len(plan.blockers)}
+
+        return ctx.c.jobs.submit("provision_plan", slug, work, org=ctx.principal.org, owner=ctx.principal.id).public()
+
+    def _current_plan(ctx: Ctx, slug: str, plan_ref: str) -> ProvisioningPlan:
+        if not ctx.c.store.has_provisioning(slug, "plan"):
+            raise HTTPException(409, "There is no plan yet. Build the plan first.")
+        plan = ctx.c.store.load_provisioning(slug, "plan", ProvisioningPlan)
+        if len(plan_ref) < 12 or not plan.plan_hash.startswith(plan_ref):
+            raise HTTPException(409, "The plan changed since you reviewed it. Reload it and review it again.")
+        return plan
+
+    @app.post("/projects/{pid}/provisioning/approve")
+    def provisioning_approve(pid: str, body: S.ProvisionApproveBody, ctx: Ctx = Depends(), _: Principal = need(P.provision_approve)):
+        slug = ctx.project(pid)
+        plan = _current_plan(ctx, slug, body.plan_ref)
+        chosen = None
+        if body.steps is not None:  # the browser names steps by opaque ref; the server maps them to real step ids
+            by_ref = {views.step_ref(s.id): s.id for s in plan.steps}
+            unknown = [r for r in body.steps if r not in by_ref]
+            if unknown:
+                raise HTTPException(422, "Some of those steps are not in the current plan. Reload the plan.")
+            chosen = [by_ref[r] for r in body.steps]
+        try:
+            a = prov.approve(ctx.c.store, slug, chosen, ctx.principal.id, body.note)
+        except ApplyRefused as exc:
+            raise HTTPException(422, str(exc)) from None
+        ctx.audit("provisioning.approve", "ok", resource="project", resource_id=slug, steps=len(a.step_ids))
+        return {"approved": len(a.step_ids), "by": a.approved_by}
+
+    @app.post("/projects/{pid}/provisioning/apply", status_code=202)
+    def provisioning_apply(pid: str, body: S.ProvisionApplyBody, request: Request, ctx: Ctx = Depends(), _: Principal = need(P.migration_execute)):
+        slug = ctx.project(pid)
+        plan = _current_plan(ctx, slug, body.plan_ref)
+        if not ctx.c.store.has_provisioning(slug, "approval"):
+            raise HTTPException(409, "Nothing is approved yet.")
+        approval = ctx.c.store.load_provisioning(slug, "approval", ProvisioningApproval)
+        if approval.plan_hash != plan.plan_hash:
+            raise HTTPException(409, "The approval is for a different plan. Approve this plan first.")
+        if body.apply:
+            if not body.confirm:
+                raise HTTPException(422, "This creates or changes resources in Fabric. Confirm it (confirm: true) after the dry run.")
+            run = ctx.c.store.load_provisioning(slug, "run", ProvisioningRun) if ctx.c.store.has_provisioning(slug, "run") else None
+            if not (run and run.dry_run and run.plan_hash == plan.plan_hash and run.finished_at is not None):
+                raise HTTPException(409, "Run the dry run of this plan first.")
+        key = _idem_key(ctx, request)
+        replay = _idem_replay(key)
+        if replay is not None:
+            return replay
+        ctx.audit("provisioning.apply", "requested" if body.apply else "dry_run", resource="project", resource_id=slug)
+
+        def work(log) -> dict[str, Any]:
+            fab, _arm = ctx.c.gateways(ctx.session)
+            log("applying the approved steps" if body.apply else "dry run: nothing will be written")
+            try:
+                run, report = prov.apply(ctx.c.store, slug, fab, None, do_apply=body.apply)
+            except ApplyRefused as exc:
+                raise StageError(str(exc)) from None
+            failed = sum(1 for r in run.results if r.status.value in ("failed", "mismatch"))
+            return {"message": ("Applied. Read the verification below: only it says what exists." if body.apply else "Dry run finished: nothing was changed."),
+                    "dry_run": run.dry_run, "failed": failed, "verified": bool(report and report.all_verified)}
+
+        return _idem_remember(key, ctx.c.jobs.submit("provision_apply" if body.apply else "provision_dry_run", slug, work, org=ctx.principal.org,
+                                                      owner=ctx.principal.id).public())
+
+    @app.post("/projects/{pid}/provisioning/verify", status_code=202)
+    def provisioning_verify(pid: str, ctx: Ctx = Depends(), _: Principal = need(P.plans_generate)):
+        slug = ctx.project(pid)
+        if not ctx.c.store.has_provisioning(slug, "plan"):
+            raise HTTPException(409, "There is no plan to verify.")
+
+        def work(log) -> dict[str, Any]:
+            fab, _arm = ctx.c.gateways(ctx.session)
+            report = prov.verify(ctx.c.store, slug, fab, None)
+            return {"message": "Read back from the target.", "all_verified": report.all_verified}
+
+        return ctx.c.jobs.submit("provision_verify", slug, work, org=ctx.principal.org, owner=ctx.principal.id).public()
 
     # ---- users (own organisation only) ---------------------------------------------------------------------------------
     def _require_token_mode() -> None:

@@ -15,6 +15,7 @@ from typing import Any, Optional
 from adf2fabric.agent.discovery import DiscoveryAgent, DiscoveryRequest
 from adf2fabric.agent.discovery.adf_semantic import AdfSemanticDiscoverer, AdfSemanticDiscoveryRequest
 from adf2fabric.api.container import Container, Session, Settings
+from adf2fabric.api.demo_target import DemoFabricHttp
 from adf2fabric.connections.fabric import FabricService
 from adf2fabric.connections.models import (
     ArmResource,
@@ -278,4 +279,4 @@ def build_demo_container(settings: Optional[Settings] = None) -> Container:
                      git=DemoGit(),  # type: ignore[arg-type]
                      tester=ConnectorTester(probe=lambda h, p, t: (True, ""), sql_connect=lambda cs, t: None,
                                             driver=lambda: "ODBC Driver 18 for SQL Server", secret_reader=lambda v, n: "demo-secret"),
-                     vault_reader=lambda v, n: "demo-secret", fabric_factory=lambda s, p: fab)
+                     vault_reader=lambda v, n: "demo-secret", fabric_factory=lambda s, p: fab, fabric_http=DemoFabricHttp())

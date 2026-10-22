@@ -217,6 +217,16 @@ ROUTES = [  # (method, path, body, permissions required)
     ("POST", "/projects/demo-estate/connections/apply", {"dry_run": True, "workspace_id": WS}, {G.plans_generate}),
     ("POST", "/projects/demo-estate/connections/apply", {"dry_run": False, "workspace_id": WS}, {G.plans_generate, G.migration_execute}),
     ("POST", "/projects/demo-estate/connections/workspace-identity", {"workspace_id": WS}, {G.provision_approve, G.migration_execute}),
+    ("GET", "/projects/demo-estate/inventory", None, {G.reports_view}), ("GET", "/projects/demo-estate/compatibility", None, {G.reports_view}),
+    ("GET", "/projects/demo-estate/validation", None, {G.reports_view}), ("GET", "/projects/demo-estate/report", None, {G.reports_view}),
+    ("GET", "/projects/demo-estate/provisioning", None, {G.reports_view}),
+    ("POST", "/projects/demo-estate/stages/dependencies", {}, {G.projects_view, G.discovery_run}),
+    ("POST", "/projects/demo-estate/stages/workloads", {}, {G.projects_view, G.plans_generate}),
+    ("POST", "/projects/demo-estate/stages/validate", {"validate_stages": ["static"]}, {G.projects_view, G.plans_generate}),
+    ("POST", "/projects/demo-estate/provisioning/plan", {"workspace_id": WS}, {G.plans_generate, G.azure_use}),
+    ("POST", "/projects/demo-estate/provisioning/approve", {"plan_ref": "0" * 16}, {G.provision_approve}),
+    ("POST", "/projects/demo-estate/provisioning/apply", {"plan_ref": "0" * 16}, {G.migration_execute}),
+    ("POST", "/projects/demo-estate/provisioning/verify", {}, {G.plans_generate}),
     ("GET", "/admin/users", None, {G.users_manage}), ("GET", "/admin/audit", None, {G.users_manage}),
 ]
 ROLE_USERS = {"viewer": "vic", "analyst": "ann", "approver": "abe", "operator": "oscar", "admin": "root"}

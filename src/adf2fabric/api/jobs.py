@@ -45,8 +45,10 @@ class Job:
     owner: Optional[str] = None
 
     def public(self, since: int = 0) -> dict[str, Any]:
+        end = self.finished or time.time()
         return {"id": self.id, "kind": self.kind, "project_id": self.project_id, "state": self.state,
-                "events": self.events[since:], "next_event": len(self.events), "result": self.result, "error": self.error}
+                "events": self.events[since:], "next_event": len(self.events), "result": self.result, "error": self.error,
+                "elapsed": round(end - self.created, 1), "created": self.created, "finished": self.finished}
 
 
 class JobRegistry:

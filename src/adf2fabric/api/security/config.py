@@ -11,6 +11,7 @@
 | ADF2FABRIC_RATE_LIMIT_PER_MIN     | requests per minute per principal                                                             | 300 |
 | ADF2FABRIC_SENSITIVE_RATE_PER_MIN | requests per minute per principal for sign-in, import, upload and apply operations            | 20 |
 | ADF2FABRIC_MAX_JSON_BYTES         | largest JSON request body                                                                     | 1 MiB |
+| ADF2FABRIC_ENV                    | ``production`` disables demo mode (no canned data, no stand-in Fabric)                         | unset |
 """
 
 from __future__ import annotations
@@ -48,6 +49,7 @@ class SecuritySettings:
     max_json_bytes: int = 0
     auth_fail_limit: int = 8  # failed sign-ins per client per window before it is locked out
     auth_fail_window: int = 300  # seconds
+    production: Optional[bool] = None  # None = ADF2FABRIC_ENV=production. Production refuses demo mode: no canned data can pass for a real result
 
     def __post_init__(self) -> None:
         self.allowed_hosts = self.allowed_hosts or _list("ADF2FABRIC_ALLOWED_HOSTS", ",".join(LOOPBACK_HOSTS))
@@ -57,6 +59,12 @@ class SecuritySettings:
         self.rate_per_min = self.rate_per_min or _int("ADF2FABRIC_RATE_LIMIT_PER_MIN", 300)
         self.sensitive_per_min = self.sensitive_per_min or _int("ADF2FABRIC_SENSITIVE_RATE_PER_MIN", 20)
         self.max_json_bytes = self.max_json_bytes or _int("ADF2FABRIC_MAX_JSON_BYTES", 1024 * 1024)
+
+    @property
+    def is_production(self) -> bool:
+        if self.production is not None:
+            return self.production
+        return (os.environ.get("ADF2FABRIC_ENV") or "").strip().lower() == "production"
 
     @property
     def legacy_token(self) -> Optional[str]:

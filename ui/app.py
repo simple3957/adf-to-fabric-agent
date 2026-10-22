@@ -66,6 +66,9 @@ def top_bar() -> None:
             _sign_in(api)
             st.stop()
         st.session_state.permissions = set(who.get("permissions") or [])
+        st.session_state.demo_available = bool(who.get("demo_available", True))
+        if who.get("production"):
+            st.session_state.pop("mode", None)
         if who.get("auth_mode") == "token":
             with st.popover(f"{who['id']} ({who['org']})"):
                 st.caption("Roles: " + ", ".join(who.get("roles") or []))
@@ -100,13 +103,18 @@ def top_bar() -> None:
                 st.session_state.project_id = choice
             elif current:
                 st.session_state.pop("project_id", None)
-        demo = mode_col.toggle("Demo", value=mode == "demo", help="Sample data and canned Azure/Fabric, no sign-in needed.")
-        if demo != (mode == "demo"):
+        demo_ok = st.session_state.get("demo_available", True)
+        demo = mode_col.toggle("Demo", value=mode == "demo", disabled=not demo_ok,
+                               help="Sample data and canned Azure/Fabric, no sign-in needed." if demo_ok else "Demo data is switched off in production mode.")
+        if demo_ok and demo != (mode == "demo"):
             call(api.set_mode, "demo" if demo else "live")
             for k in ("project_id", "conversion", "deploy", "confirmed", "step"):
                 st.session_state.pop(k, None)
             st.rerun()
     st.session_state.mode = mode
+    if mode == "demo":  # never let sample data pass for a real result: say so on every page
+        theme.html_block('<div class="ma-note" role="status">🧪 <span><strong>DEMO DATA.</strong> Everything on this page is a sample. '
+                         'Nothing was read from or sent to Azure or Fabric, and no result here is real.</span></div>')
 
 
 top_bar()

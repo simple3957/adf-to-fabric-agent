@@ -60,7 +60,7 @@ class Container:
                  azure: Optional[AzureCliProvider] = None, fabric_cli: Optional[FabricCliProvider] = None,
                  git: Optional[GitProvider] = None, tester: Optional[ConnectorTester] = None,
                  vault_reader: Optional[Callable[[str, str], str]] = None,
-                 fabric_factory: Optional[Callable[["Session", str], FabricService]] = None):
+                 fabric_factory: Optional[Callable[["Session", str], FabricService]] = None, fabric_http: Any = None):
         self.settings = settings or Settings()
         self.mode = mode
         self.store = store or ProjectStore(self.settings.projects_dir or projects_root(load_config()))
@@ -72,6 +72,7 @@ class Container:
         self.sessions: dict[str, Session] = {}
         self._vault_reader = vault_reader
         self._fabric_factory = fabric_factory
+        self.fabric_http = fabric_http  # demo only: an in-memory Fabric REST stand-in; None means the real service
         self.connections = ConnectionService(self.store, self.vault, tester or ConnectorTester(secret_reader=self.read_vault_secret),
                                              secret_reader=self.read_vault_secret)
         self.upload_dir = Path(tempfile.gettempdir()) / "adf2fabric-uploads"
@@ -96,6 +97,25 @@ class Container:
         tenant = session.destination.get("tenant_id")
         who = account or session.destination.get("account")
         return FabricService(RestFabricApi(lambda: self.azure.token(tenant=tenant, account=who, resource=FABRIC_RESOURCE)))
+
+    # ---- Fabric REST (deploy, verify, validation, provisioning) ----------------------------------------------------------
+    def fabric_token(self, session: Session) -> str:
+        """A Fabric token for the session's destination account. Demo mode returns a placeholder that only its own stand-in accepts."""
+        if self.fabric_http is not None:
+            return "demo-token"
+        dest = session.destination
+        return self.azure.token(tenant=dest.get("tenant_id"), account=dest.get("account"), resource=FABRIC_RESOURCE)
+
+    def gateways(self, session: Session, need_arm: bool = False):
+        """(Fabric gateway, ARM gateway or None) for provisioning and validation. Each gets a token PROVIDER for its own audience."""
+        from adf2fabric.agent.provisioning.transport import ArmGateway, FabricGateway
+
+        dest = session.destination
+        fab = FabricGateway(lambda: self.fabric_token(session), session=self.fabric_http)
+        arm = None
+        if need_arm and self.fabric_http is None:
+            arm = ArmGateway(lambda: self.azure.token(tenant=dest.get("tenant_id"), account=dest.get("account"), resource=cloud.ARM_RESOURCE))
+        return fab, arm
 
     # ---- Key Vault ---------------------------------------------------------------------------------------------
     def read_vault_secret(self, vault_url: str, secret_name: str) -> str:

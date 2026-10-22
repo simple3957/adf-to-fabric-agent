@@ -254,6 +254,10 @@ def make_plan_and_state(store, project_id: str, spec: TargetSpec, fab: FabricGat
     checks += arm_checks(arm, spec, ctx)  # fills ctx.sku_regions, which the capacity step's plan then uses
     steps = [HANDLERS[r.type].plan(ctx, r) for r in reqs]
     steps = order(steps)
+    if state.workspace is not None and state.workspace.name:  # show the workspace by its name; the id stays inside the step id
+        for s in steps:
+            if s.type in (T.workspace, T.capacity_assignment, T.workspace_identity) and s.name == (spec.workspace_id or ""):
+                s.name = state.workspace.name
     _propagate(steps)
     blockers = [f"{c.name}: {c.detail}" for c in checks if c.blocking]
     for s in steps:

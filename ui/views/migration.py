@@ -6,9 +6,11 @@ import io
 import streamlit as st
 
 import panels
+import panels_ext
 import theme
 from components import call, client
-from journey import STEPS, connect_facts, convert_facts, deploy_facts, discover_facts, done_count, first_open, statuses
+from journey import (STEPS, connect_facts, convert_facts, deploy_facts, discover_facts, done_count, first_open, plan_facts, report_facts, review_facts,
+                     statuses, validate_facts)
 
 api = client()
 pid = st.session_state.get("project_id")
@@ -33,9 +35,14 @@ if conversion is None and discovered and project.get("has_conversion") and pid n
     elif saved:
         st.session_state.setdefault("stale_conv", set()).add(pid)  # asked once; converting again replaces it
 deployed = st.session_state.get("deploy", {}).get(pid)
+inventory = call(api.inventory, pid) if discovered else None
+provisioning = call(api.provisioning, pid) if discovered else None
+validation = call(api.validation, pid) if discovered else None
+report = call(api.report, pid) if discovered else None
 
-facts = {"discover": discover_facts(project, found), "connect": connect_facts(cards),
-         "convert": convert_facts(conversion), "deploy": deploy_facts(deployed)}
+facts = {"discover": discover_facts(project, found), "review": review_facts(inventory), "connect": connect_facts(cards),
+         "plan": plan_facts(provisioning), "convert": convert_facts(conversion), "validate": validate_facts(validation),
+         "deploy": deploy_facts(deployed), "report": report_facts(report)}
 confirmed: set = st.session_state.setdefault("confirmed", {}).setdefault(pid, set())
 steps = statuses(facts, confirmed)
 by_key = {s.step.key: s for s in steps}
@@ -68,18 +75,19 @@ with left, st.container(key="stepper"):
 with right:
     # ---- completion -----------------------------------------------------------------------------------------------------------
     if done == len(steps):
+        # Every step was confirmed, but "done" is the backend's word, not ours: only a verified validation may say the migration worked.
         buf = io.StringIO()
         w = csv.writer(buf)
-        w.writerow(["pipeline", "conversion status", "ready to run", "deploy action", "item id", "detail"])
-        deploys = {r["name"]: r for r in (deployed or {}).get("results", [])}
-        for p in (conversion or {}).get("pipelines", []):
-            d = deploys.get(p["name"], {})
-            w.writerow([p["name"], p["status"], p["runtime_ready"], d.get("action", ""), d.get("item_id", ""), d.get("detail", "")])
+        w.writerow(["pipeline", "state", "why"])
+        for p in (report or {}).get("pipelines", []):
+            w.writerow([p["name"], p["state"], "; ".join(p["reasons"])])
         with st.container(key="done"):
-            st.markdown("### 🎉 Migration complete")
-            st.caption(facts["deploy"].outcome)
-            st.download_button("Download report (CSV)", buf.getvalue().encode("utf-8-sig"), file_name=f"{pid}-migration-report.csv",
-                               mime="text/csv")
+            if report and report.get("full_success"):
+                st.markdown("### Migration verified")
+            else:
+                st.markdown("### All steps were walked through, but the migration is not verified")
+            st.caption((report or {}).get("headline", "No validation result."))
+            st.download_button("Download report (CSV)", buf.getvalue().encode("utf-8-sig"), file_name=f"{pid}-migration-report.csv", mime="text/csv")
 
     # ---- selected step --------------------------------------------------------------------------------------------------------
     cur = by_key[selected]
@@ -92,7 +100,7 @@ with right:
             later = [s.step.title for s in steps[cur.index + 1:] if s.confirmed]
             st.write("This clears the confirmation of this step" + (f" and of: {', '.join(later)}." if later else "."))
             if cur.step.key in ("convert", "deploy"):
-                st.write("It also forgets this session's results for the step. Files in the project are kept.")
+                st.write("It also forgets this session's results for the step. Files in the project and anything already created in Fabric are kept.")
             if st.button("Reset", type="primary", key="reset-go"):
                 for s in steps[cur.index:]:
                     confirmed.discard(s.step.key)
@@ -104,12 +112,20 @@ with right:
 
         if selected == "discover":
             panels.discover(api, pid, project, found)
+        elif selected == "review":
+            panels_ext.review(api, pid, inventory)
         elif selected == "connect":
             panels.connect(api, pid, cards, dest.get("workspace_id"))
+        elif selected == "plan":
+            panels_ext.plan(api, pid, dest, provisioning)
         elif selected == "convert":
             panels.convert(api, pid, conversion)
-        else:
+        elif selected == "validate":
+            panels_ext.validate(api, pid, validation)
+        elif selected == "deploy":
             panels.deploy(api, pid, dest, conversion, deployed)
+        else:
+            panels_ext.report(api, pid, report, dest)
 
         # ---- next bar: where the step stands, and the way forward ----------------------------------------------------------------
         nxt = steps[cur.index + 1] if cur.index + 1 < len(steps) else None
