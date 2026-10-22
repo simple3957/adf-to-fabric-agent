@@ -19,6 +19,7 @@ from pathlib import Path
 
 import yaml
 
+from adf2fabric.project.dependencies import DependencyInventory
 from adf2fabric.project.discovery import (
     AdfDiscovery,
     AdfSemanticDiscovery,
@@ -404,6 +405,35 @@ class ProjectStore:
         with path.open(encoding="utf-8") as f:
             data = _safe_load(f)
         return AdfSemanticDiscovery.model_validate(data)
+
+    # --- Dependency inventory (built from the semantic record + the source manifest) ---------------------------
+
+    def dependency_inventory_path(self, project_id: str) -> Path:
+        return self.discovery_dir(project_id) / "dependencies.yaml"
+
+    def dependency_report_path(self, project_id: str) -> Path:
+        return self.discovery_dir(project_id) / "dependency-report.md"
+
+    def has_dependency_inventory(self, project_id: str) -> bool:
+        return self.dependency_inventory_path(project_id).exists()
+
+    def save_dependency_inventory(self, project_id: str, inventory: DependencyInventory, report_markdown: str = "") -> Path:
+        self.discovery_dir(project_id).mkdir(parents=True, exist_ok=True)
+        path = self.dependency_inventory_path(project_id)
+        with path.open("w", encoding="utf-8") as f:
+            yaml.safe_dump(json.loads(inventory.model_dump_json()), f, sort_keys=False)
+        if report_markdown:
+            self.dependency_report_path(project_id).write_text(report_markdown, encoding="utf-8")
+        return path
+
+    def load_dependency_inventory(self, project_id: str) -> DependencyInventory:
+        path = self.dependency_inventory_path(project_id)
+        if not path.exists():
+            raise ProjectNotFoundError(
+                f"No dependency inventory for '{project_id}' under {self.projects_root}. "
+                "Run `adf2fabric discovery-dependencies` first.")
+        with path.open(encoding="utf-8") as f:
+            return DependencyInventory.model_validate(_safe_load(f))
 
     # --- Conversion record + generated Fabric artifacts ----------------------
 

@@ -650,6 +650,42 @@ def discovery_adf(
     click.echo(f"  record: {store.adf_discovery_path(d.project_id)}")
 
 
+@cli.command(name="discovery-dependencies")
+@click.option("--project", "project_name", required=True, help="Project name (`discovery-adf-semantic` must have run).")
+@click.option("--check", "checks", multiple=True, type=click.Choice(["databricks", "key_vault", "storage", "network"]),
+              help="Probe this provider's external targets (repeatable). Default: contact nothing.")
+@click.option("--databricks-token-env", default=None, help="NAME of the env var holding a Databricks token.")
+@click.option("--keyvault-token-env", default=None, help="NAME of the env var holding a Key Vault token.")
+@click.option("--storage-token-env", default=None, help="NAME of the env var holding a Storage token.")
+@click.option("--allow-az-tokens", is_flag=True, help="Let a check ask `az` for a token for THAT provider's audience.")
+def discovery_dependencies(project_name: str, checks: tuple, databricks_token_env: Optional[str],
+                           keyvault_token_env: Optional[str], storage_token_env: Optional[str], allow_az_tokens: bool) -> None:
+    """Dependency inventory: what the estate depends on, whether it resolves, and the migration order."""
+    from adf2fabric.agent.dependencies import DependencyDiscoveryError, discover_dependencies
+    from adf2fabric.agent.dependencies.access import TokenSource
+
+    store = ProjectStore(projects_root(load_config()))
+    env = {k: v for k, v in (("databricks", databricks_token_env), ("key_vault", keyvault_token_env),
+                             ("storage", storage_token_env)) if v}
+    try:
+        inv = discover_dependencies(store, project_name, checks, TokenSource(env_names=env, allow_az=allow_az_tokens))
+    except DependencyDiscoveryError as exc:
+        click.secho(str(exc), fg="red", err=True)
+        sys.exit(1)
+    s = inv.summary
+    click.echo("DEPENDENCY INVENTORY")
+    click.echo(f"  project: {inv.project_id}   source: {inv.source.source_type}   version: {inv.source.version[:12]}")
+    click.echo(f"  dependencies: {s.total}   blocking: {s.blocking}   errors: {s.findings_error}   warnings: {s.findings_warning}")
+    click.echo(f"  resolution: {s.by_resolution}")
+    click.echo(f"  migration:  {s.by_category}")
+    click.echo(f"  access:     {s.by_access or 'not checked (nothing external was contacted)'}")
+    click.echo(f"  cycles: {len(inv.cycles)}   source gaps: {len(inv.source_gaps)}   waves: {len(inv.waves)}")
+    for f in [f for f in inv.findings if f.severity.value == "error"][:10]:
+        click.secho(f"  ERROR {f.code}: {f.message}", fg="red")
+    click.echo(f"  record: {store.dependency_inventory_path(inv.project_id)}")
+    click.echo(f"  report: {store.dependency_report_path(inv.project_id)}")
+
+
 @cli.command(name="discovery-adf-semantic")
 @click.option(
     "--project",

@@ -155,6 +155,11 @@ def build_dependency_graph(pipeline_name: str, flat: list[AdfActivity],
                               scope_count=len(scopes))
 
 
+def strongly_connected_components(succ: dict[int, set[int]]) -> list[list[int]]:
+    """Strongly connected components of a graph given as node -> successors (iterative Tarjan; each sorted)."""
+    return _components(succ)
+
+
 def _components(succ: dict[int, set[int]]) -> list[list[int]]:
     """Strongly connected components (Tarjan), iterative so a very long chain cannot hit the recursion limit."""
     index_of: dict[int, int] = {}
