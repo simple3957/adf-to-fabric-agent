@@ -1,0 +1,17 @@
+{
+  "name": "NB_Params",
+  "properties": {
+    "nbformat": 4,
+    "nbformat_minor": 2,
+    "bigDataPool": {"referenceName": "pool1", "type": "BigDataPoolReference"},
+    "sessionProperties": {"driverMemory": "28g", "driverCores": 4, "executorMemory": "28g", "executorCores": 4, "numExecutors": 2},
+    "metadata": {"language_info": {"name": "python"}},
+    "cells": [
+      {"cell_type": "code", "metadata": {"tags": ["parameters"]}, "source": ["folder = \"in\"\n", "limit = 10"]},
+      {"cell_type": "code", "metadata": {}, "source": [
+        "files = mssparkutils.fs.ls(\"abfss://c@acctsyn.dfs.core.windows.net/\" + folder)\n",
+        "tok = mssparkutils.credentials.getToken(\"storage\")\n",
+        "mssparkutils.notebook.exit(str(len(files)))"]}
+    ]
+  }
+}

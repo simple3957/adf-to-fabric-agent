@@ -1,0 +1,12 @@
+{
+  "name": "NB_DotNet",
+  "properties": {
+    "nbformat": 4,
+    "nbformat_minor": 2,
+    "metadata": {"language_info": {"name": "python"}},
+    "cells": [
+      {"cell_type": "code", "metadata": {}, "source": ["df = spark.range(1)"]},
+      {"cell_type": "code", "metadata": {}, "source": ["%%csharp\n", "using Microsoft.Spark.Sql;\n", "var x = 1;"]}
+    ]
+  }
+}

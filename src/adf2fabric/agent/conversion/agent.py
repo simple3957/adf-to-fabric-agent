@@ -118,6 +118,13 @@ class ConversionAgent:
 
         resolutions = Resolutions.load(Path(request.resolutions_path) if request.resolutions_path else None)
         ctx = build_project_context(d, resolutions)
+        if self.store.has_workload_manifest(project.id):
+            try:
+                wm = self.store.load_workload_manifest(project.id)
+                ctx.workloads = {w.source_item.lower(): w for w in wm.workloads
+                                 if w.approval.status == 'approved' and w.artifact.fabric_item_id}
+            except Exception:  # noqa: BLE001 - a damaged manifest must not stop conversion; the default path is unaffected
+                ctx.workloads = {}
         compute_sources = load_sources(request.compute_sources_path)
         wanted = {n.lower() for n in request.pipelines}
         selected = [p for p in sorted(d.pipelines, key=lambda p: p.name.lower())

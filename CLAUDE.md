@@ -14,7 +14,7 @@ streamlit run ui/app.py                 # UI on http://localhost:8501 (add ?demo
 adf2fabric --help                       # CLI
 ```
 
-CLI commands (`src/adf2fabric/cli.py`): `intake`, `consultation`, `discovery`, `discovery-adls`, `discovery-adls-paths`, `discovery-sql`, `discovery-sql-structural`, `discovery-adf`, `discovery-adf-semantic`, `discovery-dependencies`, `convert`, `reconstruct`, `deploy`, `deploy-notebook`, `create-shortcut`, `fetch-databricks-notebooks`, `run`, `verify`, `handover`, `compute-deploy`, `assess-compute`. Each takes `--project <name>`; state lives under `projects/<name>/` (see `project/store.py`).
+CLI commands (`src/adf2fabric/cli.py`): `intake`, `consultation`, `discovery`, `discovery-adls`, `discovery-adls-paths`, `discovery-sql`, `discovery-sql-structural`, `discovery-adf`, `discovery-adf-semantic`, `discovery-dependencies`, `workloads-assess`, `workloads-generate`, `workloads-approve`, `workloads-deploy`, `workloads-record-run`, `convert`, `reconstruct`, `deploy`, `deploy-notebook`, `create-shortcut`, `fetch-databricks-notebooks`, `run`, `verify`, `handover`, `compute-deploy`, `assess-compute`. Each takes `--project <name>`; state lives under `projects/<name>/` (see `project/store.py`).
 
 ## Layout (`src/adf2fabric/`)
 
@@ -25,6 +25,7 @@ CLI commands (`src/adf2fabric/cli.py`): `intake`, `consultation`, `discovery`, `
 | `agent/consultation/` | Readiness gate |
 | `agent/discovery/` | Repository, ADF, semantic parser, ADLS, SQL discovery |
 | `agent/dependencies/` | Dependency inventory and migration order from the semantic record + source manifest; opt-in per-provider access checks ([docs](docs/dependency-inventory.md)) |
+| `agent/workloads/` | Spark workload migration: retrieve code (only when authorised), analyze, classify, generate Fabric notebook / Spark job definition, manifest ([docs](docs/workload-migration.md)) |
 | `agent/reconstruction/` | Incomplete-pipeline detection and proposals |
 | `agent/conversion/` | Activity handler registry (`handlers/`), expression converter, triggers, validation |
 | `agent/assessment/` | Compute and capacity assessment |
@@ -43,6 +44,7 @@ Per-agent operating instructions are in `skills/`. Per-stage references are in `
 - Fabric has no datasets. They are inlined into each activity as `datasetSettings` (`conversion/handlers/_common.py`).
 - An unregistered activity type becomes an explicit blocker, never silently dropped. Keep it that way when adding handlers.
 - Discovery accounts for everything it sees: each activity is a record (checked by an independent raw scan, `AdfPipeline.inventory`) and each source artifact is a record or an `unprocessed_artifacts` entry with a reason. A new activity type needs an `ActivitySpec` taken from Microsoft's schema AND a fixture in `tests/fixtures/adf_activities/` (a test enforces both).
+- Fabric compute migration of Spark workloads is opt-in and approval-gated; `convert` keeps Databricks as the default. A generated artifact is not a verified one: only `workloads-record-run` sets `execution.status`. Never generate a placeholder for an unconvertible workload.
 - Deploy defaults to dry run. It refuses unbound placeholders (notebook, dataflow, Spark job ids) unless `--allow-unbound`.
 - Triggers are created disabled and never duplicated.
 - `agent/conversion/preflight.py` reports source problems conversion cannot fix (reserved SQL aliases from Microsoft's keyword list, linked-service parameters with no value, Wait-only pipelines). They are findings, never blockers.

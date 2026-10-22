@@ -33,7 +33,7 @@ from adf2fabric.project.models import (
     SqlTlsMode,
     SqlTlsPolicy,
 )
-from adf2fabric.project.store import ProjectStore, slugify
+from adf2fabric.project.store import ProjectNotFoundError, ProjectStore, slugify
 
 
 # --- shared Azure authentication options ---------------------------------------------------------------
@@ -648,6 +648,176 @@ def discovery_adf(
     click.echo(f"ARM collection GETs performed: {len(d.collections_queried)}")
     click.echo("writes = 0   non-GET requests = 0")
     click.echo(f"  record: {store.adf_discovery_path(d.project_id)}")
+
+
+def _kv_pairs(items: tuple, what: str) -> dict:
+    out: dict = {}
+    for item in items:
+        key, sep, val = item.partition("=")
+        if not sep or not key.strip() or not val.strip():
+            raise click.UsageError(f"{what} must look like NAME=VALUE, got '{item}'.")
+        out[key.strip()] = val.strip()
+    return out
+
+
+def _workload_options(generate, compute_sources, fetch, databricks_token_env, allow_az_tokens, sources, artifacts,
+                      secret_maps, lakehouse_id, pipelines):
+    from adf2fabric.agent.dependencies.access import TokenSource
+    from adf2fabric.agent.workloads.engine import Options
+
+    env = {"databricks": databricks_token_env} if databricks_token_env else {}
+    return Options(compute_sources=compute_sources, tokens=TokenSource(env_names=env, allow_az=allow_az_tokens),
+                   fetch=bool(fetch or databricks_token_env or allow_az_tokens), local_files=_kv_pairs(sources, "--source"),
+                   artifacts=_kv_pairs(artifacts, "--artifact"), secret_map=_kv_pairs(secret_maps, "--secret-map"),
+                   lakehouse_id=lakehouse_id, pipelines={p.lower() for p in pipelines} or None, generate=generate)
+
+
+def _workload_options_decorator(fn):
+    for opt in reversed([
+        click.option("--project", "project_name", required=True, help="Project name (`discovery-adf-semantic` must have run)."),
+        click.option("--compute-sources", "compute_sources", type=click.Path(exists=True, dir_okay=False), default=None,
+                     help="Compute sources file (cluster / Synapse pool details the ADF source does not hold)."),
+        click.option("--databricks-token-env", default=None, help="NAME of the env var holding a Databricks token. Offering one lets code be retrieved."),
+        click.option("--allow-az-tokens", is_flag=True, help="Let retrieval ask `az` for a token for the Databricks audience."),
+        click.option("--fetch", is_flag=True, help="Retrieve code from the source platform (needs a credential)."),
+        click.option("--source", "sources", multiple=True, help="SOURCE_PATH=LOCAL_FILE: code you already hold. Repeatable."),
+        click.option("--artifact", "artifacts", multiple=True, help="SOURCE_FILE_OR_MAIN_CLASS=abfss://...: where you uploaded a file. Repeatable."),
+        click.option("--secret-map", "secret_maps", multiple=True, help="DATABRICKS_SECRET_SCOPE=https://<vault>.vault.azure.net/. Repeatable."),
+        click.option("--lakehouse-id", default=None, help="Default lakehouse (GUID) for generated Spark job definitions."),
+        click.option("--pipeline", "pipelines", multiple=True, help="Only workloads used by this pipeline. Repeatable."),
+    ]):
+        fn = opt(fn)
+    return fn
+
+
+def _print_manifest(store, m) -> None:
+    s = m.summary
+    click.echo(f"  workloads: {s.total}   {s.by_classification}")
+    click.echo(f"  generated: {s.generated}   with open issues: {s.generated_with_open_issues}   not generated: {s.not_generated}   "
+               f"approved: {s.approved}   verified executing in Fabric: {s.executed_in_fabric}")
+    for w in m.workloads:
+        click.echo(f"  - {w.source_item}: {w.classification.value}; code {w.code.status.value}; {w.generation.status}; approval {w.approval.status}")
+    click.echo(f"  manifest: {store.workload_manifest_path(m.project_id)}")
+    click.echo(f"  report:   {store.workload_report_path(m.project_id)}")
+
+
+@cli.command(name="workloads-assess")
+@_workload_options_decorator
+def workloads_assess(project_name, compute_sources, databricks_token_env, allow_az_tokens, fetch, sources, artifacts, secret_maps,
+                     lakehouse_id, pipelines) -> None:
+    """Assess Spark workloads for Fabric (read-only; writes only the manifest and any code you authorised retrieving)."""
+    from adf2fabric.agent.workloads.engine import build_manifest
+    from adf2fabric.agent.workloads.report import render_report
+
+    store = ProjectStore(projects_root(load_config()))
+    opts = _workload_options(False, compute_sources, fetch, databricks_token_env, allow_az_tokens, sources, artifacts, secret_maps,
+                             lakehouse_id, pipelines)
+    m = build_manifest(store, project_name, opts)
+    store.save_workload_manifest(project_name, m, render_report(m))
+    click.echo("WORKLOAD ASSESSMENT (nothing was generated or sent to Fabric)")
+    _print_manifest(store, m)
+
+
+@cli.command(name="workloads-generate")
+@_workload_options_decorator
+def workloads_generate(project_name, compute_sources, databricks_token_env, allow_az_tokens, fetch, sources, artifacts, secret_maps,
+                       lakehouse_id, pipelines) -> None:
+    """Generate Fabric artifacts (notebooks, Spark job definitions) locally. Explicit opt-in; nothing is sent to Fabric."""
+    from adf2fabric.agent.workloads.engine import build_manifest
+    from adf2fabric.agent.workloads.report import render_report
+
+    store = ProjectStore(projects_root(load_config()))
+    opts = _workload_options(True, compute_sources, fetch, databricks_token_env, allow_az_tokens, sources, artifacts, secret_maps,
+                             lakehouse_id, pipelines)
+    m = build_manifest(store, project_name, opts)
+    store.save_workload_manifest(project_name, m, render_report(m))
+    click.echo("WORKLOAD GENERATION (files written under workloads/artifacts; static checks only, NOT run in Fabric)")
+    _print_manifest(store, m)
+
+
+@cli.command(name="workloads-approve")
+@click.option("--project", "project_name", required=True)
+@click.option("--workload", "workload", required=True, help="Workload id, source item or name (see the manifest).")
+@click.option("--by", "by", required=True, help="Who is approving.")
+@click.option("--reject", is_flag=True, help="Record a rejection instead.")
+@click.option("--note", default="", help="Why (optional).")
+def workloads_approve(project_name: str, workload: str, by: str, reject: bool, note: str) -> None:
+    """Approve (or reject) a workload's CURRENT generated artifact for deployment to Fabric."""
+    from adf2fabric.agent.workloads.lifecycle import LifecycleError, approve
+
+    store = ProjectStore(projects_root(load_config()))
+    try:
+        w = approve(store, project_name, workload, by=by, approve=not reject, note=note)
+    except (LifecycleError, ProjectNotFoundError) as exc:
+        click.secho(str(exc), fg="red", err=True)
+        sys.exit(1)
+    click.echo(f"{w.id}: {w.approval.status} by {w.approval.by}")
+    if w.unresolved and not reject:
+        click.secho(f"  note: {len(w.unresolved)} open issue(s) remain; approval accepts them. See the report.", fg="yellow")
+
+
+@cli.command(name="workloads-deploy")
+@click.option("--project", "project_name", required=True)
+@click.option("--workspace-id", "workspace_id", required=True, help="Target Fabric workspace id (GUID).")
+@click.option("--workload", "workloads", multiple=True, help="Only these workloads (default: every approved one).")
+@click.option("--resolutions", "resolutions_path", type=click.Path(dir_okay=False), default=None,
+              help="With --apply: record notebook ids here so `convert --resolutions` binds the pipeline to them.")
+@azure_auth_options()
+@click.option("--apply", "apply_", is_flag=True, help="Actually create or update the Fabric items. Without it this only checks.")
+def workloads_deploy(project_name, workspace_id, workloads, resolutions_path, apply_, auth, **auth_env) -> None:
+    """Deploy APPROVED generated artifacts to Fabric (dry run unless --apply). Never deletes anything."""
+    from pathlib import Path
+
+    from adf2fabric.agent.deployment.fabric_deploy import FABRIC_SCOPE, FabricClient
+    from adf2fabric.agent.workloads.lifecycle import LifecycleError, deploy
+    from adf2fabric.connectivity._azure import CredentialUnavailable, build_credential
+
+    store = ProjectStore(projects_root(load_config()))
+    try:
+        credential, _ = build_credential(credential_from(auth, **auth_env))
+        client = FabricClient(credential.get_token(FABRIC_SCOPE).token)
+        results = deploy(store, project_name, client, workspace_id, list(workloads), apply=apply_,
+                         resolutions=Path(resolutions_path) if resolutions_path else None)
+    except (LifecycleError, ProjectNotFoundError, CredentialUnavailable) as exc:
+        click.secho(f"Workload deploy failed: {exc}", fg="red", err=True)
+        sys.exit(1)
+    except Exception as exc:  # noqa: BLE001 - message carries no token
+        click.secho(f"Workload deploy failed: could not get a Fabric token or reach Fabric ({type(exc).__name__}).", fg="red", err=True)
+        sys.exit(1)
+    click.echo(("DEPLOY WORKLOADS" if apply_ else "DEPLOY WORKLOADS (dry run - nothing changed; add --apply)") + f"  workspace: {workspace_id}")
+    for w, msg in results:
+        click.echo(f"  - {w.source_item}: {msg}")
+    click.echo("  Deployed is not verified: run the pipeline, then `workloads-record-run`.")
+
+
+@cli.command(name="workloads-record-run")
+@click.option("--project", "project_name", required=True)
+@click.option("--workspace-id", "workspace_id", required=True)
+@click.option("--pipeline", "pipeline", required=True, help="The Fabric pipeline whose latest finished run exercised the workload.")
+@click.option("--workload", "workload", required=True)
+@azure_auth_options()
+def workloads_record_run(project_name, workspace_id, pipeline, workload, auth, **auth_env) -> None:
+    """Record execution evidence from the latest finished Fabric run of a pipeline (read-only against Fabric)."""
+    from adf2fabric.agent.deployment.fabric_deploy import FABRIC_SCOPE, FabricClient
+    from adf2fabric.agent.deployment.fabric_run import latest_run
+    from adf2fabric.agent.workloads.lifecycle import LifecycleError, record_run
+    from adf2fabric.connectivity._azure import CredentialUnavailable, build_credential
+
+    store = ProjectStore(projects_root(load_config()))
+    try:
+        credential, _ = build_credential(credential_from(auth, **auth_env))
+        client = FabricClient(credential.get_token(FABRIC_SCOPE).token)
+        run = latest_run(client, workspace_id, pipeline)
+        if run is None:
+            raise LifecycleError(f"Pipeline '{pipeline}' has no finished run in the workspace.")
+        w = record_run(store, project_name, workload, run)
+    except (LifecycleError, ProjectNotFoundError, CredentialUnavailable) as exc:
+        click.secho(f"Record failed: {exc}", fg="red", err=True)
+        sys.exit(1)
+    except Exception as exc:  # noqa: BLE001
+        click.secho(f"Record failed: could not reach Fabric ({type(exc).__name__}).", fg="red", err=True)
+        sys.exit(1)
+    click.echo(f"{w.id}: execution {w.execution.status} (run {w.execution.run_id}) {w.execution.detail}")
 
 
 @cli.command(name="discovery-dependencies")

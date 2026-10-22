@@ -133,6 +133,9 @@ class ProjectContext:
     globals_needed: dict[str, list[str]] = field(default_factory=dict)  # pipeline(lower) -> global names
     ir_kinds: dict[str, Optional[str]] = field(default_factory=dict)  # integration runtime (lower) -> kind
     prereqs: dict[tuple[str, str], Prerequisite] = field(default_factory=dict)
+    # Spark workloads that were approved AND deployed to Fabric (workloads-deploy): source item (lower) -> manifest entry.
+    # Empty unless the user opted in; conversion then still defaults to running the source compute.
+    workloads: dict[str, Any] = field(default_factory=dict)
 
     # -- bindings ------------------------------------------------------------------------------------
     def _prereq(self, kind: str, name: str, detail: str, token: str, bound: bool, needed_by: str) -> Prerequisite:

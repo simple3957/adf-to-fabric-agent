@@ -212,6 +212,38 @@ class DatabricksClient:
         return raw, language
 
 
+    def read_dbfs(self, path: str, max_bytes: int = 5 * 1024 * 1024) -> bytes:
+        """The bytes of one DBFS file (``dbfs:/...``), read in the API's 1 MB pieces. Read-only; refused above ``max_bytes``."""
+        dbfs = path[len("dbfs:"):] if path.startswith("dbfs:") else path
+        if not dbfs.startswith("/"):
+            raise DatabricksError("bad_path", "A DBFS path must look like dbfs:/folder/file.")
+        info_resp = self._get("/api/2.0/dbfs/get-status", {"path": dbfs})
+        if info_resp.status_code != 200:
+            raise self._fail(info_resp, path)
+        info = info_resp.json()
+        if info.get("is_dir"):
+            raise DatabricksError("not_a_file", f"'{path}' is a folder, not a file.")
+        size = int(info.get("file_size") or 0)
+        if size > max_bytes:
+            raise DatabricksError("too_large", f"'{path}' is {size} bytes, above the {max_bytes}-byte limit for reading code.")
+        chunks: list[bytes] = []
+        offset = 0
+        while offset < size:
+            resp = self._get("/api/2.0/dbfs/read", {"path": dbfs, "offset": str(offset), "length": str(min(1024 * 1024, size - offset))})
+            if resp.status_code != 200:
+                raise self._fail(resp, path)
+            body = resp.json()
+            try:
+                piece = base64.b64decode(body.get("data", ""), validate=True)
+            except Exception:  # noqa: BLE001
+                raise DatabricksError("bad_response", "The DBFS read returned content that is not valid base64.") from None
+            if not piece:
+                break
+            chunks.append(piece)
+            offset += len(piece)
+        return b"".join(chunks)
+
+
 # --- writing files and scanning them -----------------------------------------------------------------------------
 
 

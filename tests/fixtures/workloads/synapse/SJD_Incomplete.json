@@ -1,0 +1,8 @@
+{
+  "name": "SJD_Incomplete",
+  "properties": {
+    "targetBigDataPool": {"type": "BigDataPoolReference"},
+    "language": "python",
+    "scanFolder": false
+  }
+}

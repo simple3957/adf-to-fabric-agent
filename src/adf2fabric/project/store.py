@@ -20,6 +20,7 @@ from pathlib import Path
 import yaml
 
 from adf2fabric.project.dependencies import DependencyInventory
+from adf2fabric.project.workloads import WorkloadManifest
 from adf2fabric.project.discovery import (
     AdfDiscovery,
     AdfSemanticDiscovery,
@@ -434,6 +435,38 @@ class ProjectStore:
                 "Run `adf2fabric discovery-dependencies` first.")
         with path.open(encoding="utf-8") as f:
             return DependencyInventory.model_validate(_safe_load(f))
+
+    # --- Workload migration manifest (Spark workloads: assessment, generated Fabric artifacts, evidence) ------------
+
+    def workloads_dir(self, project_id: str) -> Path:
+        return self.project_dir(project_id) / "workloads"
+
+    def workload_manifest_path(self, project_id: str) -> Path:
+        return self.workloads_dir(project_id) / "manifest.yaml"
+
+    def workload_report_path(self, project_id: str) -> Path:
+        return self.workloads_dir(project_id) / "report.md"
+
+    def has_workload_manifest(self, project_id: str) -> bool:
+        return self.workload_manifest_path(project_id).exists()
+
+    def save_workload_manifest(self, project_id: str, manifest: WorkloadManifest, report_markdown: str = "") -> Path:
+        self.workloads_dir(project_id).mkdir(parents=True, exist_ok=True)
+        path = self.workload_manifest_path(project_id)
+        with path.open("w", encoding="utf-8") as f:
+            yaml.safe_dump(json.loads(manifest.model_dump_json()), f, sort_keys=False)
+        if report_markdown:
+            self.workload_report_path(project_id).write_text(report_markdown, encoding="utf-8")
+        return path
+
+    def load_workload_manifest(self, project_id: str) -> WorkloadManifest:
+        path = self.workload_manifest_path(project_id)
+        if not path.exists():
+            raise ProjectNotFoundError(
+                f"No workload manifest for '{project_id}' under {self.projects_root}. "
+                "Run `adf2fabric workloads-assess` first.")
+        with path.open(encoding="utf-8") as f:
+            return WorkloadManifest.model_validate(_safe_load(f))
 
     # --- Conversion record + generated Fabric artifacts ----------------------
 

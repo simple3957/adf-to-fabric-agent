@@ -1,0 +1,17 @@
+{
+  "name": "NB_LinkedService",
+  "properties": {
+    "nbformat": 4,
+    "nbformat_minor": 2,
+    "bigDataPool": {"referenceName": "pool1", "type": "BigDataPoolReference"},
+    "metadata": {"language_info": {"name": "python"}},
+    "cells": [
+      {"cell_type": "code", "metadata": {}, "source": [
+        "spark.conf.set(\"spark.storage.synapse.linkedServiceName\", \"LS_Lake\")\n",
+        "pw = mssparkutils.credentials.getSecretWithLS(\"LS_KV\", \"sqlpw\")\n",
+        "cs = mssparkutils.credentials.getConnectionStringOrCreds(\"LS_Sql\")\n",
+        "df = spark.read.synapsesql(\"pool.dbo.sales\")\n",
+        "e = mssparkutils.env.getWorkspaceName()"]}
+    ]
+  }
+}

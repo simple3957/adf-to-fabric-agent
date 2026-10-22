@@ -1,0 +1,16 @@
+{
+  "name": "SJD_Full",
+  "properties": {
+    "targetBigDataPool": {"referenceName": "pool1", "type": "BigDataPoolReference"},
+    "language": "python",
+    "jobProperties": {
+      "name": "SJD_Full",
+      "file": "abfss://jobs@acctsyn.dfs.core.windows.net/main.py",
+      "args": ["--mode", "full"],
+      "jars": ["abfss://jobs@acctsyn.dfs.core.windows.net/lib.jar"],
+      "pyFiles": [],
+      "conf": {"spark.synapse.linkedService": "LS_Lake", "spark.sql.shuffle.partitions": "8"},
+      "numExecutors": 2
+    }
+  }
+}

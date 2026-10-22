@@ -48,7 +48,24 @@ def _bound_fabric_notebook(cx: ActivityBuilder) -> Optional[str]:
     return name if name and f"notebook:{name}".lower() in resolutions.items else None
 
 
-def _databricks_notebook_as_fabric_notebook(cx: ActivityBuilder, name: str) -> None:
+# Confirmed by a live Fabric run on 2026-10-22 (docs/workload-migration.md): the `parameters` cell tag, the {value, type} shape and
+# an Expression value all reached the notebook. Set False to restore the warning if a later change breaks that.
+PARAMETER_PASSING_VERIFIED = True
+
+
+def _workload(cx: ActivityBuilder) -> Any:
+    """The approved, deployed workload manifest entry for this activity's notebook, if the user opted in."""
+    path = cx.act.raw_properties.get("notebookPath")
+    return cx.pc.project.workloads.get(path.lower()) if isinstance(path, str) else None
+
+
+def _parameters_mapped(entry: Any, passed: dict) -> bool:
+    """True when the generated notebook reads every parameter this activity passes (so passing them keeps the contract)."""
+    by = {p.name: p for p in entry.parameters}
+    return all(k in by and (by[k].mapped or not by[k].declared_in_code) for k in passed)
+
+
+def _databricks_notebook_as_fabric_notebook(cx: ActivityBuilder, name: str, entry: Any = None) -> None:
     """Run the same code as a Fabric notebook instead of calling Databricks.
 
     Only for a notebook with no ``baseParameters`` and no ``libraries``: the parameter and library settings of the two
@@ -58,8 +75,28 @@ def _databricks_notebook_as_fabric_notebook(cx: ActivityBuilder, name: str) -> N
     tp = {"notebookId": cx.item("notebook", name, f"The Fabric notebook that runs the code of Databricks notebook '{name}'."),
           "workspaceId": cx.workspace()}
     cx.mapping("typeProperties.notebookPath", "typeProperties.notebookId", "notebook_bound")
+    passed = raw.get("baseParameters")
+    if isinstance(passed, dict) and passed:
+        read = {p.name for p in (entry.parameters if entry is not None else []) if p.mapped}
+        tp["parameters"] = {k: {"value": cx.tree(v, f"typeProperties.baseParameters.{k}", f"typeProperties.parameters.{k}.value"),
+                                "type": "string"} for k, v in passed.items() if k in read}
+        for k in passed:
+            if k in read:
+                cx.mapping(f"typeProperties.baseParameters.{k}", f"typeProperties.parameters.{k}", "base_parameter_to_parameter")
+            else:
+                cx.dropped(f"typeProperties.baseParameters.{k}", "the migrated notebook never reads this parameter")
+        if not tp["parameters"]:
+            del tp["parameters"]
+        elif not PARAMETER_PASSING_VERIFIED:
+            cx.manual("notebook_parameters_unverified",
+                      "Microsoft documents the notebook activity's 'parameters' object only as 'Object', and does not name the cell tag that "
+                      "marks a parameter cell, so passing values this way has not been confirmed by a Fabric run.",
+                      "Run the pipeline once and check the notebook received the values (docs/workload-migration.md has the probe).")
+    for o in (entry.outputs if entry is not None else []):
+        cx.manual("notebook_output_contract", f"{o.consumer} reads {o.source_property}, which the Fabric notebook activity does not produce.",
+                  o.action)
     for key in raw:
-        if key != "notebookPath":
+        if key not in ("notebookPath", "baseParameters"):
             cx.dropped(f"typeProperties.{key}", "a Databricks notebook setting with no Fabric notebook activity equivalent")
     out = cx.add(cx.envelope(a.name, "TridentNotebook", tp))
     cx.cover(Op.external_execution, out)
@@ -72,8 +109,11 @@ def _databricks_notebook_as_fabric_notebook(cx: ActivityBuilder, name: str) -> N
 def convert_databricks_notebook(cx: ActivityBuilder) -> None:
     a = cx.act
     bound = _bound_fabric_notebook(cx)
-    if bound and not cx.act.raw_properties.get("baseParameters") and not cx.act.raw_properties.get("libraries"):
-        return _databricks_notebook_as_fabric_notebook(cx, bound)
+    entry = _workload(cx)
+    passed = cx.act.raw_properties.get("baseParameters")
+    params_ok = not passed or (entry is not None and isinstance(passed, dict) and _parameters_mapped(entry, passed))
+    if bound and params_ok and not cx.act.raw_properties.get("libraries"):
+        return _databricks_notebook_as_fabric_notebook(cx, bound, entry)
     ls = _ls(cx)
     if not ls:
         return _block(cx, "databricks_no_linked_service", "it has no Databricks linked service.",
