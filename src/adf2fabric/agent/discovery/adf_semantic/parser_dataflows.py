@@ -55,7 +55,8 @@ def parse_dataflow(data: Any, path: str) -> AdfDataFlow:
         name = Path(path).stem
         issues.append(_issue("missing_dataflow_name", f"No 'name'; using the file name '{name}'.", "name"))
     props = data.get("properties")
-    if not isinstance(props, dict):
+    unreadable = not isinstance(props, dict)
+    if unreadable:
         issues.append(_issue("missing_properties", "No 'properties' object; the data flow has no readable definition.",
                              "properties", AdfIssueSeverity.error))
         props = {}
@@ -119,6 +120,12 @@ def parse_dataflow(data: Any, path: str) -> AdfDataFlow:
             for k, v in item.items():
                 if k not in _KNOWN_NODE_KEYS:
                     unknown[f"{key}[{i}].{k}"] = san.clean(v, k)
+            for ref_key in ("dataset", "linkedService", "flowlet", "schemaLinkedService", "rejectedDataLinkedService"):
+                ref = item.get(ref_key)
+                if isinstance(ref, dict):  # the arguments passed through a reference are kept, never silently dropped
+                    for arg_key in ("parameters", "datasetParameters"):
+                        if arg_key in ref:
+                            unknown[f"{key}[{i}].{ref_key}.{arg_key}"] = san.clean(ref[arg_key], arg_key)
 
     seen: dict[str, str] = {}
     for role in ("source", "sink", "transformation"):
@@ -165,5 +172,7 @@ def parse_dataflow(data: Any, path: str) -> AdfDataFlow:
         linked_service_refs=sorted({r for n in every for r in (n.linked_service, n.schema_linked_service,
                                                                 n.rejected_data_linked_service) if r}),
         flowlet_refs=sorted({n.flowlet for n in every if n.flowlet}),
+        parse_status=DiscoveryStatus.failed if unreadable else DiscoveryStatus.discovered,
+        note="No readable 'properties' object." if unreadable else "",
         unknown_properties=unknown, issues=sorted(issues, key=lambda i: (i.severity.value, i.code, i.message)),
         source_location=AdfSourceLocation(file=path, pointer="properties"))

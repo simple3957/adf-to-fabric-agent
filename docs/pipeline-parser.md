@@ -63,13 +63,19 @@ recurring pipeline shape), `activity_type_counts`, `unknown_activity_types`.
 
 Every artifact and every activity is either a record or an explicit entry saying why not.
 
-* **Independent inventory check.** `inventory.py` scans the raw pipeline JSON by a more general rule than the parser
-  (every object in any list under a key ending in `activities`, plus any list object that looks like an activity) and
-  compares pointer sets with what was parsed. `AdfPipeline.inventory` holds both counts and any difference;
-  a difference also raises the pipeline issue `inventory_mismatch` and sets `inventory_mismatch_count`.
+* **Independent inventory check.** `inventory.py` re-derives the activity list from the raw pipeline JSON by Microsoft's
+  documented structure only (`properties.activities`; children under `typeProperties.activities`, `ifTrueActivities`,
+  `ifFalseActivities`, `defaultActivities` and `cases[].activities`) and compares pointer sets with what was parsed.
+  `AdfPipeline.inventory` holds both counts and any difference; a difference raises the error issue `inventory_mismatch`
+  and sets `inventory_mismatch_count`. Free-form content (a Web `body`, a parameter default) can contain objects that only
+  look like activities: they are never counted, and a wider scan lists them as `suspect_pointers` with an info issue
+  (`possible_unparsed_activities`), which is also how an unfamiliar container shape is surfaced.
 * **Explicit dependency graph.** `AdfPipeline.dependency_graph` lists every activity (nested included) and one edge per
   `dependsOn` entry with its conditions. Unresolved, cross-container (`outside_scope`) and `self` edges are kept, flagged,
-  not dropped. `cycles` holds the exact members of each cycle (Tarjan). Dependencies never cross a container boundary.
+  not dropped. A scope is one activities LIST (identified by its JSON pointer), so two Switch cases with the same value stay
+  apart. `cycles` holds the exact members of each cycle (Tarjan); activities merely downstream of a cycle carry the
+  `cyclic_dependency` warning but are not members. Of two same-named activities the first is the dependency target.
+  Dependencies never cross a container boundary.
 * **Stable source path.** `activity_id` (names from the pipeline down, `#2` for a duplicate) and
   `source_location.pointer` (the JSON path, e.g. `properties.activities[2].typeProperties.cases[0].activities[1]`).
 * **Ledger of unprocessed artifacts.** `AdfSemanticDiscovery.unprocessed_artifacts` lists each source artifact that did not

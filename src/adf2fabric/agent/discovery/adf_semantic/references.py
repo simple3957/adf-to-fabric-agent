@@ -44,6 +44,16 @@ def _walk_activities(activities: list[AdfActivity]):
         yield from _walk_activities(a.activities)
 
 
+class _CaseInsensitive(set):
+    """A set of names that answers ``in`` regardless of case (ADF artifact names are case-insensitive)."""
+
+    def __init__(self, names=()):
+        super().__init__(n.lower() for n in names)
+
+    def __contains__(self, name) -> bool:
+        return isinstance(name, str) and super().__contains__(name.lower())
+
+
 def _pipeline_refs(pipeline: AdfPipeline) -> tuple[set[str], set[str]]:
     """(dataset names, linked-service names) referenced anywhere in the pipeline."""
     datasets: set[str] = set()
@@ -157,7 +167,7 @@ def build_relationships(
     pipeline_names = {p.name for p in pipelines}
     dataset_names = {d.name for d in datasets}
     ls_names = {ls.name for ls in linked_services}
-    dataflow_names = {f.name for f in dataflows}
+    dataflow_names = _CaseInsensitive(f.name for f in dataflows)  # as the activity-side resolution compares them
 
     edges: list[AdfRelationship] = []
     unresolved: list[AdfArtifactRef] = []

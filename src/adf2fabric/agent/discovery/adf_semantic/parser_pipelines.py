@@ -319,6 +319,14 @@ def parse_pipeline(data: Any, path: str) -> AdfPipeline:
                      f"{' ...' if len(pipeline.inventory.missing_pointers) > 5 else ''}. "
                      f"Recorded but not in the source scan: "
                      f"{', '.join(pipeline.inventory.unexpected_pointers[:5]) or 'none'}.")))
+    if pipeline.inventory.suspect_pointers:
+        shown = ", ".join(pipeline.inventory.suspect_pointers[:5])
+        more = " ..." if len(pipeline.inventory.suspect_pointers) > 5 else ""
+        pipeline_analysis.add_issue(pipeline.issues, AdfParseIssue(
+            code="possible_unparsed_activities", severity=AdfIssueSeverity.info,
+            message=(f"{len(pipeline.inventory.suspect_pointers)} object(s) shaped like activities sit outside the "
+                     f"documented activity lists ({shown}{more}). Free-form content (a request body, a default value) "
+                     "is expected here; an unfamiliar container would be too, and is preserved as unknown properties.")))
     return pipeline
 
 

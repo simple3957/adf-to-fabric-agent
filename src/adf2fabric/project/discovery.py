@@ -743,7 +743,7 @@ class AdfActivity(_Strict):
 class AdfDependencyEdge(_Strict):
     """One ``dependsOn`` entry as a graph edge: ``from`` must finish (per ``conditions``) before ``to`` runs."""
 
-    scope: str  # "<parent activity id or pipeline name>|<branch>": dependencies never cross a scope
+    scope: str  # JSON pointer of the activities list the edge lives in: dependencies never cross a scope
     from_id: Optional[str] = None  # None when the named activity is not in this scope
     from_name: str
     to_id: str
@@ -765,9 +765,9 @@ class AdfDependencyGraph(_Strict):
 class AdfInventoryCheck(_Strict):
     """Reconciles the activities the parser reported with an independent scan of the raw pipeline JSON.
 
-    ``matched`` is False when the source holds an activity the record does not (a component that would have been
-    silently dropped), or the record holds one the scan did not find. Pointers use the same form as
-    ``AdfSourceLocation.pointer``.
+    ``matched`` is False when the source holds an activity (in a documented activity list) that the record does not
+    (a component that would have been silently dropped), or the record holds one the scan did not find. Pointers use
+    the same form as ``AdfSourceLocation.pointer``.
     """
 
     source_activity_count: int = 0
@@ -776,6 +776,9 @@ class AdfInventoryCheck(_Strict):
     missing_pointers: list[str] = Field(default_factory=list)  # in the source, not in the record
     unexpected_pointers: list[str] = Field(default_factory=list)  # in the record, not found in the source scan
     malformed_pointers: list[str] = Field(default_factory=list)  # list entries that are not objects
+    # Objects shaped like activities (name + type + typeProperties/dependsOn/...) OUTSIDE the documented activity lists:
+    # an unfamiliar container, or free-form content such as a Web activity body. Informational: never a mismatch.
+    suspect_pointers: list[str] = Field(default_factory=list)
 
 
 class AdfPipeline(_Strict):

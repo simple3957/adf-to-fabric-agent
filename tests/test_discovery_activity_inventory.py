@@ -203,12 +203,14 @@ def test_a_second_independent_walk_by_documented_containers_agrees(estate, name)
     raw = json.loads((FIXTURES / "pipeline" / f"{name}.json").read_text(encoding="utf-8"))
     documented = sorted(_arm_walk(raw), key=str)
     discovered = sorted(((a.name or None, a.type) for a in walk(_pipeline(d, name).activities)), key=str)
+    from collections import Counter
+
     if name == "PL_Unknown":
-        # An unfamiliar container (FutureLoop) is outside Microsoft's documented set: the parser still finds its
-        # children, which a documented-containers walk cannot. The extras must be exactly those two.
-        assert [x for x in discovered if x not in documented] == [("Inner_Unknown", "Mystery"), ("Inner_Wait", "Wait")] or \
-            sorted(x for x in discovered if x not in documented) == [("Inner_Unknown", "Mystery"), ("Inner_Wait", "Wait")]
-        assert all(x in discovered for x in documented if x[0])
+        # FutureLoop is outside Microsoft's documented container types, so the type-driven walk cannot see inside it;
+        # the parser's key-driven walk can. Compare as multisets: the parser may ADD exactly those two children and
+        # must never lose or duplicate anything the documented walk found.
+        assert Counter(documented) - Counter(discovered) == Counter()
+        assert Counter(discovered) - Counter(documented) == Counter({("Inner_Wait", "Wait"): 1, ("Inner_Unknown", "Mystery"): 1})
     else:
         assert discovered == documented
 
@@ -260,8 +262,8 @@ def test_http_and_rest_are_connectors_used_through_copy_not_activity_types(estat
     assert "HttpActivity" not in {t.type for t in ACTIVITY_REGISTRY.values()} and "RestActivity" not in ACTIVITY_REGISTRY
     rest = _act(d, "PL_ExternalCalls", "Copy_From_Rest")
     http = _act(d, "PL_ExternalCalls", "Copy_From_Http")
-    assert rest.inputs[0].connector_type == "RestSource" or rest.configuration or rest.raw_properties["source"]["type"] == "RestSource"
-    assert http.raw_properties["source"]["type"] == "HttpSource"
+    assert rest.raw_properties["source"]["type"] == "RestSource" and rest.type == "Copy"
+    assert http.raw_properties["source"]["type"] == "HttpSource" and http.type == "Copy"
 
 
 # --- 3. unknown and malformed activities are preserved, never discarded ------------------------------------------------
@@ -565,9 +567,9 @@ def test_parsing_never_raises_and_every_mutation_is_reconciled_or_reported(name)
             mutated = _mutate(raw, path, rep)
             p = pp.parse_pipeline(mutated, f"pipeline/{name}.json")  # must not raise
             inv = p.inventory
-            assert inv is None or inv.parsed_activity_count == p.activity_total
-            if inv is not None and not inv.matched:
-                assert any(i.code == "inventory_mismatch" for i in p.issues), (path, rep)
+            # No single malformed value can make the parser lose an activity the source holds (and none of these
+            # mutations is deeper than the limit), so the independent scan must always agree with the record.
+            assert inv is not None and inv.matched, (path, rep, inv and inv.missing_pointers, inv and inv.unexpected_pointers)
 
 
 def test_activity_lists_of_the_wrong_shape_are_reported_not_ignored():
@@ -703,3 +705,139 @@ def test_the_cli_reports_unknown_types_cycles_data_flows_and_lost_artifacts(tmp_
     assert "FutureActivityV2" in out.output and "Mystery" in out.output
     assert "not in the record: pipeline/PL_Truncated.json [pipeline] malformed_json" in out.output
     assert "ACTIVITY INVENTORY MISMATCH" not in out.output
+
+
+# --- 13. follow-ups from the independent review ----------------------------------------------------------------------------------
+
+
+def _wait(name, *deps, **extra):
+    node = {"name": name, "type": "Wait", "typeProperties": {"waitTimeInSeconds": 1}, **extra}
+    if deps:
+        node["dependsOn"] = [{"activity": d, "dependencyConditions": ["Succeeded"]} for d in deps]
+    return node
+
+
+def _parse(*activities, **props):
+    return pp.parse_pipeline({"name": "P", "properties": {"activities": list(activities), **props}}, "pipeline/P.json")
+
+
+@pytest.mark.parametrize("body", [
+    {"activities": [{"name": "a", "type": "b"}]},
+    {"items": [{"name": "a", "type": "b", "policy": {}}]},
+    [{"name": "a", "type": "b", "typeProperties": {}}],
+])
+def test_free_form_content_shaped_like_activities_is_not_a_mismatch_but_is_surfaced(body):
+    # e.g. a Web activity that POSTs a pipeline definition to the ADF REST API
+    web = {"name": "W", "type": "WebActivity", "typeProperties": {"url": "https://x", "method": "POST", "body": body}}
+    p = _parse(web)
+    assert p.inventory.matched and p.inventory.source_activity_count == p.inventory.parsed_activity_count == 1
+    assert p.inventory.suspect_pointers
+    assert "inventory_mismatch" not in {i.code for i in p.issues}
+    note = next(i for i in p.issues if i.code == "possible_unparsed_activities")
+    assert note.severity.value == "info"
+
+
+def test_a_parameter_default_that_contains_an_activities_list_is_not_a_mismatch():
+    p = _parse(_wait("A"), parameters={"template": {"type": "Object", "defaultValue": {
+        "activities": [{"name": "x", "type": "Wait", "typeProperties": {}}]}}})
+    assert p.inventory.matched and p.inventory.source_activity_count == 1 and p.inventory.suspect_pointers
+
+
+def test_a_real_drop_is_flagged_as_a_mismatch_with_the_exact_pointers(monkeypatch):
+    real = pp._parse_children
+
+    def lossy(items, parent, ctx, label, pointer, nesting, depth):  # a defect: the false branch is never walked
+        if label == "ifFalse":
+            return None
+        return real(items, parent, ctx, label, pointer, nesting, depth)
+
+    monkeypatch.setattr(pp, "_parse_children", lossy)
+    raw = json.loads((FIXTURES / "pipeline" / "PL_Containers.json").read_text(encoding="utf-8"))
+    p = pp.parse_pipeline(raw, "pipeline/PL_Containers.json")
+    base = "properties.activities[1].typeProperties.activities[0].typeProperties.ifFalseActivities[0]"
+    assert not p.inventory.matched
+    assert p.inventory.missing_pointers == sorted([
+        base, f"{base}.typeProperties.cases[0].activities[0]", f"{base}.typeProperties.cases[1].activities[0]",
+        f"{base}.typeProperties.cases[1].activities[1]", f"{base}.typeProperties.defaultActivities[0]"])
+    assert p.inventory.source_activity_count - p.inventory.parsed_activity_count == 5
+    issue = next(i for i in p.issues if i.code == "inventory_mismatch")
+    assert issue.severity.value == "error"
+
+
+def test_a_real_drop_is_counted_and_shown_by_discovery(tmp_path, monkeypatch):
+    real = pp._parse_children
+    monkeypatch.setattr(pp, "_parse_children",
+                        lambda items, parent, ctx, label, *a: None if label == "ifFalse" else real(items, parent, ctx, label, *a))
+    keep = ("pipeline/PL_Containers", "pipeline/PL_Child", "dataset", "linkedService")
+    store, pid = _project(tmp_path, {k: v for k, v in _fixture_files().items() if k.startswith(keep)})
+    d = _discover(store)
+    assert d.inventory_mismatch_count == 1 and _pipeline(d, "PL_Containers").inventory.matched is False
+    assert _pipeline(d, "PL_Child").inventory.matched
+
+
+def test_duplicate_names_neither_orphan_the_first_nor_invent_a_self_dependency():
+    p = _parse(_wait("A"), _wait("A"), _wait("B", "A"))
+    edge = next(e for e in p.dependency_graph.edges if e.to_id == "P/B")
+    assert edge.from_id == "P/A" and edge.resolved  # the first A, not the later copy
+    assert "duplicate_activity_name" in {i.code for i in p.issues}
+    q = _parse(_wait("A"), _wait("a", "A"))
+    assert q.dependency_graph.cycles == [] and [e.problem for e in q.dependency_graph.edges] == [None]
+
+
+def test_switch_cases_with_the_same_value_keep_separate_dependency_scopes():
+    def case():
+        return {"value": "x", "activities": [_wait("X"), _wait("Y", "X")]}
+
+    switch = {"name": "S", "type": "Switch", "typeProperties": {"on": "v", "cases": [case(), case()]}}
+    g = _parse(switch).dependency_graph
+    assert g.scope_count == 3  # the top level and one scope per case, even though both cases are named "x"
+    assert sorted((e.from_id, e.to_id) for e in g.edges) == [("P/S/X", "P/S/Y"), ("P/S/X#2", "P/S/Y#2")]
+    assert all(e.resolved for e in g.edges) and g.cycles == []
+
+
+def test_a_failing_integration_runtime_parse_is_counted_as_a_failure_and_listed(tmp_path, monkeypatch):
+    files = {"integrationRuntime/ir1.json": {"name": "ir1", "properties": {"type": "Managed", "typeProperties": {}}},
+             "pipeline/PL_Child.json": _fixture_files()["pipeline/PL_Child.json"]}
+    store, _ = _project(tmp_path, files)
+
+    def boom(data, path):
+        raise ValueError("IR_CONTENT_MUST_NOT_LEAK")
+
+    monkeypatch.setattr(discoverer_mod.parser, "parse_integration_runtime", boom)
+    d = _discover(store)
+    entry = next(u for u in d.unprocessed_artifacts if u.path == "integrationRuntime/ir1.json")
+    assert entry.reason == "parse_error" and "MUST_NOT_LEAK" not in entry.detail
+    assert d.failed_count == 1 and d.status is AdfSemanticStatus.partial
+
+
+def test_a_data_flow_without_properties_is_marked_failed_not_discovered():
+    from adf2fabric.agent.discovery.adf_semantic.parser_dataflows import parse_dataflow
+
+    flow = parse_dataflow({"name": "X"}, "dataflow/X.json")
+    assert flow.parse_status.value == "failed" and "missing_properties" in {i.code for i in flow.issues}
+
+
+def test_arguments_passed_through_data_flow_references_are_kept():
+    from adf2fabric.agent.discovery.adf_semantic.parser_dataflows import parse_dataflow
+
+    flow = parse_dataflow({"name": "F", "properties": {"type": "MappingDataFlow", "typeProperties": {
+        "sources": [{"name": "s", "dataset": {"referenceName": "D", "type": "DatasetReference", "parameters": {"p": "v"}}}],
+        "sinks": [{"name": "k"}], "transformations": [{"name": "t", "flowlet": {
+            "referenceName": "FL", "type": "DataFlowReference", "datasetParameters": {"q": "w"}}}],
+        "script": "x"}}}, "dataflow/F.json")
+    assert flow.unknown_properties["sources[0].dataset.parameters"] == {"p": "v"}
+    assert flow.unknown_properties["transformations[0].flowlet.datasetParameters"] == {"q": "w"}
+
+
+def test_a_data_flow_reference_that_differs_only_in_case_resolves_everywhere(tmp_path):
+    keep = ("dataflow/DF_Map", "dataflow/DF_Flowlet", "dataset", "linkedService")
+    files = {k: v for k, v in _fixture_files().items() if k.startswith(keep)}
+    files["pipeline/PL_Case.json"] = {"name": "PL_Case", "properties": {"activities": [
+        {"name": "Run", "type": "ExecuteDataFlow",
+         "typeProperties": {"dataflow": {"referenceName": "df_map", "type": "DataFlowReference"}}}]}}
+    store, _ = _project(tmp_path, files)
+    d = _discover(store)
+    act = _act(d, "PL_Case", "Run")
+    assert [(r.name, r.resolved) for r in act.references if r.kind == "dataflow"] == [("df_map", True)]
+    edge = next(e for e in d.relationships if e.relationship.value == "pipeline_executes_dataflow")
+    assert edge.resolved and not any(u.name == "df_map" for u in d.unresolved_references)

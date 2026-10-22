@@ -237,7 +237,10 @@ class AdfSemanticDiscoverer:
                 try:
                     runtimes.append(parser.parse_integration_runtime(data, cand.path))
                 except Exception as exc:  # noqa: BLE001 - classification above still stands
+                    failed += 1
+                    failures.append(cand.path)
                     lose(cand, "parse_error", f"The parser raised {type(exc).__name__}; only its kind was recorded.")
+                    continue
                 parsed += 1
                 continue
             try:

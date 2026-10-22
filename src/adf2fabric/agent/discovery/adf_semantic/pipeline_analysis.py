@@ -77,10 +77,10 @@ def analyze_pipeline(pipeline: AdfPipeline, ctx) -> None:
         else:
             seen[low] = a
 
-    # Dependency graph, one scope per (parent, branch) list.
-    scopes: dict[tuple[Optional[str], Optional[str]], list[AdfActivity]] = {}
+    # Dependency graph, one scope per activities LIST (so two Switch cases with the same value stay apart).
+    scopes: dict[str, list[AdfActivity]] = {}
     for a in flat:
-        scopes.setdefault((a.parent_activity_id, a.branch), []).append(a)
+        scopes.setdefault(_scope_of(a), []).append(a)
     for members in scopes.values():
         _analyze_scope(members, seen, ctx)
 
@@ -98,25 +98,38 @@ def analyze_pipeline(pipeline: AdfPipeline, ctx) -> None:
     pipeline.issues = list(ctx.issues)
 
 
-def _scope_key(pipeline_name: str, parent_id: Optional[str], branch: Optional[str]) -> str:
-    return f"{parent_id or pipeline_name}|{branch or 'activities'}"
+def _scope_of(a: AdfActivity) -> str:
+    """The activities list an activity sits in: its JSON pointer without the final ``[i]``."""
+    if a.source_location is not None:
+        return a.source_location.pointer.rsplit("[", 1)[0]
+    return f"{a.parent_activity_id or ''}|{a.branch or 'activities'}"
+
+
+def _name_index(members: list[AdfActivity]) -> dict[str, int]:
+    """Lower-case activity name -> position. The FIRST of two same-named activities wins (a duplicate name is its own
+    error), so a dependency never silently moves to the later copy and no activity gets a false self-dependency."""
+    index: dict[str, int] = {}
+    for i, a in enumerate(members):
+        if a.name:
+            index.setdefault(a.name.lower(), i)
+    return index
 
 
 def build_dependency_graph(pipeline_name: str, flat: list[AdfActivity],
-                           scopes: dict[tuple[Optional[str], Optional[str]], list[AdfActivity]],
+                           scopes: dict[str, list[AdfActivity]],
                            all_names: dict[str, AdfActivity]) -> AdfDependencyGraph:
     """The explicit dependency graph: one node per activity (nested included), one edge per ``dependsOn`` entry.
 
     ADF dependencies live inside one activities list (a scope) and never cross a container boundary, so each scope is
     its own graph. An entry that names an activity not in its scope is kept as an unresolved edge, not dropped.
-    ``cycles`` holds the activities of every strongly connected component with more than one member, and every
-    self-dependency: exactly the activities that can never start.
+    ``cycles`` holds the members of every strongly connected component with more than one activity, and every
+    self-dependency. Activities merely DOWNSTREAM of a cycle never start either, but are not members of it: they carry
+    the ``cyclic_dependency`` warning on the activity.
     """
     edges: list[AdfDependencyEdge] = []
     cycles: list[list[str]] = []
-    for (parent_id, branch), members in scopes.items():
-        scope = _scope_key(pipeline_name, parent_id, branch)
-        index = {a.name.lower(): i for i, a in enumerate(members) if a.name}
+    for scope, members in scopes.items():
+        index = _name_index(members)
         succ: dict[int, set[int]] = {i: set() for i in range(len(members))}
         self_loops: set[int] = set()
         for i, a in enumerate(members):
@@ -188,7 +201,7 @@ def _components(succ: dict[int, set[int]]) -> list[list[int]]:
 
 
 def _analyze_scope(members: list[AdfActivity], all_names: dict[str, AdfActivity], ctx) -> None:
-    index = {a.name.lower(): i for i, a in enumerate(members) if a.name}
+    index = _name_index(members)
     deps: dict[int, set[int]] = {i: set() for i in range(len(members))}
     for i, a in enumerate(members):
         for d in a.depends_on:
