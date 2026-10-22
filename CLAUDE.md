@@ -14,7 +14,7 @@ streamlit run ui/app.py                 # UI on http://localhost:8501 (add ?demo
 adf2fabric --help                       # CLI
 ```
 
-CLI commands (`src/adf2fabric/cli.py`): `intake`, `consultation`, `discovery`, `discovery-adls`, `discovery-adls-paths`, `discovery-sql`, `discovery-sql-structural`, `discovery-adf`, `discovery-adf-semantic`, `discovery-dependencies`, `workloads-assess`, `workloads-generate`, `workloads-approve`, `workloads-deploy`, `workloads-record-run`, `provision-plan`, `provision-approve`, `provision-apply`, `provision-verify`, `validate`, `auth-user-create`, `auth-user-list`, `auth-user-update`, `auth-user-rotate`, `audit-verify`, `convert`, `reconstruct`, `deploy`, `deploy-notebook`, `create-shortcut`, `fetch-databricks-notebooks`, `run`, `verify`, `handover`, `compute-deploy`, `assess-compute`. Each takes `--project <name>`; state lives under `projects/<name>/` (see `project/store.py`).
+CLI commands (`src/adf2fabric/cli.py`): `intake`, `consultation`, `discovery`, `discovery-adls`, `discovery-adls-paths`, `discovery-sql`, `discovery-sql-structural`, `discovery-adf`, `discovery-adf-semantic`, `discovery-dependencies`, `storage-map`, `workloads-assess`, `workloads-generate`, `workloads-approve`, `workloads-deploy`, `workloads-record-run`, `provision-plan`, `provision-approve`, `provision-apply`, `provision-verify`, `validate`, `auth-user-create`, `auth-user-list`, `auth-user-update`, `auth-user-rotate`, `audit-verify`, `convert`, `reconstruct`, `deploy`, `deploy-notebook`, `create-shortcut`, `fetch-databricks-notebooks`, `run`, `verify`, `handover`, `compute-deploy`, `assess-compute`. Each takes `--project <name>`; state lives under `projects/<name>/` (see `project/store.py`).
 
 ## Layout (`src/adf2fabric/`)
 
@@ -25,6 +25,7 @@ CLI commands (`src/adf2fabric/cli.py`): `intake`, `consultation`, `discovery`, `
 | `agent/consultation/` | Readiness gate |
 | `agent/discovery/` | Repository, ADF, semantic parser, ADLS, SQL discovery |
 | `agent/dependencies/` | Dependency inventory and migration order from the semantic record + source manifest; opt-in per-provider access checks ([docs](docs/dependency-inventory.md)) |
+| `agent/storage/` | Read-only storage map: ADLS Gen2 datasets to OneLake shortcuts and Lakehouse paths, with unmappable datasets listed for a decision ([docs](docs/storage-map.md)) |
 | `agent/workloads/` | Spark workload migration: retrieve code (only when authorised), analyze, classify, generate Fabric notebook / Spark job definition, manifest ([docs](docs/workload-migration.md)) |
 | `agent/provisioning/` | Approval-gated Fabric target provisioning: requirements, read-only state, plan, apply, verify; separate Fabric and ARM transports ([docs](docs/fabric-provisioning.md)) |
 | `agent/validation/` | Independent migration validation (static / API / deployment / runtime) with an honest overall status ([docs](docs/migration-validation.md)) |

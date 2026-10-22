@@ -7,6 +7,7 @@ onward) are documented in the README but not implemented.
 
 from __future__ import annotations
 
+import json
 import sys
 
 import click
@@ -1164,6 +1165,34 @@ def audit_verify() -> None:
     else:
         click.secho(f"Audit log chain BROKEN at line {broken}: a line was edited, removed or inserted.", fg="red", err=True)
         sys.exit(2)
+
+
+@cli.command(name="storage-map")
+@click.option("--project", "project_name", required=True, help="Project name (`discovery-adf-semantic` must have run).")
+@click.option("--lakehouse", "lakehouse", default=None, help="Target lakehouse NAME, shown in the plan. It is never invented: leave it out if undecided.")
+@click.option("--workspace-id", "workspace_id", default=None, help="Fabric workspace id, only to fill the printed create-shortcut commands.")
+def storage_map_cmd(project_name: str, lakehouse: Optional[str], workspace_id: Optional[str]) -> None:
+    """Map ADF storage datasets to OneLake shortcuts and Lakehouse paths. Read-only: creates nothing, moves no data."""
+    from adf2fabric.agent.storage.mapping import build_storage_map, render_markdown
+
+    store = ProjectStore(projects_root(load_config()))
+    if not store.has_adf_semantic_discovery(project_name):
+        click.secho(f"No ADF semantic discovery for '{project_name}'. Run `adf2fabric discovery-adf-semantic --project {project_name}` first.", fg="red", err=True)
+        sys.exit(1)
+    m = build_storage_map(store.load_adf_semantic_discovery(project_name), lakehouse)
+    out = store.project_dir(project_name) / "storage"
+    out.mkdir(parents=True, exist_ok=True)
+    (out / "storage-map.json").write_text(json.dumps(m.to_dict(), indent=2, default=str), encoding="utf-8")
+    (out / "storage-map.md").write_text(render_markdown(m, workspace_id or "<workspace-id>"), encoding="utf-8")
+    s = m.summary
+    click.echo("STORAGE MAP (read-only)")
+    click.echo(f"  file datasets: {s['file_datasets']}   mapped: {s['mapped']}   mapped with expression: {s['mapped_dynamic']}   need a decision: {s['needs_decision']}")
+    click.echo(f"  shortcuts to create: {s['shortcuts']}   not-file datasets left out: {s['not_file_datasets']}")
+    for sc in m.shortcuts:
+        click.echo(f"  {sc.lakehouse_path:<40} <- {sc.account_url}{sc.subpath}  ({sc.datasets} dataset(s))")
+    for d in m.to_decide[:15]:
+        click.secho(f"  DECIDE {d['dataset']}: {d['reason']}", fg="yellow")
+    click.echo(f"  report: {out / 'storage-map.md'}")
 
 
 @cli.command(name="discovery-dependencies")
