@@ -21,6 +21,10 @@ class ConversionRequest(BaseModel):
         default=None,
         description="JSON file describing external Spark compute that ADF only references (Databricks clusters by id, "
                     "Synapse Spark pools by name), so it can be sized. See docs/compute-plan.md.")
+    lakehouse: Optional[str] = Field(
+        default=None,
+        description="Repoint storage datasets to this lakehouse through the OneLake shortcuts of the storage map (opt-in; "
+                    "`storage-map` must have run). Bind its id with ItemToId 'lakehouse:<name>' and WorkspaceId.")
     apply_reconstruction: bool = Field(
         default=False,
         description="Convert the completed pipelines (original + SAFE reconstruction proposals) and mark every "

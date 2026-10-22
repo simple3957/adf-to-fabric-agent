@@ -136,6 +136,9 @@ class ProjectContext:
     # Spark workloads that were approved AND deployed to Fabric (workloads-deploy): source item (lower) -> manifest entry.
     # Empty unless the user opted in; conversion then still defaults to running the source compute.
     workloads: dict[str, Any] = field(default_factory=dict)
+    # Opt-in Lakehouse repointing: (account, container) -> shortcut name under Files, from the storage map; the lakehouse's name.
+    storage_routes: dict[tuple[str, str], str] = field(default_factory=dict)
+    route_lakehouse: Optional[str] = None
 
     # -- bindings ------------------------------------------------------------------------------------
     def _prereq(self, kind: str, name: str, detail: str, token: str, bound: bool, needed_by: str) -> Prerequisite:

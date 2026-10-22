@@ -6,7 +6,7 @@ from typing import Any, Optional
 
 from adf2fabric.agent.conversion.context import ActivityBuilder
 from adf2fabric.agent.conversion.expr_convert import expr_obj, is_expression
-from adf2fabric.agent.conversion.handlers._common import block, carry, dataset_settings
+from adf2fabric.agent.conversion.handlers._common import block, carry, dataset_settings, lakehouse_route, lakehouse_store_settings
 from adf2fabric.agent.conversion.registry import ConversionRule, register
 from adf2fabric.project.conversion import ConversionStrategy
 from adf2fabric.project.discovery import AdfOperationKind as Op
@@ -39,8 +39,10 @@ def convert_copy(cx: ActivityBuilder) -> None:
                   "Split it into one Copy activity per source/sink dataset pair.")
     src_io = act.inputs[0] if act.inputs else None
     snk_io = act.outputs[0] if act.outputs else None
-    ds_src = dataset_settings(cx, src_io, "inputs[0]", "typeProperties.source.datasetSettings")
-    ds_snk = dataset_settings(cx, snk_io, "outputs[0]", "typeProperties.sink.datasetSettings")
+    r_src = lakehouse_route(cx, src_io, source.get("storeSettings"), "Source")
+    r_snk = lakehouse_route(cx, snk_io, sink.get("storeSettings"), "Sink")
+    ds_src = dataset_settings(cx, src_io, "inputs[0]", "typeProperties.source.datasetSettings", r_src)
+    ds_snk = dataset_settings(cx, snk_io, "outputs[0]", "typeProperties.sink.datasetSettings", r_snk)
     if ds_src is None or ds_snk is None:
         cx.alternative("Use a Fabric Copy job (guided source/destination setup) once the datasets are available.")
         return _fail(cx, "copy_dataset_unavailable", "its source or sink dataset could not be inlined.")
@@ -49,6 +51,9 @@ def convert_copy(cx: ActivityBuilder) -> None:
         "source": {**cx.tree(source, "typeProperties.source", "typeProperties.source"), "datasetSettings": ds_src},
         "sink": {**cx.tree(sink, "typeProperties.sink", "typeProperties.sink"), "datasetSettings": ds_snk},
     }
+    for side, route in (("source", r_src), ("sink", r_snk)):
+        if route is not None and isinstance(tp[side].get("storeSettings"), dict):
+            tp[side]["storeSettings"] = lakehouse_store_settings(cx, tp[side]["storeSettings"], f"typeProperties.{side}.storeSettings")
     cx.mapping("typeProperties.source", "typeProperties.source", "copy_source",
                f"{source.get('type')} kept; dataset '{src_io.name}' inlined")
     cx.mapping("typeProperties.sink", "typeProperties.sink", "copy_sink",
@@ -150,12 +155,15 @@ def convert_lookup(cx: ActivityBuilder) -> None:
     if not isinstance(src, dict):
         cx.blocker("lookup_incomplete", "A Lookup activity needs a source.")
         return _fail(cx, "lookup_incomplete", "the source is missing.")
-    ds = dataset_settings(cx, io, "typeProperties.dataset", "typeProperties.datasetSettings")
+    route = lakehouse_route(cx, io, src.get("storeSettings"), "Lookup")
+    ds = dataset_settings(cx, io, "typeProperties.dataset", "typeProperties.datasetSettings", route)
     if ds is None:
         cx.alternative("Use a Script activity (Query) when the data lives in a supported SQL store.")
         return _fail(cx, "lookup_dataset_unavailable", "its dataset could not be inlined.")
     tp: dict[str, Any] = {"source": cx.tree(src, "typeProperties.source", "typeProperties.source"),
                           "datasetSettings": ds}
+    if route is not None and isinstance(tp["source"].get("storeSettings"), dict):
+        tp["source"]["storeSettings"] = lakehouse_store_settings(cx, tp["source"]["storeSettings"], "typeProperties.source.storeSettings")
     cx.mapping("typeProperties.source", "typeProperties.source", "lookup_source", f"{src.get('type')} kept")
     cx.mapping("typeProperties.dataset", "typeProperties.datasetSettings", "dataset_inlined")
     if "firstRowOnly" in raw:
@@ -197,12 +205,16 @@ def convert_dataset_activity(cx: ActivityBuilder) -> None:
     t = (act.type or "").lower()
     ftype = "GetMetadata" if t == "getmetadata" else "Delete"
     io = act.inputs[0] if act.inputs else None
-    ds = dataset_settings(cx, io, "typeProperties.dataset", "typeProperties.datasetSettings")
+    # Delete is never repointed: proving it live would mean deleting files, so it stays on its storage connection.
+    route = lakehouse_route(cx, io, act.raw_properties.get("storeSettings"), "GetMetadata") if ftype == "GetMetadata" else None
+    ds = dataset_settings(cx, io, "typeProperties.dataset", "typeProperties.datasetSettings", route)
     if ds is None:
         return _fail(cx, f"{t}_dataset_unavailable", "its dataset could not be inlined.")
     documented = {"GetMetadata": ("fieldList", "storeSettings", "formatSettings"),
                   "Delete": ("recursive", "maxConcurrentConnections", "enableLogging", "storeSettings")}[ftype]
     tp = {"datasetSettings": ds, **carry(cx, documented, skip=("dataset", "logStorageSettings"))}
+    if route is not None and isinstance(tp.get("storeSettings"), dict):
+        tp["storeSettings"] = lakehouse_store_settings(cx, tp["storeSettings"], "typeProperties.storeSettings")
     cx.mapping("typeProperties.dataset", "typeProperties.datasetSettings", "dataset_inlined")
     if "logStorageSettings" in act.raw_properties:
         cx.dropped("typeProperties.logStorageSettings", "references a linked service; its Fabric structure is "

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+from dataclasses import dataclass
 from typing import Any, Iterable, Optional
 from urllib.parse import urlparse
 
@@ -50,7 +52,104 @@ def check_connector(cx: ActivityBuilder, ls_name: str, *, what: str) -> str:
     return kind
 
 
-def dataset_settings(cx: ActivityBuilder, io: Optional[AdfIO], source_path: str, target_path: str) -> Optional[dict]:
+# --- opt-in Lakehouse repointing ----------------------------------------------------------------------------------
+# Live-verified 2026-10-22 (Copy CSV->CSV and Parquet->Parquet, Lookup, GetMetadata childItems/exists; runs Completed with identical
+# output): datasetSettings.linkedService {type: Lakehouse, typeProperties {workspaceId, artifactId, rootFolder: Files}},
+# location {type: LakehouseLocation, folderPath, fileName}, storeSettings LakehouseReadSettings / LakehouseWriteSettings.
+# Microsoft's connector page documents only the portal fields, so nothing beyond what ran is emitted.
+LAKEHOUSE_FORMATS = ("DelimitedText", "Parquet")
+_LAKEHOUSE_STORE = {"AzureBlobFSReadSettings": "LakehouseReadSettings", "AzureBlobFSWriteSettings": "LakehouseWriteSettings"}
+# storeSettings keys the Lakehouse connector documents with the same meaning (none of them is a path relative to the container)
+_LAKEHOUSE_STORE_KEYS = {"type", "recursive", "wildcardFileName", "modifiedDatetimeStart", "modifiedDatetimeEnd",
+                         "enablePartitionDiscovery", "maxConcurrentConnections", "copyBehavior", "blockSizeInMB", "metadata"}
+_ADLS_URL = re.compile(r"^https://([a-z0-9]{3,24})\.dfs\.core\.windows\.net/?$", re.I)
+
+
+@dataclass
+class LakehouseRoute:
+    shortcut: str
+    folder: str  # folder under the container, literal ("" when none)
+    dynamic_folder: bool = False  # the folder is an expression: the shortcut is prefixed to it, the expression itself is untouched
+
+
+def _literal(v: Any) -> tuple[Optional[str], bool]:
+    """(text, is_expression) of a dataset location field as authored."""
+    if v is None:
+        return None, False
+    if isinstance(v, dict):
+        return None, True
+    if hasattr(v, "value") and not isinstance(v, str):  # an Expression object from discovery
+        return None, True
+    s = str(v)
+    return s, s.startswith("@")
+
+
+def lakehouse_route(cx: ActivityBuilder, io: Optional[AdfIO], store_settings: Any, role: str) -> Optional[LakehouseRoute]:
+    """The shortcut a dataset can be read or written through, or None (with an info issue saying why) when it stays on its connection."""
+    pc = cx.pc.project
+    if not pc.storage_routes or io is None or io.kind != "dataset" or not io.name:
+        return None
+    ds = pc.datasets.get(io.name.lower())
+    if ds is None:
+        return None
+
+    def keep(why: str) -> None:
+        cx.info("storage_not_repointed", f"{role} dataset '{ds.name}' stays on its storage connection: {why}.",
+                "See the storage map (storage-map) for what to decide.")
+        return None
+
+    loc = (ds.type_properties or {}).get("location")
+    if not isinstance(loc, dict) or str(loc.get("type")) != "AzureBlobFSLocation":
+        return None  # not an ADLS Gen2 file dataset: nothing to repoint, nothing to report
+    if ds.type not in LAKEHOUSE_FORMATS:
+        return keep(f"format {ds.type} has not been verified against the Fabric Lakehouse connector (verified: {', '.join(LAKEHOUSE_FORMATS)})")
+    ls = pc.linked_services.get(ds.linked_service_ref.name.lower()) if ds.linked_service_ref else None
+    m = _ADLS_URL.match((ls.endpoint or "").strip()) if ls else None
+    if not m:
+        return keep("its linked service does not state a literal ADLS Gen2 account URL")
+    container, c_dyn = _literal(loc.get("fileSystem"))
+    folder, f_dyn = _literal(loc.get("folderPath"))
+    if not container or c_dyn:
+        return keep("its container is empty or an expression")
+    if folder and ".." in folder:
+        return keep("its folder path contains '..'")
+    shortcut = pc.storage_routes.get((m.group(1).lower(), container.lower()))
+    if not shortcut:
+        return keep(f"no shortcut is planned for {m.group(1).lower()}/{container}")
+    if store_settings is not None:
+        if not isinstance(store_settings, dict) or str(store_settings.get("type")) not in _LAKEHOUSE_STORE:
+            return keep(f"its storeSettings type {store_settings.get('type') if isinstance(store_settings, dict) else '?'} is not an ADLS Gen2 read/write setting")
+        extra = sorted(set(store_settings) - _LAKEHOUSE_STORE_KEYS)
+        if extra:
+            return keep(f"storeSettings uses {', '.join(extra)}, which is a path under the container or has no verified Lakehouse meaning")
+    if "'" in shortcut:
+        return keep("the shortcut name contains a quote")
+    return LakehouseRoute(shortcut, "" if f_dyn else "/".join(p for p in (folder or "").replace("\\", "/").split("/") if p), f_dyn)
+
+
+def _prefixed_folder(shortcut: str, converted: Any) -> Optional[Any]:
+    """The folder expression with the shortcut in front, or None when its form is not one this handles.
+
+    ``@expr`` -> ``@concat('<shortcut>/', expr)``; an interpolated string (``a/@{x}``) -> ``<shortcut>/a/@{x}``."""
+    v = converted.get("value") if isinstance(converted, dict) and converted.get("type") == "Expression" else converted
+    if not isinstance(v, str) or not v.startswith("@") and "@{" not in v:
+        return None
+    if v.startswith("@") and not v.startswith(("@{", "@@")):
+        new = f"@concat('{shortcut}/', {v[1:]})"
+    else:
+        new = f"{shortcut}/{v}"
+    return {"value": new, "type": "Expression"} if isinstance(converted, dict) else new
+
+
+def lakehouse_store_settings(cx: ActivityBuilder, store: dict, target_path: str) -> dict:
+    out = dict(store)
+    out["type"] = _LAKEHOUSE_STORE[str(store["type"])]
+    cx.mapping(target_path, target_path, "storage_repointed", f"{store['type']} -> {out['type']}")
+    return out
+
+
+def dataset_settings(cx: ActivityBuilder, io: Optional[AdfIO], source_path: str, target_path: str,
+                     route: Optional[LakehouseRoute] = None) -> Optional[dict]:
     """Inline an ADF dataset as Fabric ``datasetSettings`` (Fabric has no datasets).
 
     Dataset parameters are substituted with the arguments the activity passed (or the dataset's
@@ -88,6 +187,27 @@ def dataset_settings(cx: ActivityBuilder, io: Optional[AdfIO], source_path: str,
     cx.mapping(f"dataset:{ds.name}", target_path, "dataset_inlined",
                f"Fabric has no datasets; '{ds.name}' ({ds.type}) became inline datasetSettings"
                + (f" with {len(args)} argument(s) substituted" if args else ""))
+    folder_value: Any = "/".join(p for p in (route.shortcut, route.folder) if p) if route is not None else None
+    if route is not None and route.dynamic_folder:
+        folder_value = _prefixed_folder(route.shortcut, (tp.get("location") or {}).get("folderPath"))
+        if folder_value is None:
+            cx.info("storage_not_repointed", f"Dataset '{ds.name}' stays on its storage connection: its folder expression has a form "
+                    "the shortcut cannot be prefixed to safely.", "Repoint it by hand.")
+            route = None
+    if route is not None:
+        lh = cx.pc.project.route_lakehouse or ""
+        loc = dict(tp.get("location") or {})
+        new_loc: dict[str, Any] = {"type": "LakehouseLocation", "folderPath": folder_value}
+        if "fileName" in loc:
+            new_loc["fileName"] = loc["fileName"]
+        settings["typeProperties"] = {**tp, "location": new_loc}
+        settings["linkedService"] = {"name": lh, "properties": {"annotations": [], "type": "Lakehouse", "typeProperties": {
+            "workspaceId": cx.workspace(), "artifactId": cx.item("lakehouse", lh, f"The lakehouse '{lh}' that holds the OneLake shortcuts."),
+            "rootFolder": "Files"}}}
+        cx.mapping(f"dataset:{ds.name}.location", f"{target_path}.typeProperties.location", "storage_repointed",
+                   f"ADLS container {loc.get('fileSystem')} -> lakehouse '{lh}' Files/{route.shortcut} (OneLake shortcut)"
+                   + ("; the folder expression is kept, with the shortcut in front" if route.dynamic_folder else ""))
+        return settings
     if ds.linked_service_ref is not None:
         ls = ds.linked_service_ref.name
         check_connector(cx, ls, what=f"dataset '{ds.name}'")

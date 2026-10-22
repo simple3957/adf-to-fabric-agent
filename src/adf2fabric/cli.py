@@ -1338,14 +1338,20 @@ def discovery_adf_semantic(project_name: str) -> None:
     help="JSON file describing Spark compute ADF only references (Databricks clusters by id, Synapse Spark pools by "
          "name) so the Spark compute plan can size it. See docs/compute-plan.md.",
 )
+@click.option(
+    "--lakehouse", "lakehouse", default=None,
+    help="Repoint ADLS datasets (CSV, Parquet) to this lakehouse through the storage map's OneLake shortcuts. Opt-in; "
+         "bind the lakehouse with ItemToId 'lakehouse:<name>' in --resolutions. Others stay on their connection, with the reason.",
+)
 def convert(project_name: str, pipelines: tuple[str, ...], resolutions_path: str | None,
-            apply_reconstruction: bool, compute_sources_path: str | None) -> None:
+            apply_reconstruction: bool, compute_sources_path: str | None, lakehouse: str | None) -> None:
     """Convert the discovered ADF pipelines to Fabric pipeline definitions (deterministic, no LLM)."""
     config = load_config()
     store = ProjectStore(projects_root(config))
     result = ConversionAgent(store).run(
         ConversionRequest(project_name=project_name, pipelines=list(pipelines), resolutions_path=resolutions_path,
-                          apply_reconstruction=apply_reconstruction, compute_sources_path=compute_sources_path)
+                          apply_reconstruction=apply_reconstruction, compute_sources_path=compute_sources_path,
+                          lakehouse=lakehouse)
     )
     if not result.success:
         click.secho(f"Conversion failed: {result.error}", fg="red", err=True)

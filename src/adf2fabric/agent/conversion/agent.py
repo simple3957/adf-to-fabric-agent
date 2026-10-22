@@ -125,6 +125,14 @@ class ConversionAgent:
                                  if w.approval.status == 'approved' and w.artifact.fabric_item_id}
             except Exception:  # noqa: BLE001 - a damaged manifest must not stop conversion; the default path is unaffected
                 ctx.workloads = {}
+        if request.lakehouse:
+            smap = self.store.project_dir(pid) / "storage" / "storage-map.json"
+            if not smap.exists():
+                return ConversionResult(success=False, message="Conversion failed.",
+                                        error=f"--lakehouse needs the storage map. Run `adf2fabric storage-map --project {pid}` first.")
+            shortcuts = json.loads(smap.read_text(encoding="utf-8")).get("shortcuts", [])
+            ctx.storage_routes = {(s["account"].lower(), s["container"].lower()): s["shortcut"] for s in shortcuts}
+            ctx.route_lakehouse = request.lakehouse
         compute_sources = load_sources(request.compute_sources_path)
         wanted = {n.lower() for n in request.pipelines}
         selected = [p for p in sorted(d.pipelines, key=lambda p: p.name.lower())

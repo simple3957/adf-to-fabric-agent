@@ -30,11 +30,26 @@ Only a literal (account, container) with a planned shortcut is rewritten, and it
 Paths built from variables, `wasbs://` / `.blob.core.windows.net`, and unplanned containers are left as written and stay open
 findings. The shortcuts must exist before the notebook runs. Idea taken from the Synapse accelerator's `storage_remap.py`.
 
+## Repointing pipelines to the Lakehouse (`convert --lakehouse <name>`)
+
+Opt-in. After `storage-map`, `convert --lakehouse <name> --resolutions <file>` rewrites ADLS Gen2 datasets to read and write the
+lakehouse through the planned shortcuts. Bind the lakehouse with `{"type": "ItemToId", "key": "lakehouse:<name>", "value": "<guid>"}`
+and the workspace with `WorkspaceId`; unbound, they stay placeholders and `deploy` refuses the pipeline.
+
+The JSON emitted is exactly what ran in Fabric on 2026-10-22 (workspace adf-migration-test): Copy CSV -> CSV and Parquet -> Parquet,
+Lookup, GetMetadata (childItems, exists), and the converter's own output for `PL_Copy_Test` (10 rows, as in ADF) and
+`PL_Rig_Child_FileToParquet` (folder from a parameter; Lookup 4, Copy 4, its row-count check passed):
+
+    datasetSettings.linkedService = {name, properties: {type: Lakehouse, typeProperties: {workspaceId, artifactId, rootFolder: Files}}}
+    datasetSettings.typeProperties.location = {type: LakehouseLocation, folderPath: <shortcut>/<folder>, fileName}
+    storeSettings.type: AzureBlobFSReadSettings -> LakehouseReadSettings, AzureBlobFSWriteSettings -> LakehouseWriteSettings
+
+A folder written as an expression keeps it, with the shortcut in front (`@concat('<shortcut>/', ...)`). These stay on their storage
+connection, with a `storage_not_repointed` note saying why: formats other than DelimitedText and Parquet (not run yet), a dynamic
+container, an account without a literal ADLS Gen2 URL, a container without a shortcut, storeSettings that hold a path
+(`wildcardFolderPath`, `fileListPath`, `partitionRootPath`, ...), and every Delete activity (proving it live would delete files).
+
 ## Not done yet
 
-* Pipelines are **not** rewritten to read the Lakehouse. The shape of a Lakehouse dataset in Fabric pipeline JSON is not verified in this
-  project (Microsoft's connector page documents only the portal fields: workspaceId, itemId, rootFolder, folderPath, fileName), and the
-  rule here is not to guess properties. Until it is verified, converted pipelines keep using Fabric connections to the original
-  storage (which is also what Microsoft's own upgrader does).
-* Loading files into Lakehouse Tables (Delta) is a separate decision, and data copy is out of scope.
-* Not exercised against a live Fabric workspace.
+* Formats other than CSV and Parquet, Lakehouse Tables (Delta) as a target, and Delete are not repointed.
+* Data is never copied or deleted.
