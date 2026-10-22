@@ -39,3 +39,15 @@ In Git Bash on Windows, set `MSYS_NO_PATHCONV=1` first, or `/container` is rewri
 Verified live on 2026-10-16: `PL_SQL_Data_Validation` completed with its three Lookups succeeded.
 
 Endpoints and the create/update/list/long-running-operation flow follow the Fabric REST API. Verify against the official docs before changing them.
+
+## Committing to the workspace's Git branch (`git-commit`)
+
+`adf2fabric git-commit --project <name> --workspace-id <guid> [--item <name>] [--all-changes] [--comment ...] [--apply]` reads the
+workspace's Git connection and status (`GET .../git/connection`, `GET .../git/status`, long-running when Fabric says so) and commits
+with `POST .../git/commitToGit` in `Selective` mode: only the uncommitted workspace changes of the migration's pipelines (and any
+`--item`), unless `--all-changes`. Without `--apply` nothing is committed.
+
+It refuses when the workspace is not connected and initialised, and when the branch has changes the workspace does not have (update
+the workspace from Git in Fabric first). Conflicting items are listed, never committed. Connecting the workspace to a repository
+and branch, and the caller's Git credentials in Fabric, are set up by hand once. Built to Microsoft's REST reference (2026-10-22);
+not yet run against a Git-connected workspace.

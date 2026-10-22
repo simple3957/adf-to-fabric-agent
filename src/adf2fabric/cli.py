@@ -1818,6 +1818,52 @@ def run_cmd(workspace_id: str, pipelines: tuple[str, ...], params: tuple[str, ..
         sys.exit(1)
 
 
+@cli.command(name="git-commit")
+@click.option("--project", "project_name", required=True, help="Project name (`deploy` must have run).")
+@click.option("--workspace-id", "workspace_id", required=True, help="Fabric workspace id (GUID); it must already be connected to Git.")
+@click.option("--item", "extra_items", multiple=True, help="Also commit this workspace item (display name), e.g. a deployed notebook. Repeatable.")
+@click.option("--all-changes", is_flag=True, help="Commit every uncommitted workspace change, not only the migration's items.")
+@click.option("--comment", default="ADF to Fabric migration", show_default=True, help="Commit comment (Fabric allows 300 characters).")
+@azure_auth_options()
+@click.option("--apply", "apply_", is_flag=True, help="Actually commit. Without it this only reads the Git status and shows what would be committed.")
+@_audited("git_commit")
+def git_commit_cmd(project_name: str, workspace_id: str, extra_items: tuple[str, ...], all_changes: bool, comment: str, apply_: bool,
+                   auth: str, **auth_env: str | None) -> None:
+    """Commit the migration's items in the workspace to its connected Git branch (dry run unless --apply)."""
+    from adf2fabric.agent.deployment.fabric_deploy import FABRIC_SCOPE, DeployError, FabricClient
+    from adf2fabric.agent.deployment.fabric_git import commit, plan_commit
+    from adf2fabric.connectivity._azure import CredentialUnavailable, build_credential
+
+    store = ProjectStore(projects_root(load_config()))
+    pid = slugify(project_name)
+    if not store.has_conversion(pid):
+        click.secho(f"Git commit failed: project '{pid}' has no conversion. Run `adf2fabric convert` and `deploy` first.", fg="red", err=True)
+        sys.exit(1)
+    items = [p.fabric_pipeline_name for p in store.load_conversion(pid).pipelines] + list(extra_items)
+    try:
+        credential, _ = build_credential(credential_from(auth, **auth_env))
+        client = FabricClient(credential.get_token(FABRIC_SCOPE).token)
+        plan = commit(client, workspace_id, plan_commit(client, workspace_id, items, all_changes=all_changes), comment, apply=apply_)
+    except (DeployError, CredentialUnavailable) as exc:
+        click.secho(f"Git commit failed: {exc}", fg="red", err=True)
+        sys.exit(1)
+    c = plan.connection
+    click.echo(("GIT COMMIT" if apply_ else "GIT COMMIT (dry run - nothing committed; add --apply)")
+               + f"  {c.provider} {c.repository} branch {c.branch or '-'} ({c.state})")
+    for ch in plan.to_commit:
+        click.echo(f"  commit    {ch.item_type:<18} {ch.name} ({ch.workspace_change})")
+    for ch in plan.conflicts:
+        click.secho(f"  CONFLICT  {ch.item_type:<18} {ch.name}: changed in the workspace and in Git; resolve it in Fabric", fg="yellow")
+    if plan.not_ours:
+        click.echo(f"  left alone: {len(plan.not_ours)} other uncommitted workspace change(s) (use --all-changes or --item to include them)")
+    for b in plan.blockers:
+        click.secho(f"  BLOCKED: {b}", fg="red")
+    if plan.detail:
+        click.echo(f"  {plan.detail}")
+    if plan.blockers:
+        sys.exit(1)
+
+
 @cli.command(name="verify")
 @click.option("--project", "project_name", required=True, help="Project name (`convert` and `deploy` must have run).")
 @click.option("--workspace-id", "workspace_id", required=True, help="Fabric workspace id (GUID) that holds the pipelines.")
