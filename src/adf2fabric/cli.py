@@ -745,9 +745,33 @@ def _workload_options_decorator(fn):
         click.option("--secret-map", "secret_maps", multiple=True, help="DATABRICKS_SECRET_SCOPE=https://<vault>.vault.azure.net/. Repeatable."),
         click.option("--lakehouse-id", default=None, help="Default lakehouse (GUID) for generated Spark job definitions."),
         click.option("--pipeline", "pipelines", multiple=True, help="Only workloads used by this pipeline. Repeatable."),
+        click.option("--onelake-workspace", "onelake_workspace", default=None,
+                     help="Route ADLS paths in code through the storage map's OneLake shortcuts: the workspace (GUID, or a name without spaces)."),
+        click.option("--onelake-lakehouse", "onelake_lakehouse", default=None,
+                     help="The lakehouse that holds the shortcuts (GUID with a workspace GUID, or a name with a workspace name)."),
     ]):
         fn = opt(fn)
     return fn
+
+
+def _attach_storage_routes(store, project_name: str, opts, workspace: Optional[str], lakehouse: Optional[str]) -> None:
+    """Opt-in: rewrite literal ADLS paths in generated code to the OneLake shortcuts `storage-map` planned."""
+    if not workspace and not lakehouse:
+        return
+    if not (workspace and lakehouse):
+        raise click.UsageError("Give both --onelake-workspace and --onelake-lakehouse to route storage paths.")
+    from adf2fabric.agent.storage.routes import RouteError, Routes, Target
+
+    path = store.project_dir(project_name) / "storage" / "storage-map.json"
+    if not path.exists():
+        raise click.UsageError(f"No storage map yet. Run `adf2fabric storage-map --project {project_name}` first.")
+    try:
+        opts.storage_routes = Routes.from_storage_map(json.loads(path.read_text(encoding="utf-8")), Target(workspace, lakehouse))
+    except RouteError as exc:
+        raise click.UsageError(str(exc)) from None
+    if not opts.storage_routes:
+        click.secho("The storage map plans no shortcut, so no path is routed.", fg="yellow")
+        opts.storage_routes = None
 
 
 def _print_manifest(store, m) -> None:
@@ -764,7 +788,7 @@ def _print_manifest(store, m) -> None:
 @cli.command(name="workloads-assess")
 @_workload_options_decorator
 def workloads_assess(project_name, compute_sources, databricks_token_env, allow_az_tokens, fetch, sources, artifacts, secret_maps,
-                     lakehouse_id, pipelines) -> None:
+                     lakehouse_id, pipelines, onelake_workspace, onelake_lakehouse) -> None:
     """Assess Spark workloads for Fabric (read-only; writes only the manifest and any code you authorised retrieving)."""
     from adf2fabric.agent.workloads.engine import build_manifest
     from adf2fabric.agent.workloads.report import render_report
@@ -772,6 +796,7 @@ def workloads_assess(project_name, compute_sources, databricks_token_env, allow_
     store = ProjectStore(projects_root(load_config()))
     opts = _workload_options(False, compute_sources, fetch, databricks_token_env, allow_az_tokens, sources, artifacts, secret_maps,
                              lakehouse_id, pipelines)
+    _attach_storage_routes(store, project_name, opts, onelake_workspace, onelake_lakehouse)
     m = build_manifest(store, project_name, opts)
     store.save_workload_manifest(project_name, m, render_report(m))
     click.echo("WORKLOAD ASSESSMENT (nothing was generated or sent to Fabric)")
@@ -781,7 +806,7 @@ def workloads_assess(project_name, compute_sources, databricks_token_env, allow_
 @cli.command(name="workloads-generate")
 @_workload_options_decorator
 def workloads_generate(project_name, compute_sources, databricks_token_env, allow_az_tokens, fetch, sources, artifacts, secret_maps,
-                       lakehouse_id, pipelines) -> None:
+                       lakehouse_id, pipelines, onelake_workspace, onelake_lakehouse) -> None:
     """Generate Fabric artifacts (notebooks, Spark job definitions) locally. Explicit opt-in; nothing is sent to Fabric."""
     from adf2fabric.agent.workloads.engine import build_manifest
     from adf2fabric.agent.workloads.report import render_report
@@ -789,6 +814,7 @@ def workloads_generate(project_name, compute_sources, databricks_token_env, allo
     store = ProjectStore(projects_root(load_config()))
     opts = _workload_options(True, compute_sources, fetch, databricks_token_env, allow_az_tokens, sources, artifacts, secret_maps,
                              lakehouse_id, pipelines)
+    _attach_storage_routes(store, project_name, opts, onelake_workspace, onelake_lakehouse)
     m = build_manifest(store, project_name, opts)
     store.save_workload_manifest(project_name, m, render_report(m))
     click.echo("WORKLOAD GENERATION (files written under workloads/artifacts; static checks only, NOT run in Fabric)")

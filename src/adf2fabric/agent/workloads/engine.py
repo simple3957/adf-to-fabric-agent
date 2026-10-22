@@ -54,6 +54,7 @@ class Options:
     pipelines: Optional[set[str]] = None  # lower-case names; None = all
     generate: bool = False  # write Fabric artifacts (explicit opt-in)
     client_factory: Optional[Callable[[str, str], Any]] = None
+    storage_routes: Optional[Any] = None  # agent.storage.routes.Routes: rewrite literal ADLS paths to their OneLake shortcut (opt-in)
 
 
 # =====================================================================================================================
@@ -391,6 +392,8 @@ def _assess_notebook(spec: _Spec, code: Code, env: ExecutionEnvironment, opts: O
             fnd.rewritten, fnd.action = True, ""
         if fnd.code in ("databricks_spark_conf", "synapse_spark_conf") and counts.get("source_only_spark_conf"):
             fnd.rewritten, fnd.action = True, ""
+    if opts.storage_routes:
+        _route_storage(tr, findings, opts.storage_routes)
     # parameters read but not convertible
     ok = {n for n, _ in tr.parameters}
     for w in an.widgets:
@@ -401,6 +404,27 @@ def _assess_notebook(spec: _Spec, code: Code, env: ExecutionEnvironment, opts: O
         findings.append(_finding("dbutils_fs_mv_args", F.filesystem, S.change, "dbutils.fs.mv is called with a third argument; Fabric's mv(src, dest, create_path, overwrite) "
                                  "means something different, so it was not rewritten.", "Port the call by hand."))
     return an, tr, findings, cells
+
+
+def _route_storage(tr: transform.Transformed, findings: list[Finding], routes: Any) -> None:
+    """Rewrite literal ADLS paths in the generated cells to the OneLake shortcut the storage map planned for them."""
+    total, locations = 0, set()
+    for cell in tr.cells:
+        if cell.get("cell_type") != "code":
+            continue
+        r = routes.rewrite("".join(cell["source"]))
+        if r.routed:
+            cell["source"] = r.text.splitlines(keepends=True)
+            total += r.routed
+            locations |= set(r.routed_locations)
+    if not total:
+        return
+    tr.rewrites.append(Rewrite(code="storage_routed", count=total,
+                               description=f"ADLS paths -> OneLake shortcut paths ({', '.join(sorted(locations))}); the shortcuts must exist before the notebook runs"))
+    for fnd in findings:
+        m = re.match(r"^abfss?://([\w.-]+)@([\w-]+)$", fnd.construct or "") if fnd.code == "adls_direct_path" else None
+        if m and f"{m.group(2).lower()}/{m.group(1).lower()}" in locations:
+            fnd.rewritten, fnd.action = True, "Create the OneLake shortcut (storage-map / create-shortcut) before running."
 
 
 def _synapse_session(code: Code, env: ExecutionEnvironment) -> list[Finding]:

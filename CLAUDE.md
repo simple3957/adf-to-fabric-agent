@@ -25,7 +25,7 @@ CLI commands (`src/adf2fabric/cli.py`): `intake`, `consultation`, `discovery`, `
 | `agent/consultation/` | Readiness gate |
 | `agent/discovery/` | Repository, ADF, semantic parser, ADLS, SQL discovery |
 | `agent/dependencies/` | Dependency inventory and migration order from the semantic record + source manifest; opt-in per-provider access checks ([docs](docs/dependency-inventory.md)) |
-| `agent/storage/` | Read-only storage map: ADLS Gen2 datasets to OneLake shortcuts and Lakehouse paths, with unmappable datasets listed for a decision ([docs](docs/storage-map.md)) |
+| `agent/storage/` | Read-only storage map (ADLS Gen2 datasets to OneLake shortcuts and Lakehouse paths, unmappable ones listed for a decision) and opt-in routing of literal ADLS paths in generated notebooks through those shortcuts ([docs](docs/storage-map.md)) |
 | `agent/workloads/` | Spark workload migration: retrieve code (only when authorised), analyze, classify, generate Fabric notebook / Spark job definition, manifest ([docs](docs/workload-migration.md)) |
 | `agent/provisioning/` | Approval-gated Fabric target provisioning: requirements, read-only state, plan, apply, verify; separate Fabric and ARM transports ([docs](docs/fabric-provisioning.md)) |
 | `agent/validation/` | Independent migration validation (static / API / deployment / runtime) with an honest overall status ([docs](docs/migration-validation.md)) |

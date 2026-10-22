@@ -17,6 +17,19 @@
 * Each shortcut needs an existing Fabric connection to the account. The report prints a `create-shortcut` command with
   `<connection-id for ...>` left for you; the id is never invented. Run it dry first, then add `--apply`.
 
+## Routing storage paths in code (Spark notebooks)
+
+`workloads-assess` / `workloads-generate` with `--onelake-workspace` and `--onelake-lakehouse` rewrite literal ADLS paths in the
+generated notebooks to the shortcut the storage map planned (`agent/storage/routes.py`):
+
+    abfss://c@acct.dfs.core.windows.net/x  ->  abfss://<ws>@onelake.dfs.fabric.microsoft.com/<lakehouse>/Files/<shortcut>/x
+    https://acct.dfs.core.windows.net/c/x  ->  https://onelake.dfs.fabric.microsoft.com/<ws>/<lakehouse>/Files/<shortcut>/x
+
+Give both as GUIDs, or both as names (then `<lakehouse>.Lakehouse`), per Microsoft's OneLake URI rules; a mix is refused.
+Only a literal (account, container) with a planned shortcut is rewritten, and its `adls_direct_path` finding is marked rewritten.
+Paths built from variables, `wasbs://` / `.blob.core.windows.net`, and unplanned containers are left as written and stay open
+findings. The shortcuts must exist before the notebook runs. Idea taken from the Synapse accelerator's `storage_remap.py`.
+
 ## Not done yet
 
 * Pipelines are **not** rewritten to read the Lakehouse. The shape of a Lakehouse dataset in Fabric pipeline JSON is not verified in this
