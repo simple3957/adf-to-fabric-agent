@@ -976,6 +976,58 @@ def provision_verify(project_name: str, auth: str, **auth_env) -> None:
         sys.exit(2)
 
 
+@cli.command(name="validate")
+@click.option("--project", "project_name", required=True)
+@click.option("--stage", "stages", multiple=True, type=click.Choice(["static", "api", "deployment", "runtime", "all"]),
+              help="Stages to run (repeatable). Default: static. `all` = static, api, deployment, runtime.")
+@click.option("--workspace-id", default=None, help="The Fabric workspace to read for the api and deployment stages (read-only).")
+@click.option("--runtime", "runtime_flag", is_flag=True,
+              help="Judge runtime from the recorded run-and-compare results (`verify`). Never starts a run itself.")
+@azure_auth_options()
+def validate_cmd(project_name: str, stages: tuple, workspace_id, runtime_flag: bool, auth: str, **auth_env) -> None:
+    """Independently validate the generated artifacts against the source. Read-only; never claims success the evidence does not support."""
+    from adf2fabric.agent.validation import engine
+    from adf2fabric.agent.validation.report import render
+
+    chosen = set(stages) or {"static"}
+    if "all" in chosen:
+        chosen = set(engine.ALL_STAGES)
+    if runtime_flag:
+        chosen.add("runtime")
+    store = ProjectStore(projects_root(load_config()))
+    fab = None
+    if chosen & {"api", "deployment"} and workspace_id:
+        try:
+            from adf2fabric import cloud
+            from adf2fabric.agent.provisioning.transport import FabricGateway
+            from adf2fabric.connectivity._azure import build_credential
+
+            credential, _ = build_credential(credential_from(auth, **auth_env))
+            fab = FabricGateway(lambda: credential.get_token(cloud.FABRIC_SCOPE).token)
+        except Exception as exc:  # noqa: BLE001 - no token in the message
+            click.secho(f"Could not sign in to Fabric ({type(exc).__name__}); the api / deployment stages will be NOT_RUN.", fg="yellow", err=True)
+    try:
+        report = engine.validate(store, project_name, stages=chosen, fab=fab, workspace=workspace_id)
+    except ProjectNotFoundError as exc:
+        click.secho(str(exc), fg="red", err=True)
+        sys.exit(1)
+    d = store.project_dir(project_name) / "validation"
+    d.mkdir(parents=True, exist_ok=True)
+    store.save_validation_report(project_name, report)
+    (d / "report.md").write_text(render(report), encoding="utf-8")
+    click.echo(f"MIGRATION VALIDATION: {report.overall}")
+    for r in report.overall_reasons:
+        click.echo(f"  {r}")
+    for s in report.stages:
+        click.echo(f"  {s.stage.value:10} {s.status.value:8} pass {s.passed}  fail {s.failed}  blocked {s.blocked}  not run {s.not_run}")
+    click.echo("  components: " + ", ".join(f"{v} {k}" for k, v in report.inventory.by_status.items()))
+    for x in [x for x in report.checks if x.result.value == "FAIL" and x.required][:8]:
+        click.secho(f"  FAIL {x.id} {x.component or ''}: {x.summary}", fg="red")
+    click.echo(f"  report: {d / 'report.md'}")
+    if report.overall in ("FAILED",):
+        sys.exit(2)
+
+
 @cli.command(name="discovery-dependencies")
 @click.option("--project", "project_name", required=True, help="Project name (`discovery-adf-semantic` must have run).")
 @click.option("--check", "checks", multiple=True, type=click.Choice(["databricks", "key_vault", "storage", "network"]),

@@ -23,6 +23,7 @@ import yaml
 from pydantic import BaseModel
 
 from adf2fabric.project.dependencies import DependencyInventory
+from adf2fabric.project.validation import ValidationReport
 from adf2fabric.project.workloads import WorkloadManifest
 from adf2fabric.project.discovery import (
     AdfDiscovery,
@@ -470,6 +471,25 @@ class ProjectStore:
                 "Run `adf2fabric workloads-assess` first.")
         with path.open(encoding="utf-8") as f:
             return WorkloadManifest.model_validate(_safe_load(f))
+
+    # --- Migration validation report -----------------------------------------------------------------------------
+
+    def validation_path(self, project_id: str) -> Path:
+        return self.project_dir(project_id) / "validation" / "validation.yaml"
+
+    def save_validation_report(self, project_id: str, report: ValidationReport) -> Path:
+        path = self.validation_path(project_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("w", encoding="utf-8") as f:
+            yaml.safe_dump(json.loads(report.model_dump_json()), f, sort_keys=False)
+        return path
+
+    def load_validation_report(self, project_id: str) -> ValidationReport:
+        path = self.validation_path(project_id)
+        if not path.exists():
+            raise ProjectNotFoundError(f"No validation report for '{project_id}'. Run `adf2fabric validate` first.")
+        with path.open(encoding="utf-8") as f:
+            return ValidationReport.model_validate(_safe_load(f))
 
     # --- Fabric target provisioning records (target spec, state, plan, approval, run journal, verification) -------
 

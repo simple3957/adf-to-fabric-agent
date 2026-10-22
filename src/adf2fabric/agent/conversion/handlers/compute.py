@@ -142,7 +142,7 @@ def convert_databricks_other(cx: ActivityBuilder) -> None:
 
 
 register(ConversionRule(
-    name="databricks_notebook", adf_types=("DatabricksNotebook",), fabric_types=("DatabricksNotebook",),
+    name="databricks_notebook", adf_types=("DatabricksNotebook",), fabric_types=("DatabricksNotebook", "TridentNotebook"),
     variants=("existing cluster", "new job cluster", "libraries", "base parameters"),
     strategy=ConversionStrategy.transformed, handler=convert_databricks_notebook,
     runtime_disposition="reuse_externally",
