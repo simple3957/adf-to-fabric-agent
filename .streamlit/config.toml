@@ -1,11 +1,11 @@
-# ADF → Fabric Studio theme: dark charcoal with emerald / cyan accents.
+# ADF → Fabric Studio theme: light surfaces with emerald / cyan accents.
 [theme]
-base = "dark"
-primaryColor = "#10b981"
-backgroundColor = "#0d0f13"
-secondaryBackgroundColor = "#1b1f27"
-textColor = "#e6e9ef"
-borderColor = "#262b35"
+base = "light"
+primaryColor = "#047857"
+backgroundColor = "#f5f7fa"
+secondaryBackgroundColor = "#f1f4f8"
+textColor = "#0f172a"
+borderColor = "#e2e8f0"
 font = "sans-serif"
 baseRadius = "10px"
 
