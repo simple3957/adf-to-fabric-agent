@@ -20,6 +20,11 @@ _COPY_DOCUMENTED = (
 _COPY_LOGGING = ("logSettings", "logStorageSettings", "redirectIncompatibleRowSettings", "sessionLog")
 
 
+def _routed(ds: Optional[dict]) -> bool:
+    """Whether dataset_settings actually put the dataset on the Lakehouse (it can still fall back to the connection)."""
+    return isinstance(ds, dict) and ((ds.get("linkedService") or {}).get("properties") or {}).get("type") == "Lakehouse"
+
+
 def _fail(cx: ActivityBuilder, code: str, reason: str, *alternatives: str) -> None:
     block(cx, code, reason, *alternatives)
 
@@ -51,8 +56,8 @@ def convert_copy(cx: ActivityBuilder) -> None:
         "source": {**cx.tree(source, "typeProperties.source", "typeProperties.source"), "datasetSettings": ds_src},
         "sink": {**cx.tree(sink, "typeProperties.sink", "typeProperties.sink"), "datasetSettings": ds_snk},
     }
-    for side, route in (("source", r_src), ("sink", r_snk)):
-        if route is not None and isinstance(tp[side].get("storeSettings"), dict):
+    for side, ds in (("source", ds_src), ("sink", ds_snk)):
+        if _routed(ds) and isinstance(tp[side].get("storeSettings"), dict):
             tp[side]["storeSettings"] = lakehouse_store_settings(cx, tp[side]["storeSettings"], f"typeProperties.{side}.storeSettings")
     cx.mapping("typeProperties.source", "typeProperties.source", "copy_source",
                f"{source.get('type')} kept; dataset '{src_io.name}' inlined")
@@ -162,7 +167,7 @@ def convert_lookup(cx: ActivityBuilder) -> None:
         return _fail(cx, "lookup_dataset_unavailable", "its dataset could not be inlined.")
     tp: dict[str, Any] = {"source": cx.tree(src, "typeProperties.source", "typeProperties.source"),
                           "datasetSettings": ds}
-    if route is not None and isinstance(tp["source"].get("storeSettings"), dict):
+    if _routed(ds) and isinstance(tp["source"].get("storeSettings"), dict):
         tp["source"]["storeSettings"] = lakehouse_store_settings(cx, tp["source"]["storeSettings"], "typeProperties.source.storeSettings")
     cx.mapping("typeProperties.source", "typeProperties.source", "lookup_source", f"{src.get('type')} kept")
     cx.mapping("typeProperties.dataset", "typeProperties.datasetSettings", "dataset_inlined")
@@ -213,7 +218,7 @@ def convert_dataset_activity(cx: ActivityBuilder) -> None:
     documented = {"GetMetadata": ("fieldList", "storeSettings", "formatSettings"),
                   "Delete": ("recursive", "maxConcurrentConnections", "enableLogging", "storeSettings")}[ftype]
     tp = {"datasetSettings": ds, **carry(cx, documented, skip=("dataset", "logStorageSettings"))}
-    if route is not None and isinstance(tp.get("storeSettings"), dict):
+    if _routed(ds) and isinstance(tp.get("storeSettings"), dict):
         tp["storeSettings"] = lakehouse_store_settings(cx, tp["storeSettings"], "typeProperties.storeSettings")
     cx.mapping("typeProperties.dataset", "typeProperties.datasetSettings", "dataset_inlined")
     if "logStorageSettings" in act.raw_properties:

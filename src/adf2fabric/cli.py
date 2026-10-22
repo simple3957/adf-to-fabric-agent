@@ -1197,15 +1197,27 @@ def audit_verify() -> None:
 @click.option("--project", "project_name", required=True, help="Project name (`discovery-adf-semantic` must have run).")
 @click.option("--lakehouse", "lakehouse", default=None, help="Target lakehouse NAME, shown in the plan. It is never invented: leave it out if undecided.")
 @click.option("--workspace-id", "workspace_id", default=None, help="Fabric workspace id, only to fill the printed create-shortcut commands.")
-def storage_map_cmd(project_name: str, lakehouse: Optional[str], workspace_id: Optional[str]) -> None:
+@click.option("--shortcut", "shortcut_names", multiple=True,
+              help="ACCOUNT/CONTAINER=NAME: use this shortcut name (e.g. one that already exists in the lakehouse). Repeatable.")
+def storage_map_cmd(project_name: str, lakehouse: Optional[str], workspace_id: Optional[str], shortcut_names: tuple[str, ...]) -> None:
     """Map ADF storage datasets to OneLake shortcuts and Lakehouse paths. Read-only: creates nothing, moves no data."""
-    from adf2fabric.agent.storage.mapping import build_storage_map, render_markdown
+    from adf2fabric.agent.storage.mapping import StorageMapError, build_storage_map, render_markdown
+
+    names: dict[tuple[str, str], str] = {}
+    for k, v in _kv_pairs(shortcut_names, "--shortcut").items():
+        account, sep, container = k.partition("/")
+        if not sep or not account or not container:
+            raise click.UsageError(f"--shortcut must look like ACCOUNT/CONTAINER=NAME, got '{k}={v}'.")
+        names[(account, container)] = v
 
     store = ProjectStore(projects_root(load_config()))
     if not store.has_adf_semantic_discovery(project_name):
         click.secho(f"No ADF semantic discovery for '{project_name}'. Run `adf2fabric discovery-adf-semantic --project {project_name}` first.", fg="red", err=True)
         sys.exit(1)
-    m = build_storage_map(store.load_adf_semantic_discovery(project_name), lakehouse)
+    try:
+        m = build_storage_map(store.load_adf_semantic_discovery(project_name), lakehouse, names)
+    except StorageMapError as exc:
+        raise click.UsageError(str(exc)) from None
     out = store.project_dir(project_name) / "storage"
     out.mkdir(parents=True, exist_ok=True)
     (out / "storage-map.json").write_text(json.dumps(m.to_dict(), indent=2, default=str), encoding="utf-8")
@@ -1839,11 +1851,12 @@ def git_commit_cmd(project_name: str, workspace_id: str, extra_items: tuple[str,
     if not store.has_conversion(pid):
         click.secho(f"Git commit failed: project '{pid}' has no conversion. Run `adf2fabric convert` and `deploy` first.", fg="red", err=True)
         sys.exit(1)
-    items = [p.fabric_pipeline_name for p in store.load_conversion(pid).pipelines] + list(extra_items)
+    pipes = [p.fabric_pipeline_name for p in store.load_conversion(pid).pipelines]
     try:
         credential, _ = build_credential(credential_from(auth, **auth_env))
         client = FabricClient(credential.get_token(FABRIC_SCOPE).token)
-        plan = commit(client, workspace_id, plan_commit(client, workspace_id, items, all_changes=all_changes), comment, apply=apply_)
+        plan = commit(client, workspace_id, plan_commit(client, workspace_id, pipes, extra=extra_items, all_changes=all_changes),
+                      comment, apply=apply_)
     except (DeployError, CredentialUnavailable) as exc:
         click.secho(f"Git commit failed: {exc}", fg="red", err=True)
         sys.exit(1)
@@ -1854,6 +1867,8 @@ def git_commit_cmd(project_name: str, workspace_id: str, extra_items: tuple[str,
         click.echo(f"  commit    {ch.item_type:<18} {ch.name} ({ch.workspace_change})")
     for ch in plan.conflicts:
         click.secho(f"  CONFLICT  {ch.item_type:<18} {ch.name}: changed in the workspace and in Git; resolve it in Fabric", fg="yellow")
+    for ch in plan.deletions:
+        click.secho(f"  NOT COMMITTED  {ch.item_type:<18} {ch.name}: deleted in the workspace; committing would delete it from Git. Do it in Fabric if intended.", fg="yellow")
     if plan.not_ours:
         click.echo(f"  left alone: {len(plan.not_ours)} other uncommitted workspace change(s) (use --all-changes or --item to include them)")
     for b in plan.blockers:

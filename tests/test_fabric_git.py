@@ -125,3 +125,20 @@ def test_the_connection_is_summarised_without_ids():
     assert conn.connected and conn.repository == "org/fabric" and conn.branch == "dev" and conn.provider == "GitHub"
     with pytest.raises(DeployError):
         get_connection(client(Fake()), "not-a-guid")
+
+
+def test_a_deletion_is_never_committed_even_with_all_changes():
+    fake = Fake(changes=[{"itemMetadata": {"itemIdentifier": {"logicalId": "L1"}, "itemType": "DataPipeline", "displayName": "PL_A"},
+                          "workspaceChange": "Deleted", "conflictType": "None"}])
+    c = client(fake)
+    for all_changes in (False, True):
+        plan = commit(c, WS, plan_commit(c, WS, ["PL_A"], all_changes=all_changes), "c", apply=True)
+        assert [x.name for x in plan.deletions] == ["PL_A"] and not plan.to_commit and not commits(fake)
+
+
+def test_converted_names_match_pipelines_only_and_extra_names_match_any_type():
+    fake = Fake(changes=[change("PL_Load", "1", ws="Modified"), change("pl_load", "2", ws="Added", type_="Notebook"),
+                         change("NB_X", "3", ws="Added", type_="Notebook")])
+    plan = plan_commit(client(fake), WS, ["PL_Load"], extra=["NB_X"])
+    assert sorted((x.name, x.item_type) for x in plan.to_commit) == [("NB_X", "Notebook"), ("PL_Load", "DataPipeline")]
+    assert [x.name for x in plan.not_ours] == ["pl_load"]

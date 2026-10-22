@@ -17,6 +17,8 @@ What this module will and will not do:
   is asked for. An item with a conflict is never committed; it is listed for a person.
 * When the remote branch has changes the workspace does not have, it refuses: the workspace must be updated from Git first
   (in Fabric), so a commit can never be made on top of a state nobody reviewed.
+* An item deleted in the workspace is never committed (that would delete it from the branch); it is listed for a person.
+* Names from the conversion match only DataPipeline items; other item types are matched only when named explicitly.
 * It never connects a workspace to Git, never updates the workspace from Git, never deletes anything.
 """
 
@@ -62,6 +64,7 @@ class CommitPlan:
     conflicts: list[Change] = field(default_factory=list)
     remote_only: list[Change] = field(default_factory=list)  # changes in Git the workspace does not have
     not_ours: list[Change] = field(default_factory=list)  # workspace changes outside the migration's items (left alone)
+    deletions: list[Change] = field(default_factory=list)  # items deleted in the workspace: never committed (it would delete them from Git)
     blockers: list[str] = field(default_factory=list)
     committed: bool = False
     detail: str = ""
@@ -104,8 +107,11 @@ def _change(c: dict) -> Change:
                   conflict=str(c.get("conflictType") or "None"))
 
 
-def plan_commit(client: FabricClient, workspace: str, items: Iterable[str], *, all_changes: bool = False) -> CommitPlan:
-    """Read the connection and status (read-only) and decide what a commit would contain."""
+def plan_commit(client: FabricClient, workspace: str, pipelines: Iterable[str], *, extra: Iterable[str] = (),
+                all_changes: bool = False) -> CommitPlan:
+    """Read the connection and status (read-only) and decide what a commit would contain.
+
+    ``pipelines`` match DataPipeline items only; ``extra`` names match an item of any type."""
     conn = get_connection(client, workspace)
     plan = CommitPlan(connection=conn)
     if not conn.connected:
@@ -114,15 +120,19 @@ def plan_commit(client: FabricClient, workspace: str, items: Iterable[str], *, a
         return plan
     status = get_status(client, workspace)
     plan.workspace_head = str(status.get("workspaceHead") or "")
-    wanted = {n.lower() for n in items}
+    wanted_pipes = {n.lower() for n in pipelines}
+    wanted_any = {n.lower() for n in extra}
     for raw in status.get("changes") or []:
         ch = _change(raw)
         if ch.conflict == "Conflict":
             plan.conflicts.append(ch)
         elif ch.remote_change and not ch.workspace_change:
             plan.remote_only.append(ch)
+        elif ch.workspace_change == "Deleted":
+            plan.deletions.append(ch)
         elif ch.workspace_change and ch.conflict != "SameChanges":
-            (plan.to_commit if all_changes or ch.name.lower() in wanted else plan.not_ours).append(ch)
+            ours = ch.name.lower() in wanted_any or (ch.item_type == "DataPipeline" and ch.name.lower() in wanted_pipes)
+            (plan.to_commit if all_changes or ours else plan.not_ours).append(ch)
     if plan.remote_only:
         plan.blockers.append(f"{len(plan.remote_only)} change(s) in the Git branch are not in the workspace. Update the workspace from Git "
                              "in Fabric first, review it, then commit.")

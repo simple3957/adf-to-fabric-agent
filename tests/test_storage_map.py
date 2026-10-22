@@ -139,3 +139,18 @@ def test_the_command_is_read_only_and_writes_the_report_into_the_project(tmp_pat
     assert data["summary"]["shortcuts"] == 1 and (out / "storage-map.md").exists()
     missing = CliRunner().invoke(cli_mod.cli, ["storage-map", "--project", "nope"])
     assert missing.exit_code == 1 and "discovery-adf-semantic" in missing.output
+
+
+def test_a_shortcut_name_can_be_chosen_and_bad_choices_are_refused():
+    import pytest
+
+    from adf2fabric.agent.storage.mapping import StorageMapError
+
+    linked = [ls("LS1", ACC), ls("LS2", "https://accttwo.dfs.core.windows.net")]
+    d = disc([ds("A", adls("data", "x")), ds("B", adls("data", "y"), "LS2")], linked=linked)
+    m = build_storage_map(d, names={("ACCTONE", "data"): "existing"})  # case-insensitive keys
+    assert sorted(s.shortcut for s in m.shortcuts) == ["data-accttwo", "existing"] and row(m, "A").lakehouse_path == "Files/existing/x"
+    for bad, why in (({("acctone", "data"): "data-accttwo"}, "share"), ({("nope", "x"): "y"}, "No mapped dataset"),
+                     ({("acctone", "data"): "a/b"}, "cannot be"), ({("acctone", "data"): "a'b"}, "cannot be")):
+        with pytest.raises(StorageMapError, match=why):
+            build_storage_map(d, names=bad)

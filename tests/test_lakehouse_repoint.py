@@ -162,3 +162,68 @@ def test_convert_needs_the_storage_map(tmp_path):
     agent.store.load = lambda pid: type("P", (), {"id": pid, "repository": type("R", (), {"commit_sha": d.source_commit_sha})()})()
     r = agent.run(ConversionRequest(project_name="p", lakehouse="lh_main"))
     assert not r.success and "storage-map" in r.error
+
+
+def test_deploy_refuses_a_repointed_pipeline_whose_shortcut_is_missing_or_unconfirmed():
+    from adf2fabric.agent.deployment.fabric_deploy import DeployItem, FabricClient, deploy, lakehouse_shortcuts
+
+    _, content = run(copy(snk="DS_PQ_DYN", folder=expr("@pipeline().parameters.day")), parameters=["day"])
+    assert lakehouse_shortcuts(content) == {(WS, LH, "raw")}  # literal and @concat('raw/', ...) forms both read
+
+    class S:
+        def __init__(self, shortcuts_status=200, names=("raw",)):
+            self.st, self.names, self.calls = shortcuts_status, names, []
+
+        def request(self, method, url, headers=None, json=None, timeout=None):
+            self.calls.append((method, url))
+            class R:  # noqa: N801
+                def __init__(s, code, body):
+                    s.status_code, s._b, s.headers, s.content, s.text = code, body, {}, b"x", ""
+
+                def json(s):
+                    return s._b
+            if url.endswith("/dataPipelines"):
+                return R(200, {"value": []})
+            if url.endswith("/shortcuts"):
+                return R(self.st, {"value": [{"name": n, "path": "/Files"} for n in self.names]} if self.st == 200 else {"errorCode": "Forbidden"})
+            return R(404, {})
+
+    item = DeployItem("PL", content, "x", True)
+    ok = deploy(FabricClient("t", session=S()), WS, [item], apply=False)
+    assert ok[0].action == "create" and not ok[0].problems
+    gone = deploy(FabricClient("t", session=S(names=("other",))), WS, [item], apply=False)
+    assert gone[0].action == "refused" and "does not exist" in gone[0].detail
+    unknown = deploy(FabricClient("t", session=S(shortcuts_status=403)), WS, [item], apply=False)
+    assert unknown[0].action == "refused" and "could not confirm" in unknown[0].detail  # a failed read is never "absent" or "fine"
+
+
+def test_a_dynamic_folder_that_substitutes_to_a_literal_is_prefixed_and_store_settings_follow():
+    # review finding: the dataset fell back to ADLS while storeSettings were switched to Lakehouse (a mismatched activity)
+    rec, content = run(copy(snk="DS_PQ_DYN", folder="out/2024"))
+    k = find(content, "Copy")["typeProperties"]["sink"]
+    assert k["datasetSettings"]["typeProperties"]["location"] == {"type": "LakehouseLocation", "folderPath": "raw/out/2024"}
+    assert k["storeSettings"]["type"] == "LakehouseWriteSettings" and "externalReferences" not in k["datasetSettings"]
+
+
+def test_store_settings_never_change_when_the_dataset_stays_on_its_connection():
+    pq_interp = dataset("DS_PQ_INTERP", "Parquet", "LS_ADLS", {"location": {**loc("raw"), "folderPath": "in/@{dataset().day}"}},
+                        params={"day": {"type": "String"}})
+    d = semantic([pipe(copy(snk="DS_PQ_INTERP", day="x"))], datasets=[CSV, pq_interp], linked_services=[ADLS])
+    ctx = build_project_context(d, Resolutions(RESOLUTIONS))
+    ctx.storage_routes, ctx.route_lakehouse = {("acctone", "raw"): "raw"}, "lh_main"
+    rec, content = ConversionEngine(ctx).convert_pipeline(d.pipelines[0])
+    k = find(content, "Copy")["typeProperties"]["sink"]
+    if "externalReferences" in k["datasetSettings"]:  # kept on the connection: the store settings must stay ADLS too
+        assert k["storeSettings"]["type"] == "AzureBlobFSWriteSettings"
+    else:
+        assert k["storeSettings"]["type"] == "LakehouseWriteSettings" and "dataset()" not in json.dumps(k)
+    assert "raw/in/@{dataset().day}" not in json.dumps(content)  # never ship unconverted dataset() syntax under the shortcut
+
+
+def test_an_escaped_at_sign_is_a_literal_folder():
+    pq_at = dataset("DS_PQ_AT", "Parquet", "LS_ADLS", {"location": {**loc("raw"), "folderPath": "@@weird"}})
+    d = semantic([pipe(copy(snk="DS_PQ_AT"))], datasets=[CSV, pq_at], linked_services=[ADLS])
+    ctx = build_project_context(d, Resolutions(RESOLUTIONS))
+    ctx.storage_routes, ctx.route_lakehouse = {("acctone", "raw"): "raw"}, "lh_main"
+    _, content = ConversionEngine(ctx).convert_pipeline(d.pipelines[0])
+    assert find(content, "Copy")["typeProperties"]["sink"]["datasetSettings"]["typeProperties"]["location"]["folderPath"] == "raw/@weird"

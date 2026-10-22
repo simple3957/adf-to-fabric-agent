@@ -81,7 +81,9 @@ def _literal(v: Any) -> tuple[Optional[str], bool]:
     if hasattr(v, "value") and not isinstance(v, str):  # an Expression object from discovery
         return None, True
     s = str(v)
-    return s, s.startswith("@")
+    if s.startswith("@@"):  # ADF's escape for a literal leading '@'
+        return s[1:], False
+    return s, s.startswith("@") or "@{" in s
 
 
 def lakehouse_route(cx: ActivityBuilder, io: Optional[AdfIO], store_settings: Any, role: str) -> Optional[LakehouseRoute]:
@@ -132,12 +134,19 @@ def _prefixed_folder(shortcut: str, converted: Any) -> Optional[Any]:
 
     ``@expr`` -> ``@concat('<shortcut>/', expr)``; an interpolated string (``a/@{x}``) -> ``<shortcut>/a/@{x}``."""
     v = converted.get("value") if isinstance(converted, dict) and converted.get("type") == "Expression" else converted
-    if not isinstance(v, str) or not v.startswith("@") and "@{" not in v:
+    if not isinstance(v, str):
         return None
-    if v.startswith("@") and not v.startswith(("@{", "@@")):
+    if v.startswith("@@") or ("@" not in v):  # the argument substituted to a literal (or an escaped '@'): prefix it as text
+        lit = v[1:] if v.startswith("@@") else v
+        if ".." in lit:
+            return None
+        return "/".join(p for p in (shortcut, *lit.replace("\\", "/").split("/")) if p)
+    if v.startswith("@") and not v.startswith("@{"):
         new = f"@concat('{shortcut}/', {v[1:]})"
-    else:
+    elif "@{" in v and isinstance(converted, dict):  # an interpolated expression: the shortcut is plain text in front
         new = f"{shortcut}/{v}"
+    else:
+        return None  # a plain string holding '@{...}' was never converted: prefixing it would ship unconverted syntax
     return {"value": new, "type": "Expression"} if isinstance(converted, dict) else new
 
 

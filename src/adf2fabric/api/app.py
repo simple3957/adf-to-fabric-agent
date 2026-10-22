@@ -781,16 +781,25 @@ def create_app(settings: Optional[Settings] = None, live: Optional[Container] = 
             ctx.require(P.migration_execute)  # a real run reads the pipeline's sources and writes its targets
             if not body.confirm:
                 raise HTTPException(422, "This starts real runs in Fabric that read sources and write targets. Confirm it (confirm: true).")
-            if not body.pipelines or len(body.pipelines) > 20:
+            unique: dict[str, str] = {}
+            for n in body.pipelines:  # one run per pipeline, however often a name is repeated
+                unique.setdefault(n.strip().lower(), n.strip())
+            if not unique or len(unique) > 20:
                 raise HTTPException(422, "Name the pipelines to run (1 to 20): running everything is never the default.")
             if not ws:
                 raise HTTPException(422, "Choose the Fabric workspace that holds the pipelines.")
-            ctx.audit("verify.run", "requested", resource="project", resource_id=slug, workspace=ws, pipelines=len(body.pipelines))
+            converted = {p.source_pipeline.lower() for p in ctx.c.store.load_conversion(slug).pipelines} if ctx.c.store.has_conversion(slug) else set()
+            unknown = sorted(v for k, v in unique.items() if k not in converted)
+            if unknown:
+                raise HTTPException(422, f"Not converted pipelines: {', '.join(unknown[:5])}. Only converted, deployed pipelines can be run.")
+            body = body.model_copy(update={"pipelines": list(unique.values())})
         key = _idem_key(ctx, request)
         replay = _idem_replay(key)
         if replay is not None:
             return replay
         opts = body.model_dump()
+        if body.run:  # after the replay check: a repeated submission starts nothing and is not a new request
+            ctx.audit("verify.run", "requested", resource="project", resource_id=slug, workspace=ws, pipelines=len(body.pipelines))
         ctx.audit(f"stage.{stage}", "requested", resource="project", resource_id=slug, workspace=ws or "")
         job = ctx.c.jobs.submit(stage, slug, lambda log: run_stage(ctx.c, ctx.session, slug, stage, log, opts),
                                 org=ctx.principal.org, owner=ctx.principal.id).public()

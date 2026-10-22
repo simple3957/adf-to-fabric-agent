@@ -421,9 +421,14 @@ def _route_storage(tr: transform.Transformed, findings: list[Finding], routes: A
         return
     tr.rewrites.append(Rewrite(code="storage_routed", count=total,
                                description=f"ADLS paths -> OneLake shortcut paths ({', '.join(sorted(locations))}); the shortcuts must exist before the notebook runs"))
+    remaining = "\n".join("".join(c["source"]) for c in tr.cells if c.get("cell_type") == "code")
     for fnd in findings:
         m = re.match(r"^abfss?://([\w.-]+)@([\w-]+)$", fnd.construct or "") if fnd.code == "adls_direct_path" else None
-        if m and f"{m.group(2).lower()}/{m.group(1).lower()}" in locations:
+        if not m or f"{m.group(2).lower()}/{m.group(1).lower()}" not in locations:
+            continue
+        # marked rewritten only when no direct reference to that location is left anywhere in the generated code
+        still = re.search(rf"abfss?://{re.escape(m.group(1))}@{re.escape(m.group(2))}\.dfs\.core\.windows\.net", remaining, re.I)
+        if not still:
             fnd.rewritten, fnd.action = True, "Create the OneLake shortcut (storage-map / create-shortcut) before running."
 
 

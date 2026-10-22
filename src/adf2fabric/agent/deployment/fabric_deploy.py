@@ -67,6 +67,71 @@ def unbound_placeholders(content: dict) -> list[str]:
     return sorted({m.group(0) for m in _PLACEHOLDER.finditer(json.dumps(content))})
 
 
+_SC_CONCAT = re.compile(r"^@concat\('([^'/]+)/'")
+
+
+def lakehouse_shortcuts(content: dict) -> set[tuple[str, str, str]]:
+    """(workspace id, lakehouse id, shortcut name) for every Lakehouse dataset location a repointed pipeline reads or writes.
+
+    ``convert --lakehouse`` puts the shortcut first in ``folderPath``: ``<shortcut>/...`` or ``@concat('<shortcut>/', ...)``."""
+    found: set[tuple[str, str, str]] = set()
+
+    def walk(x: Any) -> None:
+        if isinstance(x, dict):
+            ls = x.get("linkedService") if isinstance(x.get("linkedService"), dict) else None
+            props = (ls or {}).get("properties") or {}
+            loc = ((x.get("typeProperties") or {}).get("location")) if isinstance(x.get("typeProperties"), dict) else None
+            if props.get("type") == "Lakehouse" and isinstance(loc, dict) and loc.get("type") == "LakehouseLocation":
+                tp = props.get("typeProperties") or {}
+                fp = loc.get("folderPath")
+                v = fp.get("value") if isinstance(fp, dict) else fp
+                name = None
+                if isinstance(v, str):
+                    m = _SC_CONCAT.match(v)
+                    name = m.group(1) if m else (v.split("/", 1)[0] if v and not v.startswith("@") else None)
+                if name:
+                    found.add((str(tp.get("workspaceId", "")), str(tp.get("artifactId", "")), name))
+            for v in x.values():
+                walk(v)
+        elif isinstance(x, list):
+            for v in x:
+                walk(v)
+
+    walk(content)
+    return found
+
+
+def missing_shortcuts(client: "FabricClient", needed: set[tuple[str, str, str]], cache: dict) -> list[str]:
+    """Problems for shortcuts that are not in their lakehouse (read-only). A listing that fails is 'not confirmed', never 'absent'."""
+    problems: list[str] = []
+    for ws, lh, name in sorted(needed):
+        if not (_GUID.match(ws) and _GUID.match(lh)):
+            continue  # an unbound lakehouse or workspace is already refused as a placeholder
+        if (ws, lh) not in cache:
+            names: Optional[set[str]] = set()
+            url: Optional[str] = f"{FABRIC_API}/workspaces/{ws}/items/{lh}/shortcuts"
+            try:
+                while url:
+                    resp = client._call("GET", url)
+                    if resp.status_code != 200:
+                        names = None
+                        break
+                    body = resp.json() or {}
+                    names |= {str(s.get("name", "")).lower() for s in body.get("value", [])
+                              if str(s.get("path", "")).strip("/").lower() == "files"}
+                    tok = body.get("continuationToken")
+                    url = f"{FABRIC_API}/workspaces/{ws}/items/{lh}/shortcuts?continuationToken={tok}" if tok else None
+            except DeployError:
+                names = None
+            cache[(ws, lh)] = names
+        names = cache[(ws, lh)]
+        if names is None:
+            problems.append(f"could not confirm that OneLake shortcut Files/{name} exists in lakehouse {lh}; check access and retry")
+        elif name.lower() not in names:
+            problems.append(f"OneLake shortcut Files/{name} does not exist in lakehouse {lh}; create it first (storage-map / create-shortcut)")
+    return problems
+
+
 def preflight(item: DeployItem, allow_unbound: bool = False) -> list[str]:
     """Reasons this pipeline must not be pushed (empty = ok)."""
     problems: list[str] = []
@@ -257,6 +322,7 @@ def deploy(client: FabricClient, workspace: str, items: list[DeployItem], *, app
     results: list[DeployResult] = [
         DeployResult(n, "refused", problems=[r], detail="not pushed: " + r) for n, r in cyclic.items()]
     planned: set[str] = set()  # dry run: children that would be created by this run
+    shortcut_cache: dict = {}
     for item in ordered:
         children = child_refs(item.content)
         problems: list[str] = []
@@ -272,6 +338,7 @@ def deploy(client: FabricClient, workspace: str, items: list[DeployItem], *, app
         resolved = DeployItem(item.name, resolve_tokens(item.content, workspace, stand_in), item.origin,
                                item.structural_valid)
         problems += preflight(resolved, allow_unbound)
+        problems += missing_shortcuts(client, lakehouse_shortcuts(resolved.content), shortcut_cache)
         if problems:
             unavailable.add(item.name.lower())
             results.append(DeployResult(item.name, "refused", problems=problems, children=children,

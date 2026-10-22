@@ -114,7 +114,8 @@ def _verify(c: Container, session: Session, pid: str, options: dict, log: Log) -
         start = bool(options.get("run"))
         if start:
             log(f"Starting real runs of {len(names)} pipeline(s) in Fabric")
-        results = verify_all(lambda: FabricClient(token, session=c.fabric_http), workspace, names, start=start, adf=adf, previous=previous,
+        # a fresh token for every pipeline: started runs are waited for one after another and can outlast a single token
+        results = verify_all(lambda: FabricClient(c.fabric_token(session), session=c.fabric_http), workspace, names, start=start, adf=adf, previous=previous,
                              called=called, timeout_seconds=int(options.get("run_timeout") or 1800), log=log)
     except DeployError as exc:
         raise StageError(str(exc)) from None

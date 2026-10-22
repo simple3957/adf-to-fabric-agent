@@ -31,6 +31,8 @@ _ABFSS = re.compile(rf"\b(abfss?)://({_CONTAINER})@({_ACCOUNT})\.dfs\.core\.wind
 _HTTPS = re.compile(rf"\bhttps://({_ACCOUNT})\.dfs\.core\.windows\.net/({_CONTAINER}){_END}", re.I)
 # Recognised but never rewritten: a variable in place of the container or account, or the Blob endpoint / wasb driver.
 _DYNAMIC = re.compile(r"\b(?:abfss?)://[^\s'\"@]*\{[^}]*\}[^\s'\"@]*@[^\s'\"]*\.dfs\.core\.windows\.net|\b(?:abfss?)://[^\s'\"@]+@[^\s'\"]*\{[^}]*\}[^\s'\"]*\.dfs\.core\.windows\.net", re.I)
+# Any direct ADLS Gen2 reference, as the workload analyzer sees it: whatever the rewrite did not consume is reported.
+_ANY_ADLS = re.compile(r"\b(?:abfss?://([\w.-]+)@([\w-]+)\.dfs\.core\.windows\.net|https://([\w-]+)\.dfs\.core\.windows\.net/([\w.-]+))", re.I)
 _BLOB = re.compile(rf"\b(?:wasbs?://({_CONTAINER})@({_ACCOUNT})\.blob\.core\.windows\.net|https://({_ACCOUNT})\.blob\.core\.windows\.net/({_CONTAINER}))", re.I)
 
 
@@ -105,6 +107,10 @@ class Routes:
 
         def https(m: re.Match) -> str:
             account, container = m.group(1).lower(), m.group(2).lower()
+            tail = re.match(r"[^\s'\"`)\]}]*", m.string[m.end():]).group(0)
+            if "?" in tail:  # a query string (often a SAS token) must never be sent to OneLake
+                out.left.append((f"{account}/{container}", "the URL carries a query string (for example a SAS token), so it is not rewritten"))
+                return m.group(0)
             sc = self.by_pair.get((account, container))
             if sc is None:
                 out.left.append((f"{account}/{container}", "no shortcut is planned for this account and container"))
@@ -115,6 +121,12 @@ class Routes:
 
         text = _ABFSS.sub(abfss, code)
         text = _HTTPS.sub(https, text)
+        for m in _ANY_ADLS.finditer(text):
+            if _DYNAMIC.match(text, m.start()) or "{" in m.group(0):
+                continue
+            acc, cont = (m.group(2) or m.group(3) or "").lower(), (m.group(1) or m.group(4) or "").lower()
+            if (acc, cont) in self.by_pair and not any(loc == f"{acc}/{cont}" and "query string" in why for loc, why in out.left):
+                out.left.append((f"{acc}/{cont}", "written in a form that is not rewritten (a port, a fragment or an unusual separator after the host)"))
         for m in _DYNAMIC.finditer(text):
             out.left.append(("(built from variables)", "the container or account comes from a variable, so it is not rewritten"))
         for m in _BLOB.finditer(text):

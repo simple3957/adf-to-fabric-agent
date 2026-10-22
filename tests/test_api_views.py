@@ -534,3 +534,24 @@ def test_comparing_without_run_starts_nothing(world):
     before = len(world.demo.fabric_http.runs)
     j = run(world, "ann", "verify", {"workspace_id": DEMO_WS, "pipelines": [name]})
     assert j["state"] == "succeeded" and len(world.demo.fabric_http.runs) == before
+
+
+def test_repeated_names_start_one_run_and_unknown_names_are_refused(world):
+    name = _deployed(world)
+    before = len(world.demo.fabric_http.runs)
+    j = run(world, "oscar", "verify", {"workspace_id": DEMO_WS, "run": True, "confirm": True, "pipelines": [name, name.lower(), f" {name} "]})
+    assert j["state"] == "succeeded" and len(world.demo.fabric_http.runs) == before + 1
+    r = stage(world, "oscar", "verify", {"workspace_id": DEMO_WS, "run": True, "confirm": True, "pipelines": ["NotAPipeline"]})
+    assert r.status_code == 422 and "Not converted" in r.json()["error"]
+    assert stage(world, "oscar", "verify", {"workspace_id": DEMO_WS, "run": True, "confirm": True, "pipelines": [name], "run_timeout": 7200}).status_code == 422
+
+
+def test_a_replayed_run_request_is_not_audited_twice(world):
+    name = _deployed(world)
+    h = {"Idempotency-Key": "run-intent-000001"}
+    body = {"workspace_id": DEMO_WS, "run": True, "confirm": True, "pipelines": [name]}
+    a = stage(world, "oscar", "verify", body, headers=h)
+    world.wait("oscar", a.json())
+    b = stage(world, "oscar", "verify", body, headers=h)
+    assert b.headers["idempotent-replay"] == "true"
+    assert len([e for e in world.audit.read(500) if e["action"] == "verify.run"]) == 1

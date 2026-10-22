@@ -97,3 +97,23 @@ def test_the_cli_needs_a_storage_map_and_both_onelake_options(tmp_path, monkeypa
     (store.project_dir("p") / "storage" / "storage-map.json").write_text(json.dumps(MAP), encoding="utf-8")
     mixed = CliRunner().invoke(cli_mod.cli, ["workloads-assess", "--project", "p", "--onelake-workspace", WS, "--onelake-lakehouse", "lh"])
     assert mixed.exit_code != 0 and "GUIDs" in mixed.output
+
+
+@pytest.mark.parametrize("code", ['x = "abfss://raw@acctone.dfs.core.windows.net:443/x"', 'x = "abfss://raw@acctone.dfs.core.windows.net#f"'])
+def test_forms_that_are_not_rewritten_are_reported_not_silently_skipped(code):
+    r = routes().rewrite(code)
+    assert r.routed == 0 and r.text == code and r.left and "not rewritten" in r.left[0][1]
+
+
+def test_a_url_with_a_query_string_is_never_sent_to_onelake():
+    code = 'u = "https://acctone.dfs.core.windows.net/raw/x.csv?sv=2024&sig=SECRET"'
+    r = routes().rewrite(code)
+    assert r.routed == 0 and r.text == code and "query string" in r.left[0][1]
+
+
+def test_a_finding_stays_open_when_the_same_location_is_also_written_in_a_form_not_rewritten():
+    tr, findings = _transformed('a = spark.read.csv("abfss://raw@acctone.dfs.core.windows.net/in.csv")\n'
+                                'b = spark.read.csv("abfss://raw@acctone.dfs.core.windows.net:443/in.csv")\n')
+    engine._route_storage(tr, findings, routes())
+    flags = [f.rewritten for f in findings if f.code == "adls_direct_path"]
+    assert flags and not any(flags)  # a direct reference to that location remains, so none is marked done

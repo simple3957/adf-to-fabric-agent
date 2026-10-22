@@ -100,7 +100,9 @@ def _text(v: Any) -> tuple[Optional[str], bool]:
             return str(v.get("value", "")), True
         return None, False
     s = str(v)
-    return s, s.startswith("@")
+    if s.startswith("@@"):  # ADF's escape for a literal leading '@'
+        return s[1:], False
+    return s, s.startswith("@") or "@{" in s
 
 
 def _clean(path: Optional[str]) -> str:
@@ -171,7 +173,17 @@ def _map_dataset(ds: AdfDataset, ls: Optional[AdfLinkedService], used: list[Use]
     return dm
 
 
-def build_storage_map(disc: AdfSemanticDiscovery, lakehouse: Optional[str] = None) -> StorageMap:
+class StorageMapError(ValueError):
+    pass
+
+
+def build_storage_map(disc: AdfSemanticDiscovery, lakehouse: Optional[str] = None,
+                      names: Optional[dict[tuple[str, str], str]] = None) -> StorageMap:
+    """``names``: (account, container) -> the shortcut name to use, e.g. one that already exists in the lakehouse."""
+    names = {(a.lower(), c.lower()): n for (a, c), n in (names or {}).items()}
+    for n in names.values():
+        if not _SHORTCUT_NAME.match(n) or "'" in n or "/" in n:
+            raise StorageMapError(f"'{n}' cannot be a shortcut name (letters, digits, space, _ . - only).")
     lss = {l.name.lower(): l for l in disc.linked_services}
     uses = _uses(disc)
     rows: list[DatasetMap] = []
@@ -193,7 +205,8 @@ def build_storage_map(disc: AdfSemanticDiscovery, lakehouse: Optional[str] = Non
         per_container[container] = per_container.get(container, 0) + 1
     shortcuts: list[ShortcutPlan] = []
     for (account, container), members in sorted(groups.items()):
-        name = container if per_container[container] == 1 else f"{container}-{account}"  # the same container name in two accounts: both get the account suffix
+        name = names.get((account.lower(), container.lower())) or (
+            container if per_container[container] == 1 else f"{container}-{account}")  # the same container name in two accounts: both get the account suffix
         for m in members:
             if name != container and m.lakehouse_path:
                 m.lakehouse_path = m.lakehouse_path.replace(f"Files/{container}", f"Files/{name}", 1)
@@ -201,6 +214,14 @@ def build_storage_map(disc: AdfSemanticDiscovery, lakehouse: Optional[str] = Non
                                       subpath=f"/{container}", linked_services=sorted({m.linked_service for m in members if m.linked_service}),
                                       datasets=len(members), lakehouse_path=f"Files/{name}",
                                       connection=f"An existing Fabric connection to {account} (from linked service {', '.join(sorted({m.linked_service for m in members if m.linked_service}))})."))
+    taken: dict[str, str] = {}
+    for sc in shortcuts:
+        other = taken.setdefault(sc.shortcut.lower(), f"{sc.account}/{sc.container}")
+        if other != f"{sc.account}/{sc.container}":
+            raise StorageMapError(f"Two storage locations would share the shortcut name '{sc.shortcut}' ({other} and {sc.account}/{sc.container}).")
+    unknown = sorted(f"{a}/{c}" for a, c in names if (a, c) not in groups)
+    if unknown:
+        raise StorageMapError(f"No mapped dataset uses {', '.join(unknown)}; check the account/container names.")
     to_decide = [{"dataset": r.dataset, "used_by": sorted({u.pipeline for u in r.used_by}), "reason": r.reason, "action": r.action}
                  for r in rows if r.status == "needs_decision"]
     summary = {"file_datasets": len(rows), "mapped": sum(r.status == "mapped" for r in rows), "mapped_dynamic": sum(r.status == "mapped_dynamic" for r in rows),
