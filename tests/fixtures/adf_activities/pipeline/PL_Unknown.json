@@ -1,0 +1,65 @@
+{
+  "name": "PL_Unknown",
+  "properties": {
+    "activities": [
+      {
+        "name": "Known_Wait",
+        "type": "Wait",
+        "dependsOn": [],
+        "typeProperties": {
+          "waitTimeInSeconds": 1
+        }
+      },
+      {
+        "name": "Future_Activity",
+        "type": "FutureActivityV2",
+        "dependsOn": [],
+        "typeProperties": {
+          "foo": 1,
+          "ref": {
+            "referenceName": "LS_Blob",
+            "type": "LinkedServiceReference"
+          }
+        }
+      },
+      {
+        "name": "Future_Container",
+        "type": "FutureLoop",
+        "dependsOn": [],
+        "typeProperties": {
+          "activities": [
+            {
+              "name": "Inner_Wait",
+              "type": "Wait",
+              "dependsOn": [],
+              "typeProperties": {
+                "waitTimeInSeconds": 1
+              }
+            },
+            {
+              "name": "Inner_Unknown",
+              "type": "Mystery",
+              "dependsOn": [],
+              "typeProperties": {
+                "x": 1
+              }
+            }
+          ]
+        }
+      },
+      {
+        "name": "No_Type",
+        "typeProperties": {
+          "a": 1
+        }
+      },
+      {
+        "type": "Wait",
+        "typeProperties": {
+          "waitTimeInSeconds": 1
+        }
+      },
+      "this entry is a string, not an activity"
+    ]
+  }
+}

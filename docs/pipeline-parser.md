@@ -59,6 +59,34 @@ recurring pipeline shape), `activity_type_counts`, `unknown_activity_types`.
 * **Secrets are masked** in every preserved value (`SecureString`, credential-named fields, marker
   strings); each masking is a `value_redacted` info warning.
 
+## Completeness: nothing seen in the source disappears
+
+Every artifact and every activity is either a record or an explicit entry saying why not.
+
+* **Independent inventory check.** `inventory.py` scans the raw pipeline JSON by a more general rule than the parser
+  (every object in any list under a key ending in `activities`, plus any list object that looks like an activity) and
+  compares pointer sets with what was parsed. `AdfPipeline.inventory` holds both counts and any difference;
+  a difference also raises the pipeline issue `inventory_mismatch` and sets `inventory_mismatch_count`.
+* **Explicit dependency graph.** `AdfPipeline.dependency_graph` lists every activity (nested included) and one edge per
+  `dependsOn` entry with its conditions. Unresolved, cross-container (`outside_scope`) and `self` edges are kept, flagged,
+  not dropped. `cycles` holds the exact members of each cycle (Tarjan). Dependencies never cross a container boundary.
+* **Stable source path.** `activity_id` (names from the pipeline down, `#2` for a duplicate) and
+  `source_location.pointer` (the JSON path, e.g. `properties.activities[2].typeProperties.cases[0].activities[1]`).
+* **Ledger of unprocessed artifacts.** `AdfSemanticDiscovery.unprocessed_artifacts` lists each source artifact that did not
+  become a record, with `reason`: `malformed_json`, `unreadable`, `not_a_json_object`, `parse_error`, `skipped`, or the
+  informational `kind_not_parsed` (credentials, managed virtual networks). Any loss makes the run `partial`, and a conversion
+  made from a lossy discovery is `partial` with a note per lost artifact. Details never carry file content.
+* **Data flows** (`dataflow/*.json`: `MappingDataFlow`, `Flowlet`, `WranglingDataFlow`) are parsed into `AdfDataFlow`
+  (sources, sinks, transformations, what they reference, script size only), linked from `ExecuteDataFlow`, and checked for
+  unresolved references and flowlet cycles.
+* **Malformed shapes never raise.** A field of the wrong type is a warning (`invalid_<field>`) and the activity is kept.
+  Exhaustive single-value mutation of every fixture (about 17,000 cases) is part of the test suite's evidence.
+
+Activity types follow Microsoft's ARM schema for `Microsoft.DataFactory/factories/pipelines` (40 types) plus the Synapse-only
+`SqlPoolStoredProcedure`. HTTP and REST are connectors used through Copy (`HttpSource`, `RestSource`), and through the Web
+activity; they are not activity types. Tests: `tests/test_discovery_activity_inventory.py`, fixtures in
+`tests/fixtures/adf_activities/`.
+
 ## Extending
 
 Add an `ActivitySpec` to `activity_registry.py` (category, operations, required and known keys).

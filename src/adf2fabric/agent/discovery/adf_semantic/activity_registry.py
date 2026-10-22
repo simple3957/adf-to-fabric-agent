@@ -43,10 +43,16 @@ class ActivitySpec:
     known: tuple[str, ...] = ()  # known typeProperties keys
     handler: str = ""  # specific interpretation in parser_pipelines ("" = generic)
     description: str = ""
+    top_level: tuple[str, ...] = ()  # extra activity-level keys this type documents (e.g. a Synapse ``sqlPool``)
+    # (canonical path, alternative spelling) pairs: Microsoft's own pages sometimes spell a key two ways, and either
+    # is accepted without reporting the property as missing or unknown.
+    aliases: tuple[tuple[str, str], ...] = ()
 
 
-def _spec(type_: str, cat: Cat, ops: tuple[Op, ...], required=(), known=(), handler="", description=""):
-    return ActivitySpec(type_, cat, ops, tuple(required), tuple(known), handler, description)
+def _spec(type_: str, cat: Cat, ops: tuple[Op, ...], required=(), known=(), handler="", description="",
+          top_level=(), aliases=()):
+    return ActivitySpec(type_, cat, ops, tuple(required), tuple(known), handler, description,
+                        tuple(top_level), tuple(aliases))
 
 
 _tp = lambda *keys: tuple(f"typeProperties.{k}" for k in keys)  # noqa: E731
@@ -83,6 +89,11 @@ _SPECS: list[ActivitySpec] = [
     _spec("SqlServerStoredProcedure", Cat.data_transformation, (Op.transform,), _tp("storedProcedureName"),
           ("storedProcedureName", "storedProcedureParameters"), "stored_procedure",
           "Executes a stored procedure."),
+    # Synapse pipelines only (not in the Data Factory ARM schema). Source: the Synapse "SQL pool stored procedure
+    # activity" page: ``sqlPool`` is an ACTIVITY-level reference (type SqlPoolReference), not a linked service.
+    _spec("SqlPoolStoredProcedure", Cat.data_transformation, (Op.transform,), ("sqlPool", *_tp("storedProcedureName")),
+          ("storedProcedureName", "storedProcedureParameters"), "sql_pool_stored_procedure",
+          "Executes a stored procedure in a Synapse dedicated SQL pool.", top_level=("sqlPool",)),
     _spec("Script", Cat.data_transformation, (Op.transform,), _tp("scripts"),
           ("scripts", "scriptBlockExecutionTimeout", "logSettings"), "script",
           "Executes one or more SQL script blocks."),
@@ -96,6 +107,11 @@ _SPECS: list[ActivitySpec] = [
     # --- compute ------------------------------------------------------------------------------
     _spec("DatabricksNotebook", Cat.compute, (Op.external_execution,), _tp("notebookPath"),
           ("notebookPath", "baseParameters", "libraries"), "", "Runs a Databricks notebook."),
+    # Source: Microsoft's ARM schema (DatabricksJobActivity) and the Databricks Job activity page. That page's sample
+    # JSON writes the key ``jobID`` while its property table and the ARM schema say ``jobId``; both are accepted.
+    _spec("DatabricksJob", Cat.compute, (Op.external_execution,), _tp("jobId"),
+          ("jobId", "jobParameters"), "databricks_job", "Runs a Databricks job (serverless jobs included).",
+          aliases=(("typeProperties.jobId", "typeProperties.jobID"),)),
     _spec("DatabricksSparkJar", Cat.compute, (Op.external_execution,), _tp("mainClassName"),
           ("mainClassName", "parameters", "libraries"), "", "Runs a Databricks Spark JAR."),
     _spec("DatabricksSparkPython", Cat.compute, (Op.external_execution,), _tp("pythonFile"),
@@ -183,7 +199,7 @@ ACTIVITY_REGISTRY: dict[str, ActivitySpec] = {s.type.lower(): s for s in _SPECS}
 
 # Activity types that need an activity-level ``linkedServiceName``.
 REQUIRES_LINKED_SERVICE = frozenset({
-    "sqlserverstoredprocedure", "script", "azurefunctionactivity", "databricksnotebook",
+    "sqlserverstoredprocedure", "script", "azurefunctionactivity", "databricksnotebook", "databricksjob",
     "databrickssparkjar", "databrickssparkpython", "hdinsighthive", "hdinsightpig",
     "hdinsightmapreduce", "hdinsightstreaming", "hdinsightspark", "custom",
     "azuremlbatchexecution", "azuremlupdateresource", "datalakeanalyticsu-sql",

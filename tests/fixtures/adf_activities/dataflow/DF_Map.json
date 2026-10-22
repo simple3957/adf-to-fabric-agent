@@ -1,0 +1,65 @@
+{
+  "name": "DF_Map",
+  "properties": {
+    "type": "MappingDataFlow",
+    "description": "mapping",
+    "folder": {
+      "name": "f1"
+    },
+    "annotations": [
+      "a"
+    ],
+    "typeProperties": {
+      "sources": [
+        {
+          "dataset": {
+            "referenceName": "DS_In",
+            "type": "DatasetReference"
+          },
+          "name": "source1"
+        },
+        {
+          "linkedService": {
+            "referenceName": "LS_Blob",
+            "type": "LinkedServiceReference"
+          },
+          "name": "source2",
+          "schemaLinkedService": {
+            "referenceName": "LS_Blob",
+            "type": "LinkedServiceReference"
+          }
+        }
+      ],
+      "sinks": [
+        {
+          "dataset": {
+            "referenceName": "DS_Out",
+            "type": "DatasetReference"
+          },
+          "name": "sink1",
+          "rejectedDataLinkedService": {
+            "referenceName": "LS_Blob",
+            "type": "LinkedServiceReference"
+          }
+        }
+      ],
+      "transformations": [
+        {
+          "name": "d1"
+        },
+        {
+          "name": "embedded",
+          "flowlet": {
+            "referenceName": "DF_Flowlet",
+            "type": "DataFlowReference"
+          }
+        }
+      ],
+      "scriptLines": [
+        "source(allowSchemaDrift: true) ~> source1",
+        "source1 derive(token = 'FIXTURE_FLOW_SCRIPT_SECRET') ~> d1",
+        "d1 sink() ~> sink1"
+      ]
+    }
+  }
+}

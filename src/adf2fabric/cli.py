@@ -692,7 +692,21 @@ def discovery_adf_semantic(project_name: str) -> None:
     click.echo(
         f"  parsed: {d.parsed_count}   skipped: {d.skipped_count}   failed: {d.failed_count}"
     )
-    if d.failed_count:
+    click.echo(
+        f"  activities: {d.activity_count}   data flows: {d.dataflow_count}   "
+        f"dependency cycles: {sum(len(p.dependency_graph.cycles) for p in d.pipelines if p.dependency_graph)}"
+    )
+    if d.unknown_activity_types:
+        click.secho(f"  unknown activity type(s), preserved but not interpreted: {', '.join(d.unknown_activity_types)}",
+                    fg="yellow")
+    if d.inventory_mismatch_count:
+        bad = [p.name for p in d.pipelines if p.inventory is not None and not p.inventory.matched]
+        click.secho(f"  ACTIVITY INVENTORY MISMATCH in {d.inventory_mismatch_count} pipeline(s): {', '.join(bad)} "
+                    "(the source holds activities the record does not)", fg="red")
+    for u in d.unprocessed_artifacts:
+        click.secho(f"  not in the record: {u.path} [{u.kind}] {u.reason}" + (f" - {u.detail}" if u.detail else ""),
+                    fg="yellow" if u.reason != "kind_not_parsed" else None)
+    if d.failed_count or d.detail:
         click.secho(f"  note: {d.detail}", fg="yellow")
     click.echo(f"  record: {store.adf_semantic_discovery_path(d.project_id)}")
 

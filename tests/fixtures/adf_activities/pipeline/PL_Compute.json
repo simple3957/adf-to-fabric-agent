@@ -1,0 +1,249 @@
+{
+  "name": "PL_Compute",
+  "properties": {
+    "activities": [
+      {
+        "name": "Dbx_Notebook",
+        "type": "DatabricksNotebook",
+        "dependsOn": [],
+        "typeProperties": {
+          "notebookPath": "/Shared/n",
+          "baseParameters": {
+            "a": "1"
+          }
+        },
+        "linkedServiceName": {
+          "referenceName": "LS_Dbx",
+          "type": "LinkedServiceReference"
+        }
+      },
+      {
+        "name": "Dbx_Jar",
+        "type": "DatabricksSparkJar",
+        "dependsOn": [],
+        "typeProperties": {
+          "mainClassName": "com.x.Main",
+          "parameters": [
+            "--x"
+          ]
+        },
+        "linkedServiceName": {
+          "referenceName": "LS_Dbx",
+          "type": "LinkedServiceReference"
+        }
+      },
+      {
+        "name": "Dbx_Python",
+        "type": "DatabricksSparkPython",
+        "dependsOn": [],
+        "typeProperties": {
+          "pythonFile": "dbfs:/p.py",
+          "parameters": [
+            "--y"
+          ]
+        },
+        "linkedServiceName": {
+          "referenceName": "LS_Dbx",
+          "type": "LinkedServiceReference"
+        }
+      },
+      {
+        "name": "Dbx_Job",
+        "type": "DatabricksJob",
+        "dependsOn": [],
+        "typeProperties": {
+          "jobId": "0123456789",
+          "jobParameters": {
+            "testParameter": "testValue"
+          }
+        },
+        "linkedServiceName": {
+          "referenceName": "LS_Dbx",
+          "type": "LinkedServiceReference"
+        }
+      },
+      {
+        "name": "Syn_Notebook",
+        "type": "SynapseNotebook",
+        "dependsOn": [],
+        "typeProperties": {
+          "notebook": {
+            "referenceName": "NB",
+            "type": "NotebookReference"
+          },
+          "sparkPool": {
+            "referenceName": "pool",
+            "type": "BigDataPoolReference"
+          }
+        }
+      },
+      {
+        "name": "Syn_SparkJob",
+        "type": "SparkJob",
+        "dependsOn": [],
+        "typeProperties": {
+          "sparkJob": {
+            "referenceName": "SJD",
+            "type": "SparkJobDefinitionReference"
+          }
+        }
+      },
+      {
+        "name": "Hdi_Hive",
+        "type": "HDInsightHive",
+        "dependsOn": [],
+        "typeProperties": {
+          "scriptPath": "s/h.hql",
+          "scriptLinkedService": {
+            "referenceName": "LS_Blob",
+            "type": "LinkedServiceReference"
+          }
+        },
+        "linkedServiceName": {
+          "referenceName": "LS_Dbx",
+          "type": "LinkedServiceReference"
+        }
+      },
+      {
+        "name": "Hdi_Pig",
+        "type": "HDInsightPig",
+        "dependsOn": [],
+        "typeProperties": {
+          "scriptPath": "s/p.pig",
+          "scriptLinkedService": {
+            "referenceName": "LS_Blob",
+            "type": "LinkedServiceReference"
+          }
+        },
+        "linkedServiceName": {
+          "referenceName": "LS_Dbx",
+          "type": "LinkedServiceReference"
+        }
+      },
+      {
+        "name": "Hdi_MapReduce",
+        "type": "HDInsightMapReduce",
+        "dependsOn": [],
+        "typeProperties": {
+          "className": "C",
+          "jarFilePath": "j.jar"
+        },
+        "linkedServiceName": {
+          "referenceName": "LS_Dbx",
+          "type": "LinkedServiceReference"
+        }
+      },
+      {
+        "name": "Hdi_Streaming",
+        "type": "HDInsightStreaming",
+        "dependsOn": [],
+        "typeProperties": {
+          "mapper": "m",
+          "reducer": "r"
+        },
+        "linkedServiceName": {
+          "referenceName": "LS_Dbx",
+          "type": "LinkedServiceReference"
+        }
+      },
+      {
+        "name": "Hdi_Spark",
+        "type": "HDInsightSpark",
+        "dependsOn": [],
+        "typeProperties": {
+          "rootPath": "r",
+          "entryFilePath": "e.py"
+        },
+        "linkedServiceName": {
+          "referenceName": "LS_Dbx",
+          "type": "LinkedServiceReference"
+        }
+      },
+      {
+        "name": "Batch_Custom",
+        "type": "Custom",
+        "dependsOn": [],
+        "typeProperties": {
+          "command": "run.exe"
+        },
+        "linkedServiceName": {
+          "referenceName": "LS_Blob",
+          "type": "LinkedServiceReference"
+        }
+      },
+      {
+        "name": "Ml_Batch",
+        "type": "AzureMLBatchExecution",
+        "dependsOn": [],
+        "typeProperties": {
+          "globalParameters": {
+            "g": "1"
+          }
+        },
+        "linkedServiceName": {
+          "referenceName": "LS_Blob",
+          "type": "LinkedServiceReference"
+        }
+      },
+      {
+        "name": "Ml_Update",
+        "type": "AzureMLUpdateResource",
+        "dependsOn": [],
+        "typeProperties": {
+          "trainedModelName": "m"
+        },
+        "linkedServiceName": {
+          "referenceName": "LS_Blob",
+          "type": "LinkedServiceReference"
+        }
+      },
+      {
+        "name": "Ml_Pipeline",
+        "type": "AzureMLExecutePipeline",
+        "dependsOn": [],
+        "typeProperties": {
+          "mlPipelineId": "id",
+          "experimentName": "e"
+        }
+      },
+      {
+        "name": "Usql",
+        "type": "DataLakeAnalyticsU-SQL",
+        "dependsOn": [],
+        "typeProperties": {
+          "scriptPath": "u.usql",
+          "scriptLinkedService": {
+            "referenceName": "LS_Blob",
+            "type": "LinkedServiceReference"
+          }
+        },
+        "linkedServiceName": {
+          "referenceName": "LS_Blob",
+          "type": "LinkedServiceReference"
+        }
+      },
+      {
+        "name": "Ssis",
+        "type": "ExecuteSSISPackage",
+        "dependsOn": [],
+        "typeProperties": {
+          "packageLocation": {
+            "type": "SSISDB"
+          }
+        }
+      },
+      {
+        "name": "Kusto",
+        "type": "AzureDataExplorerCommand",
+        "dependsOn": [],
+        "typeProperties": {
+          "command": ".show tables"
+        },
+        "linkedServiceName": {
+          "referenceName": "LS_Blob",
+          "type": "LinkedServiceReference"
+        }
+      }
+    ]
+  }
+}

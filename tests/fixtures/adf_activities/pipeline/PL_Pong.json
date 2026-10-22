@@ -1,0 +1,18 @@
+{
+  "name": "PL_Pong",
+  "properties": {
+    "activities": [
+      {
+        "name": "Call_Ping",
+        "type": "ExecutePipeline",
+        "dependsOn": [],
+        "typeProperties": {
+          "pipeline": {
+            "referenceName": "PL_Ping",
+            "type": "PipelineReference"
+          }
+        }
+      }
+    ]
+  }
+}

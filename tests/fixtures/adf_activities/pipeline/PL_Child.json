@@ -1,0 +1,20 @@
+{
+  "name": "PL_Child",
+  "properties": {
+    "activities": [
+      {
+        "name": "Child_Wait",
+        "type": "Wait",
+        "dependsOn": [],
+        "typeProperties": {
+          "waitTimeInSeconds": 1
+        }
+      }
+    ],
+    "parameters": {
+      "file": {
+        "type": "String"
+      }
+    }
+  }
+}

@@ -1,0 +1,193 @@
+{
+  "name": "PL_ControlPolicies",
+  "properties": {
+    "activities": [
+      {
+        "name": "Set_Var",
+        "type": "SetVariable",
+        "dependsOn": [],
+        "typeProperties": {
+          "variableName": "v",
+          "value": {
+            "value": "@utcnow()",
+            "type": "Expression"
+          }
+        }
+      },
+      {
+        "name": "Append_Var",
+        "type": "AppendVariable",
+        "dependsOn": [
+          {
+            "activity": "Set_Var",
+            "dependencyConditions": [
+              "Succeeded"
+            ]
+          }
+        ],
+        "typeProperties": {
+          "variableName": "arr",
+          "value": {
+            "value": "@variables('v')",
+            "type": "Expression"
+          }
+        }
+      },
+      {
+        "name": "Filter_Items",
+        "type": "Filter",
+        "dependsOn": [
+          {
+            "activity": "Append_Var",
+            "dependencyConditions": [
+              "Succeeded",
+              "Failed"
+            ]
+          }
+        ],
+        "typeProperties": {
+          "items": {
+            "value": "@variables('arr')",
+            "type": "Expression"
+          },
+          "condition": {
+            "value": "@greater(item(), 0)",
+            "type": "Expression"
+          }
+        }
+      },
+      {
+        "name": "Wait_A",
+        "type": "Wait",
+        "dependsOn": [
+          {
+            "activity": "Filter_Items",
+            "dependencyConditions": [
+              "Skipped"
+            ]
+          }
+        ],
+        "typeProperties": {
+          "waitTimeInSeconds": 1
+        }
+      },
+      {
+        "name": "Wait_B",
+        "type": "Wait",
+        "dependsOn": [
+          {
+            "activity": "Filter_Items",
+            "dependencyConditions": [
+              "Completed"
+            ]
+          }
+        ],
+        "typeProperties": {
+          "waitTimeInSeconds": 1
+        },
+        "state": "Inactive",
+        "onInactiveMarkAs": "Failed"
+      },
+      {
+        "name": "Fail_End",
+        "type": "Fail",
+        "dependsOn": [
+          {
+            "activity": "Wait_A",
+            "dependencyConditions": [
+              "Failed"
+            ]
+          }
+        ],
+        "typeProperties": {
+          "message": {
+            "value": "@concat('failed ', variables('v'))",
+            "type": "Expression"
+          },
+          "errorCode": "E1"
+        }
+      },
+      {
+        "name": "Copy_Policy",
+        "type": "Copy",
+        "dependsOn": [
+          {
+            "activity": "Wait_B",
+            "dependencyConditions": [
+              "Succeeded"
+            ]
+          }
+        ],
+        "typeProperties": {
+          "source": {
+            "type": "ParquetSource"
+          },
+          "sink": {
+            "type": "ParquetSink"
+          },
+          "enableStaging": false
+        },
+        "inputs": [
+          {
+            "referenceName": "DS_In",
+            "type": "DatasetReference"
+          }
+        ],
+        "outputs": [
+          {
+            "referenceName": "DS_Out",
+            "type": "DatasetReference"
+          }
+        ],
+        "policy": {
+          "timeout": "0.00:30:00",
+          "retry": 3,
+          "retryIntervalInSeconds": 60,
+          "secureInput": true,
+          "secureOutput": true
+        }
+      },
+      {
+        "name": "Lookup_Dynamic",
+        "type": "Lookup",
+        "dependsOn": [
+          {
+            "activity": "Copy_Policy",
+            "dependencyConditions": [
+              "Succeeded"
+            ]
+          }
+        ],
+        "typeProperties": {
+          "source": {
+            "type": "ParquetSource"
+          },
+          "dataset": {
+            "referenceName": "DS_In",
+            "type": "DatasetReference"
+          }
+        },
+        "policy": {
+          "timeout": {
+            "value": "@pipeline().parameters.timeout",
+            "type": "Expression"
+          },
+          "retry": 1
+        }
+      }
+    ],
+    "parameters": {
+      "timeout": {
+        "type": "String"
+      }
+    },
+    "variables": {
+      "v": {
+        "type": "String"
+      },
+      "arr": {
+        "type": "Array"
+      }
+    }
+  }
+}

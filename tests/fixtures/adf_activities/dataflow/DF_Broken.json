@@ -1,0 +1,32 @@
+{
+  "name": "DF_Broken",
+  "properties": {
+    "type": "MappingDataFlow",
+    "futureProperty": {
+      "x": 1
+    },
+    "typeProperties": {
+      "sources": [
+        {
+          "name": "dup",
+          "dataset": {
+            "referenceName": "DS_Missing",
+            "type": "DatasetReference"
+          },
+          "futureNodeKey": 1
+        },
+        "not-a-node"
+      ],
+      "sinks": [
+        {
+          "name": "dup"
+        }
+      ],
+      "transformations": [],
+      "newTypeKey": [
+        1,
+        2
+      ]
+    }
+  }
+}

@@ -14,6 +14,7 @@ from adf2fabric.project.discovery import (
     AdfActivity,
     AdfArtifactKind,
     AdfArtifactRef,
+    AdfDataFlow,
     AdfDataset,
     AdfLinkedService,
     AdfPipeline,
@@ -150,11 +151,13 @@ def build_relationships(
     linked_services: list[AdfLinkedService],
     triggers: list[AdfTrigger],
     external_references: list[ExternalReference],
+    dataflows: "list[AdfDataFlow] | tuple" = (),
 ) -> tuple[list[AdfRelationship], list[AdfArtifactRef]]:
     """Return (relationship edges, unresolved artifact references)."""
     pipeline_names = {p.name for p in pipelines}
     dataset_names = {d.name for d in datasets}
     ls_names = {ls.name for ls in linked_services}
+    dataflow_names = {f.name for f in dataflows}
 
     edges: list[AdfRelationship] = []
     unresolved: list[AdfArtifactRef] = []
@@ -188,6 +191,22 @@ def build_relationships(
         for ls in sorted(ls_refs):
             add(AdfRelationshipKind.pipeline_uses_linked_service, AdfArtifactKind.pipeline, p.name,
                 AdfArtifactKind.linked_service, ls, ls_names)
+
+    # pipeline → data flow, and data flow → dataset / linked service / flowlet
+    for p in pipelines:
+        for name in sorted({r.name for a in _walk_activities(p.activities) for r in a.references if r.kind == "dataflow"}):
+            add(AdfRelationshipKind.pipeline_executes_dataflow, AdfArtifactKind.pipeline, p.name,
+                AdfArtifactKind.dataflow, name, dataflow_names)
+    for f in dataflows:
+        for name in f.dataset_refs:
+            add(AdfRelationshipKind.dataflow_uses_dataset, AdfArtifactKind.dataflow, f.name,
+                AdfArtifactKind.dataset, name, dataset_names)
+        for name in f.linked_service_refs:
+            add(AdfRelationshipKind.dataflow_uses_linked_service, AdfArtifactKind.dataflow, f.name,
+                AdfArtifactKind.linked_service, name, ls_names)
+        for name in f.flowlet_refs:
+            add(AdfRelationshipKind.dataflow_uses_flowlet, AdfArtifactKind.dataflow, f.name,
+                AdfArtifactKind.dataflow, name, dataflow_names)
 
     # dataset → linked service (also stamp the dataset ref's resolved flag)
     for d in datasets:

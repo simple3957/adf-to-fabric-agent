@@ -166,6 +166,9 @@ def test_every_registry_type_yields_a_complete_semantic_record(spec):
         if path.startswith("typeProperties."):
             tp[path.split(".", 1)[1]] = _minimal_value(path.split(".", 1)[1])
     node = act("A1", spec.type, tp, linkedServiceName=ref("LinkedService", "LS"))
+    for path in spec.required:  # activity-level required references (a Synapse SQL pool), not under typeProperties
+        if "." not in path and path != "linkedServiceName":
+            node[path] = ref("SqlPool", "POOL")
     a = one(node)
     assert a.activity_id == "PL/A1" and a.name == "A1" and a.type == spec.type
     assert a.semantic_category == spec.category and a.operation in a.operations

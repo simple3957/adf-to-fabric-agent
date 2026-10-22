@@ -34,7 +34,7 @@ from adf2fabric.project.conversion import (
     Prerequisite,
     ProjectConversion,
 )
-from adf2fabric.project.discovery import AdfSemanticDiscovery, AdfSemanticStatus
+from adf2fabric.project.discovery import UNPROCESSED_LOSS_REASONS, AdfSemanticDiscovery, AdfSemanticStatus
 from adf2fabric.project.reconstruction import Proposal
 from adf2fabric.project.store import ProjectNotFoundError, ProjectStore, slugify
 
@@ -166,7 +166,9 @@ class ConversionAgent:
                     written[t.name] = rel
                 t.schedule_file = written[t.name]
 
-        all_fine = all(r.status is ConversionStatus.converted for r in converted)
+        # Source artifacts discovery could not process are missing from this conversion: it cannot be "converted".
+        lost = [u for u in d.unprocessed_artifacts if u.reason in UNPROCESSED_LOSS_REASONS]
+        all_fine = all(r.status is ConversionStatus.converted for r in converted) and not lost
         outcome = ConversionOutcome.converted if all_fine else ConversionOutcome.partial
         conv = self._assemble(pid, d, converted, ctx, outcome, "", compute_sources, contents)
         conv.reconstruction_applied = sorted(p.id for p in applied)
@@ -223,6 +225,8 @@ class ConversionAgent:
         now = datetime.now(timezone.utc)
         notes = [f"Not documented by Microsoft, so not independently verified: {s}" for s in INFERRED]
         notes += [f"Resolution file: {m}" for m in ctx.resolutions.problems]
+        notes += [f"Source artifact NOT converted (discovery could not process it): {u.path} ({u.reason})"
+                  for u in d.unprocessed_artifacts if u.reason in UNPROCESSED_LOSS_REASONS]
         conv = ProjectConversion(
             project_id=pid, source_commit_sha=d.source_commit_sha, status=outcome, created_at=now, updated_at=now,
             pipeline_count=len(pipelines), activity_count=sum(len(p.activities) for p in pipelines),

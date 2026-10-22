@@ -20,7 +20,10 @@ from typing import Optional
 from adf2fabric.project.discovery import (
     AdfActivity,
     AdfActivityUsage,
+    AdfDataFlow,
     AdfDataset,
+    AdfDependencyEdge,
+    AdfDependencyGraph,
     AdfIssueSeverity,
     AdfLinkedService,
     AdfParseIssue,
@@ -91,7 +94,97 @@ def analyze_pipeline(pipeline: AdfPipeline, ctx) -> None:
     for a in flat:
         a.output_consumers = _dedupe_usage(a.output_consumers)
 
+    pipeline.dependency_graph = build_dependency_graph(pipeline.name, flat, scopes, seen)
     pipeline.issues = list(ctx.issues)
+
+
+def _scope_key(pipeline_name: str, parent_id: Optional[str], branch: Optional[str]) -> str:
+    return f"{parent_id or pipeline_name}|{branch or 'activities'}"
+
+
+def build_dependency_graph(pipeline_name: str, flat: list[AdfActivity],
+                           scopes: dict[tuple[Optional[str], Optional[str]], list[AdfActivity]],
+                           all_names: dict[str, AdfActivity]) -> AdfDependencyGraph:
+    """The explicit dependency graph: one node per activity (nested included), one edge per ``dependsOn`` entry.
+
+    ADF dependencies live inside one activities list (a scope) and never cross a container boundary, so each scope is
+    its own graph. An entry that names an activity not in its scope is kept as an unresolved edge, not dropped.
+    ``cycles`` holds the activities of every strongly connected component with more than one member, and every
+    self-dependency: exactly the activities that can never start.
+    """
+    edges: list[AdfDependencyEdge] = []
+    cycles: list[list[str]] = []
+    for (parent_id, branch), members in scopes.items():
+        scope = _scope_key(pipeline_name, parent_id, branch)
+        index = {a.name.lower(): i for i, a in enumerate(members) if a.name}
+        succ: dict[int, set[int]] = {i: set() for i in range(len(members))}
+        self_loops: set[int] = set()
+        for i, a in enumerate(members):
+            for d in a.depends_on:
+                j = index.get(d.activity.lower())
+                base = dict(scope=scope, from_name=d.activity, to_id=a.activity_id, conditions=list(d.conditions),
+                            unknown_conditions=list(d.unknown_conditions))
+                if j is None:
+                    problem = "outside_scope" if d.activity.lower() in all_names else "unresolved"
+                    edges.append(AdfDependencyEdge(from_id=None, resolved=False, problem=problem, **base))
+                elif j == i:
+                    self_loops.add(i)
+                    edges.append(AdfDependencyEdge(from_id=a.activity_id, resolved=False, problem="self", **base))
+                else:
+                    succ[j].add(i)
+                    edges.append(AdfDependencyEdge(from_id=members[j].activity_id, **base))
+        for component in _components(succ):
+            if len(component) > 1:
+                cycles.append(sorted(members[i].activity_id for i in component))
+        cycles.extend([members[i].activity_id] for i in sorted(self_loops))
+    edges.sort(key=lambda e: (e.scope, e.to_id, e.from_name.lower()))
+    return AdfDependencyGraph(nodes=[a.activity_id for a in flat], edges=edges, cycles=sorted(cycles),
+                              scope_count=len(scopes))
+
+
+def _components(succ: dict[int, set[int]]) -> list[list[int]]:
+    """Strongly connected components (Tarjan), iterative so a very long chain cannot hit the recursion limit."""
+    index_of: dict[int, int] = {}
+    low: dict[int, int] = {}
+    on_stack: set[int] = set()
+    stack: list[int] = []
+    out: list[list[int]] = []
+    counter = 0
+    for root in sorted(succ):
+        if root in index_of:
+            continue
+        work: list[tuple[int, list[int]]] = [(root, sorted(succ[root], reverse=True))]
+        index_of[root] = low[root] = counter
+        counter += 1
+        stack.append(root)
+        on_stack.add(root)
+        while work:
+            node, todo = work[-1]
+            if todo:
+                nxt = todo.pop()
+                if nxt not in index_of:
+                    index_of[nxt] = low[nxt] = counter
+                    counter += 1
+                    stack.append(nxt)
+                    on_stack.add(nxt)
+                    work.append((nxt, sorted(succ[nxt], reverse=True)))
+                elif nxt in on_stack:
+                    low[node] = min(low[node], index_of[nxt])
+            else:
+                work.pop()
+                if work:
+                    parent = work[-1][0]
+                    low[parent] = min(low[parent], low[node])
+                if low[node] == index_of[node]:
+                    component = []
+                    while True:
+                        member = stack.pop()
+                        on_stack.discard(member)
+                        component.append(member)
+                        if member == node:
+                            break
+                    out.append(sorted(component))
+    return out
 
 
 def _analyze_scope(members: list[AdfActivity], all_names: dict[str, AdfActivity], ctx) -> None:
@@ -227,19 +320,25 @@ def _dedupe_usage(items: list[AdfActivityUsage]) -> list[AdfActivityUsage]:
 
 
 def resolve_pipelines(pipelines: list[AdfPipeline], datasets: list[AdfDataset],
-                      linked_services: list[AdfLinkedService]) -> None:
+                      linked_services: list[AdfLinkedService], dataflows: "list[AdfDataFlow] | tuple" = ()) -> None:
     ds_by = {d.name.lower(): d for d in datasets}
     ls_by = {s.name.lower(): s for s in linked_services}
     pl_by = {p.name.lower(): p for p in pipelines}
+    df_by = {f.name.lower(): f for f in dataflows}
 
     for p in pipelines:
         for act in walk(p.activities):
             for io in [*act.inputs, *act.outputs]:
                 _resolve_io(act, io, ds_by, ls_by)
+                if io.kind == "dataflow" and io.name:
+                    io.resolved = io.name.lower() in df_by
             for r in act.references:
-                table = {"pipeline": pl_by, "dataset": ds_by, "linkedService": ls_by}.get(r.kind)
+                table = {"pipeline": pl_by, "dataset": ds_by, "linkedService": ls_by, "dataflow": df_by}.get(r.kind)
                 if table is not None:
                     r.resolved = r.name.lower() in table
+                    if r.kind == "dataflow" and not r.resolved:
+                        _warn(act, "unresolved_dataflow",
+                              f"Data flow '{r.name}' is not among the discovered artifacts.", r.role)
             for name in act.linked_service_refs:
                 ls = ls_by.get(name.lower())
                 act.configuration["linked_service"] = {
@@ -250,10 +349,53 @@ def resolve_pipelines(pipelines: list[AdfPipeline], datasets: list[AdfDataset],
             if (act.type or "").lower() == "executepipeline":
                 _resolve_child(act, pl_by)
 
+    _resolve_dataflows(dataflows, ds_by, ls_by, df_by)
     _pipeline_cycles(pipelines, pl_by)
     _recurring_shapes(pipelines)
     for p in pipelines:
         p.issues = sorted(p.issues, key=lambda i: (i.severity.value, i.code, i.message))
+
+
+def _resolve_dataflows(dataflows, ds_by, ls_by, df_by) -> None:
+    """Resolve what each data flow references, and detect flowlets that (directly or not) embed themselves."""
+    for f in dataflows:
+        for name in f.dataset_refs:
+            if name.lower() not in ds_by:
+                add_issue(f.issues, AdfParseIssue(
+                    code="unresolved_dataset", message=f"Dataset '{name}' is not among the discovered artifacts."))
+        for name in f.linked_service_refs:
+            if name.lower() not in ls_by:
+                add_issue(f.issues, AdfParseIssue(
+                    code="unresolved_linked_service",
+                    message=f"Linked service '{name}' is not among the discovered artifacts."))
+        for name in f.flowlet_refs:
+            if name.lower() not in df_by:
+                add_issue(f.issues, AdfParseIssue(
+                    code="unresolved_flowlet", message=f"Flowlet '{name}' is not among the discovered artifacts."))
+    graph = {f.name.lower(): sorted({r.lower() for r in f.flowlet_refs if r.lower() in df_by}) for f in dataflows}
+    state: dict[str, int] = {}
+    in_cycle: set[str] = set()
+
+    def dfs(n: str, stack: list[str]) -> None:
+        state[n] = 1
+        stack.append(n)
+        for m in graph.get(n, []):
+            if state.get(m) == 1:
+                in_cycle.update(stack[stack.index(m):])
+            elif state.get(m) is None:
+                dfs(m, stack)
+        stack.pop()
+        state[n] = 2
+
+    for n in sorted(graph):
+        if state.get(n) is None:
+            dfs(n, [])
+    for f in dataflows:
+        if f.name.lower() in in_cycle:
+            add_issue(f.issues, AdfParseIssue(
+                code="cyclic_flowlet_reference", severity=AdfIssueSeverity.error,
+                message=f"Data flow '{f.name}' takes part in a cycle of flowlet references."))
+        f.issues = sorted(f.issues, key=lambda i: (i.severity.value, i.code, i.message))
 
 
 def _resolve_io(act: AdfActivity, io, ds_by, ls_by) -> None:

@@ -113,6 +113,24 @@ register(ConversionRule(
     manual_configuration=("Fabric Databricks connection", "existingClusterId / newClusterSettings"),
     validation_rules=("notebookPath present", "connection present"),
 ))
+def convert_databricks_job(cx: ActivityBuilder) -> None:
+    _block(cx, "databricks_job",
+           "Fabric's Azure Databricks activity has a Job type, but only its portal settings are documented (a job picked "
+           "from a list, plus job parameters), not the JSON property names, so a faithful configuration cannot be "
+           "generated.",
+           "Create the Job task on the Fabric Azure Databricks activity (Settings > Job) with the original job and "
+           "job parameters.", disposition="reuse_externally")
+
+
+register(ConversionRule(
+    name="databricks_job", adf_types=("DatabricksJob",), fabric_types=(), variants=("job id", "job parameters"),
+    strategy=ConversionStrategy.manual, handler=convert_databricks_job, runtime_disposition="reuse_externally",
+    property_rules=("not converted: the Fabric Job task's JSON structure is undocumented",), io_rules=("none",),
+    expression_rules=("none",), dependency_rules=("a fail-fast placeholder keeps the dependency graph intact",),
+    parameter_variable_rules=("none",), unsupported=("Job task settings (jobId, jobParameters)",),
+    manual_configuration=("recreate the Job task on the Fabric Azure Databricks activity",),
+    validation_rules=("placeholder Fail activity present",),
+))
 register(ConversionRule(
     name="databricks_jar_python", adf_types=("DatabricksSparkJar", "DatabricksSparkPython"),
     fabric_types=(), variants=("Spark JAR", "Python file"),

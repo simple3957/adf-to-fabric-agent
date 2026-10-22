@@ -438,6 +438,53 @@ def test_stored_procedure_on_an_unsupported_store_is_blocked_with_alternatives()
     assert any("notebook" in x.lower() for x in a.alternatives)
 
 
+def _pool_proc(**kw):
+    return act("PoolSp", "SqlPoolStoredProcedure", {
+        "storedProcedureName": "usp_sample",
+        "storedProcedureParameters": {"identifier": {"value": "1", "type": "Int"}}},
+        sqlPool=ref("SqlPool", "DedicatedSQLPool"), **kw)
+
+
+def test_synapse_sql_pool_stored_procedure_becomes_a_fabric_stored_procedure_on_a_named_connection():
+    rec, content, a = one(_pool_proc())
+    c = find(content, "PoolSp")
+    assert c["type"] == "SqlServerStoredProcedure"
+    assert c["externalReferences"] == {"connection": "<connection:sqlpool:DedicatedSQLPool>"}
+    assert c["typeProperties"] == {"storedProcedureName": "usp_sample",
+                                   "storedProcedureParameters": {"identifier": {"value": "1", "type": "Int"}}}
+    assert a.status is S.converted and a.strategy is St.transformed
+    assert "sql_pool_target" in codes(a)  # says the pool itself does not move
+    needed = [q for q in rec.prerequisites if q.kind == "connection"]
+    assert [(q.name, q.bound) for q in needed] == [("sqlpool:DedicatedSQLPool", False)]
+
+
+def test_the_sql_pool_connection_binds_by_name_in_the_resolutions_file():
+    guid = "11111111-1111-1111-1111-111111111111"
+    rec, content = convert_one(pipe(_pool_proc()), resolutions=[
+        {"type": "ItemToId", "key": "connection:sqlpool:DedicatedSQLPool", "value": guid}])
+    assert find(content, "PoolSp")["externalReferences"] == {"connection": guid}
+    assert [q.bound for q in rec.prerequisites if q.kind == "connection"] == [True]
+
+
+def test_a_sql_pool_stored_procedure_without_a_pool_or_a_name_is_blocked_not_guessed():
+    no_pool = act("P1", "SqlPoolStoredProcedure", {"storedProcedureName": "p"})
+    _, _, a = one(no_pool)
+    assert a.status is S.blocked and "sql_pool_missing" in codes(a)
+    no_name = act("P2", "SqlPoolStoredProcedure", {}, sqlPool=ref("SqlPool", "Pool"))
+    _, _, b = one(no_name)
+    assert b.status is S.blocked and "stored_procedure_name_missing" in codes(b)
+
+
+def test_databricks_job_is_blocked_with_a_placeholder_because_fabrics_job_json_is_undocumented():
+    job = act("Job", "DatabricksJob", {"jobId": "123", "jobParameters": {"a": "1"}},
+              linkedServiceName=ref("LinkedService", "LS_DBX"))
+    _, content, a = one(job, linked_services=[linked_service("LS_DBX", "AzureDatabricks")])
+    assert a.status is S.blocked and a.runtime_disposition == "reuse_externally"
+    assert "databricks_job" in codes(a) and any("Settings > Job" in x for x in a.alternatives)
+    placeholder = find(content, "Job")
+    assert placeholder["type"] == "Fail"  # a fail-fast stand-in keeps the dependency graph intact, never a guessed task
+
+
 def test_script_carries_blocks_and_requires_the_database_to_be_set():
     sc = act("Sc", "Script", {"scripts": [{"type": "NonQuery", "text": "TRUNCATE TABLE t; INSERT INTO t SELECT 1"},
                                           {"type": "Query", "text": expr("@concat('SELECT ', pipeline().parameters.n)")}]},

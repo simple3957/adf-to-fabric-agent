@@ -1,0 +1,156 @@
+{
+  "name": "PL_ExternalCalls",
+  "properties": {
+    "activities": [
+      {
+        "name": "Call_Web",
+        "type": "WebActivity",
+        "dependsOn": [],
+        "typeProperties": {
+          "url": {
+            "value": "@concat('https://api.example.com/', pipeline().parameters.path)",
+            "type": "Expression"
+          },
+          "method": "POST",
+          "headers": {
+            "Content-Type": "application/json"
+          },
+          "body": {
+            "k": "v"
+          },
+          "authentication": {
+            "type": "Basic",
+            "username": "svc",
+            "password": {
+              "type": "SecureString",
+              "value": "FIXTURE_SECRET_VALUE"
+            }
+          }
+        }
+      },
+      {
+        "name": "Hook",
+        "type": "WebHook",
+        "dependsOn": [
+          {
+            "activity": "Call_Web",
+            "dependencyConditions": [
+              "Succeeded"
+            ]
+          }
+        ],
+        "typeProperties": {
+          "url": "https://hook.example.com/start",
+          "method": "POST",
+          "timeout": "00:10:00"
+        }
+      },
+      {
+        "name": "Call_Function",
+        "type": "AzureFunctionActivity",
+        "dependsOn": [
+          {
+            "activity": "Hook",
+            "dependencyConditions": [
+              "Succeeded"
+            ]
+          }
+        ],
+        "typeProperties": {
+          "functionName": "Run",
+          "method": "GET"
+        },
+        "linkedServiceName": {
+          "referenceName": "LS_Blob",
+          "type": "LinkedServiceReference"
+        }
+      },
+      {
+        "name": "Copy_From_Rest",
+        "type": "Copy",
+        "dependsOn": [
+          {
+            "activity": "Call_Function",
+            "dependencyConditions": [
+              "Succeeded"
+            ]
+          }
+        ],
+        "typeProperties": {
+          "source": {
+            "type": "RestSource",
+            "httpRequestTimeout": "00:01:40"
+          },
+          "sink": {
+            "type": "ParquetSink"
+          },
+          "enableStaging": false
+        },
+        "inputs": [
+          {
+            "referenceName": "DS_In",
+            "type": "DatasetReference"
+          }
+        ],
+        "outputs": [
+          {
+            "referenceName": "DS_Out",
+            "type": "DatasetReference"
+          }
+        ],
+        "policy": {
+          "timeout": "0.12:00:00",
+          "retry": 0,
+          "retryIntervalInSeconds": 30,
+          "secureOutput": false,
+          "secureInput": false
+        }
+      },
+      {
+        "name": "Copy_From_Http",
+        "type": "Copy",
+        "dependsOn": [
+          {
+            "activity": "Copy_From_Rest",
+            "dependencyConditions": [
+              "Succeeded"
+            ]
+          }
+        ],
+        "typeProperties": {
+          "source": {
+            "type": "HttpSource"
+          },
+          "sink": {
+            "type": "DelimitedTextSink"
+          },
+          "enableStaging": false
+        },
+        "inputs": [
+          {
+            "referenceName": "DS_In",
+            "type": "DatasetReference"
+          }
+        ],
+        "outputs": [
+          {
+            "referenceName": "DS_Out",
+            "type": "DatasetReference"
+          }
+        ],
+        "policy": {
+          "timeout": "0.12:00:00",
+          "retry": 0,
+          "retryIntervalInSeconds": 30,
+          "secureOutput": false,
+          "secureInput": false
+        }
+      }
+    ],
+    "parameters": {
+      "path": {
+        "type": "String"
+      }
+    }
+  }
+}

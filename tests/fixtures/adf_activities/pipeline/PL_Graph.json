@@ -1,0 +1,169 @@
+{
+  "name": "PL_Graph",
+  "properties": {
+    "activities": [
+      {
+        "name": "A",
+        "type": "Wait",
+        "dependsOn": [],
+        "typeProperties": {
+          "waitTimeInSeconds": 1
+        }
+      },
+      {
+        "name": "B",
+        "type": "Wait",
+        "dependsOn": [
+          {
+            "activity": "A",
+            "dependencyConditions": [
+              "Succeeded"
+            ]
+          }
+        ],
+        "typeProperties": {
+          "waitTimeInSeconds": 1
+        }
+      },
+      {
+        "name": "C",
+        "type": "Wait",
+        "dependsOn": [
+          {
+            "activity": "A",
+            "dependencyConditions": [
+              "Succeeded"
+            ]
+          }
+        ],
+        "typeProperties": {
+          "waitTimeInSeconds": 1
+        }
+      },
+      {
+        "name": "D",
+        "type": "Wait",
+        "dependsOn": [
+          {
+            "activity": "B",
+            "dependencyConditions": [
+              "Succeeded"
+            ]
+          },
+          {
+            "activity": "C",
+            "dependencyConditions": [
+              "Failed"
+            ]
+          }
+        ],
+        "typeProperties": {
+          "waitTimeInSeconds": 1
+        }
+      },
+      {
+        "name": "Cyc1",
+        "type": "Wait",
+        "dependsOn": [
+          {
+            "activity": "Cyc2",
+            "dependencyConditions": [
+              "Succeeded"
+            ]
+          }
+        ],
+        "typeProperties": {
+          "waitTimeInSeconds": 1
+        }
+      },
+      {
+        "name": "Cyc2",
+        "type": "Wait",
+        "dependsOn": [
+          {
+            "activity": "Cyc1",
+            "dependencyConditions": [
+              "Succeeded"
+            ]
+          }
+        ],
+        "typeProperties": {
+          "waitTimeInSeconds": 1
+        }
+      },
+      {
+        "name": "Selfish",
+        "type": "Wait",
+        "dependsOn": [
+          {
+            "activity": "Selfish",
+            "dependencyConditions": [
+              "Succeeded"
+            ]
+          }
+        ],
+        "typeProperties": {
+          "waitTimeInSeconds": 1
+        }
+      },
+      {
+        "name": "Dangling",
+        "type": "Wait",
+        "dependsOn": [
+          {
+            "activity": "Ghost",
+            "dependencyConditions": [
+              "Succeeded"
+            ]
+          }
+        ],
+        "typeProperties": {
+          "waitTimeInSeconds": 1
+        }
+      },
+      {
+        "name": "Branch",
+        "type": "IfCondition",
+        "dependsOn": [
+          {
+            "activity": "D",
+            "dependencyConditions": [
+              "Succeeded"
+            ]
+          }
+        ],
+        "typeProperties": {
+          "expression": {
+            "value": "@true",
+            "type": "Expression"
+          },
+          "ifTrueActivities": [
+            {
+              "name": "Inner_Ok",
+              "type": "Wait",
+              "dependsOn": [],
+              "typeProperties": {
+                "waitTimeInSeconds": 1
+              }
+            },
+            {
+              "name": "Inner_Cross",
+              "type": "Wait",
+              "dependsOn": [
+                {
+                  "activity": "A",
+                  "dependencyConditions": [
+                    "Succeeded"
+                  ]
+                }
+              ],
+              "typeProperties": {
+                "waitTimeInSeconds": 1
+              }
+            }
+          ]
+        }
+      }
+    ]
+  }
+}

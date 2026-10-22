@@ -1,0 +1,61 @@
+{
+  "name": "PL_DataFlows",
+  "properties": {
+    "activities": [
+      {
+        "name": "Run_Mapping",
+        "type": "ExecuteDataFlow",
+        "dependsOn": [],
+        "typeProperties": {
+          "dataflow": {
+            "referenceName": "DF_Map",
+            "type": "DataFlowReference",
+            "parameters": {
+              "p1": "x"
+            }
+          },
+          "compute": {
+            "coreCount": 8,
+            "computeType": "General"
+          }
+        }
+      },
+      {
+        "name": "Run_Wrangling",
+        "type": "ExecuteWranglingDataflow",
+        "dependsOn": [
+          {
+            "activity": "Run_Mapping",
+            "dependencyConditions": [
+              "Succeeded"
+            ]
+          }
+        ],
+        "typeProperties": {
+          "dataflow": {
+            "referenceName": "DF_Wrangle",
+            "type": "DataFlowReference"
+          }
+        }
+      },
+      {
+        "name": "Run_Missing",
+        "type": "ExecuteDataFlow",
+        "dependsOn": [
+          {
+            "activity": "Run_Wrangling",
+            "dependencyConditions": [
+              "Succeeded"
+            ]
+          }
+        ],
+        "typeProperties": {
+          "dataflow": {
+            "referenceName": "DF_Not_There",
+            "type": "DataFlowReference"
+          }
+        }
+      }
+    ]
+  }
+}

@@ -41,6 +41,7 @@ Per-agent operating instructions are in `skills/`. Per-stage references are in `
 
 - Fabric has no datasets. They are inlined into each activity as `datasetSettings` (`conversion/handlers/_common.py`).
 - An unregistered activity type becomes an explicit blocker, never silently dropped. Keep it that way when adding handlers.
+- Discovery accounts for everything it sees: each activity is a record (checked by an independent raw scan, `AdfPipeline.inventory`) and each source artifact is a record or an `unprocessed_artifacts` entry with a reason. A new activity type needs an `ActivitySpec` taken from Microsoft's schema AND a fixture in `tests/fixtures/adf_activities/` (a test enforces both).
 - Deploy defaults to dry run. It refuses unbound placeholders (notebook, dataflow, Spark job ids) unless `--allow-unbound`.
 - Triggers are created disabled and never duplicated.
 - `agent/conversion/preflight.py` reports source problems conversion cannot fix (reserved SQL aliases from Microsoft's keyword list, linked-service parameters with no value, Wait-only pipelines). They are findings, never blockers.

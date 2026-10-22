@@ -81,6 +81,57 @@ register(ConversionRule(
 ))
 
 
+# --- SQL pool stored procedure (Synapse) -------------------------------------------------------------------------
+
+
+def convert_sql_pool_stored_procedure(cx: ActivityBuilder) -> None:
+    """Synapse ``SqlPoolStoredProcedure`` -> Fabric Stored procedure activity.
+
+    Microsoft's Fabric Stored procedure activity article lists Azure Synapse Analytics and Fabric Data Warehouse among its
+    stores, so the activity can be carried. There is no linked service: the pool is an activity-level ``sqlPool``
+    reference, so the Fabric connection is a free binding named after the pool (``connection:sqlpool:<pool>``).
+    """
+    a = cx.act
+    pool = a.configuration.get("sql_pool")
+    if not pool:
+        cx.blocker("sql_pool_missing", "The SQL pool stored procedure names no SQL pool (sqlPool.referenceName).")
+        return _block(cx, "sql_pool_missing", "it names no SQL pool.")
+    tp = carry(cx, ("storedProcedureName", "storedProcedureParameters"))
+    if "storedProcedureName" not in tp:
+        cx.blocker("stored_procedure_name_missing", "No stored procedure name.")
+        return _block(cx, "stored_procedure_name_missing", "it names no stored procedure.")
+    conn = cx.free_connection(
+        f"sqlpool:{pool}", f"A Fabric connection to the Synapse dedicated SQL pool '{pool}' (Azure Synapse Analytics "
+                           "connection), or to the Fabric Warehouse its data was moved to.")
+    name = cx.add(cx.envelope(a.name, "SqlServerStoredProcedure", tp, connection=conn))
+    cx.mapping("sqlPool", "externalReferences.connection", "sql_pool_to_connection",
+               f"SQL pool '{pool}' -> Fabric connection (bound by name in the resolutions file)")
+    cx.cover(Op.transform, name)
+    cx.strategy = ConversionStrategy.transformed
+    cx.info("sql_pool_target", f"The procedure runs in whichever database the Fabric connection points to. The pool "
+            f"'{pool}' itself does not move.",
+            "Point the connection at the Synapse pool while it exists, or re-create the procedure in a Fabric Warehouse "
+            "after migrating the data and point the connection there (review T-SQL differences).")
+    cx.output_notes.append("Stored procedure activities return no result set to the pipeline in either service.")
+    cx.summary = (f"SQL pool stored procedure '{a.name}' -> Fabric Stored procedure {tp['storedProcedureName']!r} on "
+                  f"connection 'sqlpool:{pool}'.")
+
+
+register(ConversionRule(
+    name="sql_pool_stored_procedure", adf_types=("SqlPoolStoredProcedure",), fabric_types=("SqlServerStoredProcedure",),
+    variants=("with parameters", "dynamic procedure name"),
+    strategy=ConversionStrategy.transformed, handler=convert_sql_pool_stored_procedure, runtime_disposition="replace",
+    property_rules=("storedProcedureName, storedProcedureParameters (name/value/type) carried",
+                    "sqlPool (activity-level reference) -> externalReferences.connection, bound as connection:sqlpool:<pool>"),
+    io_rules=("none (no dataset)",),
+    expression_rules=("parameter value expressions converted; unchanged unless a named rewrite applies",),
+    dependency_rules=("dependsOn mapped 1:1",), parameter_variable_rules=("unchanged",),
+    unsupported=("the dedicated SQL pool itself is not migrated by this activity",),
+    manual_configuration=("Fabric connection to the Synapse pool or to the migrated Fabric Warehouse",),
+    validation_rules=("sqlPool present", "storedProcedureName present", "connection present"),
+))
+
+
 # --- Script ----------------------------------------------------------------------------------------------------------
 
 

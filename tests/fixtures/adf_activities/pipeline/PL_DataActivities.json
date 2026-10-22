@@ -1,0 +1,207 @@
+{
+  "name": "PL_DataActivities",
+  "properties": {
+    "activities": [
+      {
+        "name": "Copy_Data",
+        "type": "Copy",
+        "dependsOn": [],
+        "typeProperties": {
+          "source": {
+            "type": "ParquetSource",
+            "storeSettings": {
+              "type": "AzureBlobFSReadSettings"
+            }
+          },
+          "sink": {
+            "type": "ParquetSink",
+            "storeSettings": {
+              "type": "AzureBlobFSWriteSettings"
+            }
+          },
+          "enableStaging": false
+        },
+        "inputs": [
+          {
+            "referenceName": "DS_In",
+            "type": "DatasetReference"
+          }
+        ],
+        "outputs": [
+          {
+            "referenceName": "DS_Out",
+            "type": "DatasetReference"
+          }
+        ],
+        "policy": {
+          "timeout": "0.12:00:00",
+          "retry": 0,
+          "retryIntervalInSeconds": 30,
+          "secureOutput": false,
+          "secureInput": false
+        }
+      },
+      {
+        "name": "Lookup_Rows",
+        "type": "Lookup",
+        "dependsOn": [
+          {
+            "activity": "Copy_Data",
+            "dependencyConditions": [
+              "Succeeded"
+            ]
+          }
+        ],
+        "typeProperties": {
+          "source": {
+            "type": "ParquetSource"
+          },
+          "dataset": {
+            "referenceName": "DS_In",
+            "type": "DatasetReference"
+          },
+          "firstRowOnly": true
+        }
+      },
+      {
+        "name": "Get_Meta",
+        "type": "GetMetadata",
+        "dependsOn": [
+          {
+            "activity": "Lookup_Rows",
+            "dependencyConditions": [
+              "Succeeded"
+            ]
+          }
+        ],
+        "typeProperties": {
+          "dataset": {
+            "referenceName": "DS_In",
+            "type": "DatasetReference"
+          },
+          "fieldList": [
+            "exists",
+            "lastModified",
+            "childItems"
+          ]
+        }
+      },
+      {
+        "name": "Delete_Old",
+        "type": "Delete",
+        "dependsOn": [
+          {
+            "activity": "Get_Meta",
+            "dependencyConditions": [
+              "Succeeded"
+            ]
+          }
+        ],
+        "typeProperties": {
+          "dataset": {
+            "referenceName": "DS_Out",
+            "type": "DatasetReference"
+          },
+          "recursive": true,
+          "enableLogging": false
+        }
+      },
+      {
+        "name": "Validate_File",
+        "type": "Validation",
+        "dependsOn": [
+          {
+            "activity": "Delete_Old",
+            "dependencyConditions": [
+              "Succeeded"
+            ]
+          }
+        ],
+        "typeProperties": {
+          "dataset": {
+            "referenceName": "DS_In",
+            "type": "DatasetReference"
+          },
+          "timeout": "0.00:10:00",
+          "sleep": 10,
+          "minimumSize": 1
+        }
+      },
+      {
+        "name": "Run_Script",
+        "type": "Script",
+        "dependsOn": [
+          {
+            "activity": "Validate_File",
+            "dependencyConditions": [
+              "Succeeded"
+            ]
+          }
+        ],
+        "typeProperties": {
+          "scripts": [
+            {
+              "type": "Query",
+              "text": "SELECT 1"
+            }
+          ],
+          "scriptBlockExecutionTimeout": "02:00:00"
+        },
+        "linkedServiceName": {
+          "referenceName": "LS_Blob",
+          "type": "LinkedServiceReference"
+        }
+      },
+      {
+        "name": "Run_Proc",
+        "type": "SqlServerStoredProcedure",
+        "dependsOn": [
+          {
+            "activity": "Run_Script",
+            "dependencyConditions": [
+              "Succeeded"
+            ]
+          }
+        ],
+        "typeProperties": {
+          "storedProcedureName": "[dbo].[usp_x]",
+          "storedProcedureParameters": {
+            "p": {
+              "value": "1",
+              "type": "Int32"
+            }
+          }
+        },
+        "linkedServiceName": {
+          "referenceName": "LS_Blob",
+          "type": "LinkedServiceReference"
+        }
+      },
+      {
+        "name": "Run_Pool_Proc",
+        "type": "SqlPoolStoredProcedure",
+        "dependsOn": [
+          {
+            "activity": "Run_Proc",
+            "dependencyConditions": [
+              "Succeeded"
+            ]
+          }
+        ],
+        "typeProperties": {
+          "storedProcedureName": "usp_sample",
+          "storedProcedureParameters": {
+            "identifier": {
+              "value": "1",
+              "type": "Int"
+            }
+          }
+        },
+        "sqlPool": {
+          "referenceName": "DedicatedSQLPool",
+          "type": "SqlPoolReference"
+        }
+      }
+    ]
+  }
+}

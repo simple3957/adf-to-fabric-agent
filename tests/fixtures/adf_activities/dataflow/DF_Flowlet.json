@@ -1,0 +1,24 @@
+{
+  "name": "DF_Flowlet",
+  "properties": {
+    "type": "Flowlet",
+    "typeProperties": {
+      "sources": [
+        {
+          "name": "src"
+        }
+      ],
+      "sinks": [
+        {
+          "name": "snk"
+        }
+      ],
+      "transformations": [
+        {
+          "name": "t"
+        }
+      ],
+      "script": "source() ~> src\nsrc sink() ~> snk"
+    }
+  }
+}

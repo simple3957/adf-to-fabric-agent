@@ -423,6 +423,10 @@ class AdfRelationshipKind(str, Enum):
     pipeline_uses_dataset = "pipeline_uses_dataset"
     pipeline_uses_linked_service = "pipeline_uses_linked_service"
     dataset_uses_linked_service = "dataset_uses_linked_service"
+    pipeline_executes_dataflow = "pipeline_executes_dataflow"
+    dataflow_uses_dataset = "dataflow_uses_dataset"
+    dataflow_uses_linked_service = "dataflow_uses_linked_service"
+    dataflow_uses_flowlet = "dataflow_uses_flowlet"
     artifact_references_external = "artifact_references_external"
 
 
@@ -736,6 +740,44 @@ class AdfActivity(_Strict):
     source_location: Optional[AdfSourceLocation] = None
 
 
+class AdfDependencyEdge(_Strict):
+    """One ``dependsOn`` entry as a graph edge: ``from`` must finish (per ``conditions``) before ``to`` runs."""
+
+    scope: str  # "<parent activity id or pipeline name>|<branch>": dependencies never cross a scope
+    from_id: Optional[str] = None  # None when the named activity is not in this scope
+    from_name: str
+    to_id: str
+    conditions: list[str] = Field(default_factory=list)  # Succeeded | Failed | Skipped | Completed
+    unknown_conditions: list[str] = Field(default_factory=list)
+    resolved: bool = True
+    problem: Optional[str] = None  # unresolved | outside_scope | self
+
+
+class AdfDependencyGraph(_Strict):
+    """The explicit activity dependency graph of one pipeline (every scope, nested activities included)."""
+
+    nodes: list[str] = Field(default_factory=list)  # activity ids, pre-order
+    edges: list[AdfDependencyEdge] = Field(default_factory=list)
+    cycles: list[list[str]] = Field(default_factory=list)  # activity ids of each cycle, sorted
+    scope_count: int = 0
+
+
+class AdfInventoryCheck(_Strict):
+    """Reconciles the activities the parser reported with an independent scan of the raw pipeline JSON.
+
+    ``matched`` is False when the source holds an activity the record does not (a component that would have been
+    silently dropped), or the record holds one the scan did not find. Pointers use the same form as
+    ``AdfSourceLocation.pointer``.
+    """
+
+    source_activity_count: int = 0
+    parsed_activity_count: int = 0
+    matched: bool = True
+    missing_pointers: list[str] = Field(default_factory=list)  # in the source, not in the record
+    unexpected_pointers: list[str] = Field(default_factory=list)  # in the record, not found in the source scan
+    malformed_pointers: list[str] = Field(default_factory=list)  # list entries that are not objects
+
+
 class AdfPipeline(_Strict):
     name: str
     path: str
@@ -759,6 +801,8 @@ class AdfPipeline(_Strict):
     issues: list[AdfParseIssue] = Field(default_factory=list)  # pipeline-level problems
     unknown_properties: dict[str, Any] = Field(default_factory=dict)
     raw_properties: dict[str, Any] = Field(default_factory=dict)  # pipeline settings (policy, runDimensions...)
+    dependency_graph: Optional[AdfDependencyGraph] = None
+    inventory: Optional[AdfInventoryCheck] = None
 
 
 class AdfDataset(_Strict):
@@ -910,6 +954,69 @@ class AdfFactoryConfig(_Strict):
     global_parameters: list[AdfParameter] = Field(default_factory=list)
 
 
+class AdfDataFlowNode(_Strict):
+    """A source, sink or transformation of a data flow, as authored (``typeProperties.sources|sinks|transformations``)."""
+
+    role: str  # source | sink | transformation
+    name: str = ""
+    description: Optional[str] = None
+    dataset: Optional[str] = None
+    linked_service: Optional[str] = None
+    flowlet: Optional[str] = None  # a flowlet this node embeds
+    schema_linked_service: Optional[str] = None
+    rejected_data_linked_service: Optional[str] = None  # sinks only
+    has_script: bool = False  # a Power Query source carries a script (its text is never stored)
+    pointer: str = ""
+
+
+class AdfDataFlow(_Strict):
+    """A data flow definition (``MappingDataFlow``, ``Flowlet`` or ``WranglingDataFlow``), described, not converted.
+
+    The transformation logic lives in ``script`` / ``scriptLines`` (data flow script). Only its size is recorded
+    here, never its content: it is parsed by the converter's own stage, and may embed expressions and literals.
+    """
+
+    name: str
+    path: str
+    flow_type: Optional[str] = None  # MappingDataFlow | Flowlet | WranglingDataFlow | <as authored>
+    folder: Optional[str] = None
+    description: Optional[str] = None
+    annotations: list[str] = Field(default_factory=list)
+    sources: list[AdfDataFlowNode] = Field(default_factory=list)
+    sinks: list[AdfDataFlowNode] = Field(default_factory=list)
+    transformations: list[AdfDataFlowNode] = Field(default_factory=list)
+    has_script: bool = False
+    script_line_count: int = 0
+    document_locale: Optional[str] = None  # wrangling flows
+    dataset_refs: list[str] = Field(default_factory=list)
+    linked_service_refs: list[str] = Field(default_factory=list)
+    flowlet_refs: list[str] = Field(default_factory=list)
+    unknown_properties: dict[str, Any] = Field(default_factory=dict)  # preserved, not understood
+    issues: list[AdfParseIssue] = Field(default_factory=list)
+    parse_status: DiscoveryStatus = DiscoveryStatus.discovered
+    note: str = ""
+    source_location: Optional[AdfSourceLocation] = None
+
+
+class AdfUnprocessedArtifact(_Strict):
+    """A source artifact that was seen but not turned into a record, and why.
+
+    Nothing seen in the source disappears: it is either a record in this discovery or an entry here.
+    """
+
+    path: str
+    kind: str  # an AdfArtifactKind value, or "unknown"
+    name: Optional[str] = None
+    reason: str  # malformed_json | unreadable | not_a_json_object | parse_error | skipped | kind_not_parsed
+    detail: str = ""  # secret-free
+
+
+# Reasons that mean something the source holds is missing from the record (the run is then ``partial`` and a
+# conversion made from it is not complete). ``kind_not_parsed`` is informational: the artifact is seen and listed, but
+# this phase does not interpret that kind.
+UNPROCESSED_LOSS_REASONS = frozenset({"malformed_json", "unreadable", "not_a_json_object", "parse_error", "skipped"})
+
+
 class AdfSemanticDiscovery(_Strict):
     """Persisted ADF Semantic Discovery result (Phase 1: repository-derived).
 
@@ -938,6 +1045,10 @@ class AdfSemanticDiscovery(_Strict):
     factory: list[AdfFactoryConfig] = Field(default_factory=list)  # sorted by name
     change_data_captures: list[AdfChangeDataCapture] = Field(default_factory=list)  # sorted by name
     integration_runtimes: list[AdfIntegrationRuntime] = Field(default_factory=list)  # sorted by name
+    dataflows: list[AdfDataFlow] = Field(default_factory=list)  # sorted by name
+    dataflow_count: int = 0
+    unprocessed_artifacts: list[AdfUnprocessedArtifact] = Field(default_factory=list)  # sorted by path
+    inventory_mismatch_count: int = 0  # pipelines whose activity inventory did not reconcile with the source
     external_references: list[ExternalReference] = Field(default_factory=list)  # sorted, deduped
     relationships: list[AdfRelationship] = Field(default_factory=list)  # sorted, deduped
     unresolved_references: list[AdfArtifactRef] = Field(default_factory=list)  # sorted

@@ -1,0 +1,17 @@
+{
+  "name": "DS_In",
+  "properties": {
+    "linkedServiceName": {
+      "referenceName": "LS_Blob",
+      "type": "LinkedServiceReference"
+    },
+    "type": "Parquet",
+    "typeProperties": {
+      "location": {
+        "type": "AzureBlobFSLocation",
+        "fileSystem": "c",
+        "folderPath": "f"
+      }
+    }
+  }
+}

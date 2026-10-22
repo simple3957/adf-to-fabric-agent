@@ -1,0 +1,28 @@
+{
+  "name": "DF_Loop_A",
+  "properties": {
+    "type": "Flowlet",
+    "typeProperties": {
+      "sources": [
+        {
+          "name": "s"
+        }
+      ],
+      "sinks": [
+        {
+          "name": "k"
+        }
+      ],
+      "transformations": [
+        {
+          "name": "t",
+          "flowlet": {
+            "referenceName": "DF_Loop_B",
+            "type": "DataFlowReference"
+          }
+        }
+      ],
+      "script": "x"
+    }
+  }
+}

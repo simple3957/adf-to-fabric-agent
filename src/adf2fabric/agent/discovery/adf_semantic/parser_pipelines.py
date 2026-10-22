@@ -33,7 +33,7 @@ from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import urlparse
 
-from adf2fabric.agent.discovery.adf_semantic import activity_semantics, pipeline_analysis
+from adf2fabric.agent.discovery.adf_semantic import activity_semantics, inventory, pipeline_analysis
 from adf2fabric.agent.discovery.adf_semantic.activity_registry import (
     NESTED_SLOTS,
     REQUIRES_LINKED_SERVICE,
@@ -307,6 +307,18 @@ def parse_pipeline(data: Any, path: str) -> AdfPipeline:
     # Stages 6, 8-10: control flow, classification, summaries, reporting.
     pipeline_analysis.analyze_pipeline(pipeline, ctx)
     activity_semantics.finalize_pipeline(pipeline)
+
+    # Reconcile what was parsed with an independent scan of the raw JSON: a mismatch means a component was missed.
+    pipeline.inventory = inventory.reconcile(pipeline.activities, data)
+    if not pipeline.inventory.matched:
+        pipeline_analysis.add_issue(pipeline.issues, AdfParseIssue(
+            code="inventory_mismatch", severity=AdfIssueSeverity.error,
+            message=(f"The source holds {pipeline.inventory.source_activity_count} activit(ies) but "
+                     f"{pipeline.inventory.parsed_activity_count} were recorded. Not recorded: "
+                     f"{', '.join(pipeline.inventory.missing_pointers[:5]) or 'none'}"
+                     f"{' ...' if len(pipeline.inventory.missing_pointers) > 5 else ''}. "
+                     f"Recorded but not in the source scan: "
+                     f"{', '.join(pipeline.inventory.unexpected_pointers[:5]) or 'none'}.")))
     return pipeline
 
 
@@ -327,6 +339,7 @@ def resolve_pipelines(
     pipelines: list[AdfPipeline],
     datasets: list[AdfDataset],
     linked_services: list[AdfLinkedService],
+    dataflows: "list | tuple" = (),
 ) -> None:
     """Stage 7: resolve dataset / linked-service / child-pipeline references in place.
 
@@ -335,7 +348,7 @@ def resolve_pipelines(
     pipeline arguments, detects cyclic pipeline calls and recurring pipeline shapes,
     then regenerates the semantic summaries with the richer context.
     """
-    pipeline_analysis.resolve_pipelines(pipelines, datasets, linked_services)
+    pipeline_analysis.resolve_pipelines(pipelines, datasets, linked_services, dataflows)
     for p in pipelines:
         activity_semantics.finalize_pipeline(p)
 
@@ -461,6 +474,17 @@ def _warn(act: AdfActivity, code: str, message: str, path: Optional[str] = None,
     act.warnings.append(AdfParseIssue(code=code, severity=severity, message=message, property_path=path))
 
 
+def _list_of(act: AdfActivity, container: dict, key: str, path: str) -> list:
+    """``container[key]`` as a list. Absent is empty; any other shape is reported (never iterated, never crashes)."""
+    value = container.get(key)
+    if value is None or isinstance(value, list):
+        return value or []
+    _warn(act, f"invalid_{snake_case(key)}",
+          f"'{key}' should be a list but is a {type(value).__name__}; it is preserved but not read.", path,
+          AdfIssueSeverity.error)
+    return []
+
+
 def _parse_state(act: AdfActivity, node: dict) -> None:
     state = node.get("state")
     if isinstance(state, str):
@@ -487,7 +511,7 @@ def _parse_dependencies(act: AdfActivity, node: dict) -> list[AdfDependency]:
                   AdfIssueSeverity.error)
             continue
         conds, unknown = [], []
-        for c in dep.get("dependencyConditions") or []:
+        for c in _list_of(act, dep, "dependencyConditions", f"dependsOn[{i}].dependencyConditions"):
             norm = _CONDITIONS.get(str(c).lower())
             (conds if norm else unknown).append(norm or str(c))
         if "dependencyConditions" not in dep or not (dep.get("dependencyConditions")):
@@ -540,7 +564,7 @@ def _legacy_refs(act: AdfActivity, node: dict, tp: dict) -> None:
     """The original structural reference fields (unchanged semantics)."""
     datasets: list[str] = []
     for key in ("inputs", "outputs"):
-        for ref in node.get(key) or []:
+        for ref in _list_of(act, node, key, key):
             n = _ref_name(ref)
             if n:
                 datasets.append(n)
@@ -657,11 +681,12 @@ def _check_properties(act: AdfActivity, node: dict, spec: Optional[ActivitySpec]
             for c in cleaned["cases"]]
     act.raw_properties = san.clean(cleaned, "typeProperties")
 
-    extra = {f"activity.{k}": san.clean(v, k) for k, v in node.items() if k not in TOP_LEVEL_KEYS}
+    allowed_top = TOP_LEVEL_KEYS | (set(spec.top_level) if spec is not None else set())
+    extra = {f"activity.{k}": san.clean(v, k) for k, v in node.items() if k not in allowed_top}
     if spec is None:
         act.unknown_properties = {**{k: v for k, v in act.raw_properties.items()}, **extra}
     else:
-        known = set(spec.known)
+        known = set(spec.known) | {alt.rsplit(".", 1)[-1] for _, alt in spec.aliases}
         act.unknown_properties = {
             **{k: v for k, v in act.raw_properties.items() if k not in known}, **extra}
         if act.unknown_properties:
@@ -673,8 +698,15 @@ def _check_properties(act: AdfActivity, node: dict, spec: Optional[ActivitySpec]
     required = list(spec.required)
     if spec.type.lower() in REQUIRES_LINKED_SERVICE:
         required.append("linkedServiceName")
+    alias_of = dict(spec.aliases)
     for path in required:
         found, value = _get(node, path)
+        if not found and path in alias_of:
+            found, value = _get(node, alias_of[path])
+            if found:
+                _warn(act, "property_alias_used",
+                      f"Written as '{alias_of[path].rsplit('.', 1)[-1]}'; the documented name is "
+                      f"'{path.rsplit('.', 1)[-1]}'. Both are read.", alias_of[path], AdfIssueSeverity.info)
         if not found:
             act.missing_properties.append(path)
         elif value in (None, "", [], {}) or (_is_expr(value) and not value["value"].strip()):
@@ -753,11 +785,11 @@ def _details(settings: Any, io: AdfIO, san: _Sanitizer, path: str) -> None:
 
 
 def _generic_endpoints(act: AdfActivity, node: dict, tp: dict, san: _Sanitizer) -> None:
-    for i, ref in enumerate(node.get("inputs") or []):
+    for i, ref in enumerate(_list_of(act, node, "inputs", "inputs")):
         io = _dataset_io(ref, "input", san, f"inputs[{i}]")
         if io:
             act.inputs.append(io)
-    for i, ref in enumerate(node.get("outputs") or []):
+    for i, ref in enumerate(_list_of(act, node, "outputs", "outputs")):
         io = _dataset_io(ref, "output", san, f"outputs[{i}]")
         if io:
             act.outputs.append(io)
@@ -860,7 +892,7 @@ def _h_if(act, node, tp, ctx, san):
 def _h_switch(act, node, tp, ctx, san):
     act.configuration["on"] = _expr_text(tp.get("on"))
     values = []
-    for c in tp.get("cases") or []:
+    for c in _list_of(act, tp, "cases", "typeProperties.cases"):
         if isinstance(c, dict):
             v, _ = _text(c.get("value"))
             values.append(v)
@@ -967,9 +999,31 @@ def _h_stored_procedure(act, node, tp, ctx, san):
     _generic_endpoints(act, node, tp, san)
 
 
+def _h_sql_pool_stored_procedure(act, node, tp, ctx, san):
+    _h_stored_procedure(act, node, tp, ctx, san)
+    pool = _ref_name(node.get("sqlPool"))
+    act.configuration["sql_pool"] = pool
+    if node.get("sqlPool") is not None and pool is None:
+        _warn(act, "invalid_sql_pool_reference", "'sqlPool' has no referenceName.", "sqlPool", AdfIssueSeverity.error)
+
+
+def _h_databricks_job(act, node, tp, ctx, san):
+    text, dyn = _text(tp["jobId"] if "jobId" in tp else tp.get("jobID"))
+    act.configuration["job_id"] = text
+    act.configuration["job_id_is_dynamic"] = dyn
+    params = tp.get("jobParameters")
+    if isinstance(params, dict):
+        act.configuration["job_parameters"] = {k: _expr_text(v) for k, v in sorted(params.items())}
+    elif isinstance(params, list):  # Microsoft's property table calls it "an array of key-value pairs"
+        act.configuration["job_parameters"] = san.clean(params, "jobParameters")
+    elif params is not None:
+        _warn(act, "invalid_job_parameters", "'jobParameters' is neither an object nor a list.",
+              "typeProperties.jobParameters", AdfIssueSeverity.error)
+
+
 def _h_script(act, node, tp, ctx, san):
     blocks, kinds_all = [], set()
-    for b in tp.get("scripts") or []:
+    for b in _list_of(act, tp, "scripts", "typeProperties.scripts"):
         if not isinstance(b, dict):
             continue
         text, dyn = _text(b.get("text"))
@@ -979,7 +1033,8 @@ def _h_script(act, node, tp, ctx, san):
         blocks.append({
             "type": b.get("type"), "text": REDACTED if (text and unsafe_text(text)) else text,
             "is_dynamic": dyn, "statement_kinds": kinds,
-            "parameters": [san.clean(p) for p in b.get("parameters") or [] if isinstance(p, dict)]})
+            "parameters": [san.clean(p) for p in (b.get("parameters") if isinstance(b.get("parameters"), list) else [])
+                           if isinstance(p, dict)]})
     act.configuration["scripts"] = blocks
     act.configuration["statement_kinds"] = sorted(kinds_all)
     writes = bool(kinds_all & _WRITE_STATEMENTS)
@@ -1024,5 +1079,6 @@ _HANDLERS = {
     "foreach": _h_foreach, "if": _h_if, "switch": _h_switch, "until": _h_until, "wait": _h_wait,
     "set_variable": _h_set_variable, "append_variable": _h_append_variable,
     "execute_pipeline": _h_execute_pipeline, "web": _h_web, "stored_procedure": _h_stored_procedure,
-    "script": _h_script, "dataflow": _h_dataflow,
+    "script": _h_script, "dataflow": _h_dataflow, "databricks_job": _h_databricks_job,
+    "sql_pool_stored_procedure": _h_sql_pool_stored_procedure,
 }

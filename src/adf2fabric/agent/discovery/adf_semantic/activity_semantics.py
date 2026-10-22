@@ -530,9 +530,14 @@ def summarize(act: AdfActivity, by_id: dict[str, AdfActivity]) -> str:
         what = c.get("function_name") or (c.get("host") or _value_text(c.get("url")))
         kind = {"webactivity": "Calls", "webhook": "Calls (with callback)", "azurefunctionactivity": "Invokes Azure Function"}[t]
         return f"{kind} {c.get('method') or ''} {what}{' (dynamic URL)' if c.get('url_is_dynamic') else ''}.".replace("  ", " ") + tail
-    if t == "sqlserverstoredprocedure":
+    if t in ("sqlserverstoredprocedure", "sqlpoolstoredprocedure"):
         n = len(c.get("parameters") or {})
-        return f"Executes stored procedure {_value_text(c.get('stored_procedure'))} with {n} parameter(s)." + tail
+        pool = f" in SQL pool '{c['sql_pool']}'" if c.get("sql_pool") else ""
+        return f"Executes stored procedure {_value_text(c.get('stored_procedure'))}{pool} with {n} parameter(s)." + tail
+    if t == "databricksjob":
+        jp = c.get("job_parameters")
+        n = len(jp) if isinstance(jp, (dict, list)) else 0
+        return f"Runs Databricks job {_value_text(c.get('job_id'))} with {n} job parameter(s)." + tail
     if t == "script":
         blocks = c.get("scripts") or []
         kinds = ", ".join(c.get("statement_kinds") or []) or "unknown statements"

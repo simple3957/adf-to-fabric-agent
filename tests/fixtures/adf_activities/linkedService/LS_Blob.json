@@ -1,0 +1,9 @@
+{
+  "name": "LS_Blob",
+  "properties": {
+    "type": "AzureBlobFS",
+    "typeProperties": {
+      "url": "https://fixture.dfs.core.windows.net/"
+    }
+  }
+}

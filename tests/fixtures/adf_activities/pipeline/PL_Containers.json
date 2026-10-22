@@ -1,0 +1,259 @@
+{
+  "name": "PL_Containers",
+  "properties": {
+    "activities": [
+      {
+        "name": "Get_Items",
+        "type": "Lookup",
+        "dependsOn": [],
+        "typeProperties": {
+          "source": {
+            "type": "ParquetSource"
+          },
+          "dataset": {
+            "referenceName": "DS_In",
+            "type": "DatasetReference"
+          },
+          "firstRowOnly": false
+        }
+      },
+      {
+        "name": "ForEach_Item",
+        "type": "ForEach",
+        "dependsOn": [
+          {
+            "activity": "Get_Items",
+            "dependencyConditions": [
+              "Succeeded"
+            ]
+          }
+        ],
+        "typeProperties": {
+          "items": {
+            "value": "@activity('Get_Items').output.value",
+            "type": "Expression"
+          },
+          "isSequential": false,
+          "batchCount": 4,
+          "activities": [
+            {
+              "name": "If_Valid",
+              "type": "IfCondition",
+              "dependsOn": [],
+              "typeProperties": {
+                "expression": {
+                  "value": "@equals(item().ok, true)",
+                  "type": "Expression"
+                },
+                "ifTrueActivities": [
+                  {
+                    "name": "Until_Ready",
+                    "type": "Until",
+                    "dependsOn": [],
+                    "typeProperties": {
+                      "expression": {
+                        "value": "@equals(variables('ready'), 'yes')",
+                        "type": "Expression"
+                      },
+                      "timeout": "0.01:00:00",
+                      "activities": [
+                        {
+                          "name": "Wait_Retry",
+                          "type": "Wait",
+                          "dependsOn": [],
+                          "typeProperties": {
+                            "waitTimeInSeconds": 1
+                          }
+                        },
+                        {
+                          "name": "Call_Child",
+                          "type": "ExecutePipeline",
+                          "dependsOn": [
+                            {
+                              "activity": "Wait_Retry",
+                              "dependencyConditions": [
+                                "Succeeded"
+                              ]
+                            }
+                          ],
+                          "typeProperties": {
+                            "pipeline": {
+                              "referenceName": "PL_Child",
+                              "type": "PipelineReference"
+                            },
+                            "waitOnCompletion": true,
+                            "parameters": {
+                              "file": {
+                                "value": "@item().name",
+                                "type": "Expression"
+                              }
+                            }
+                          }
+                        }
+                      ]
+                    }
+                  },
+                  {
+                    "name": "Set_Ok",
+                    "type": "SetVariable",
+                    "dependsOn": [
+                      {
+                        "activity": "Until_Ready",
+                        "dependencyConditions": [
+                          "Succeeded"
+                        ]
+                      }
+                    ],
+                    "typeProperties": {
+                      "variableName": "ready",
+                      "value": "yes"
+                    }
+                  }
+                ],
+                "ifFalseActivities": [
+                  {
+                    "name": "Switch_Kind",
+                    "type": "Switch",
+                    "dependsOn": [],
+                    "typeProperties": {
+                      "on": {
+                        "value": "@item().kind",
+                        "type": "Expression"
+                      },
+                      "cases": [
+                        {
+                          "value": "csv",
+                          "activities": [
+                            {
+                              "name": "Copy_Csv",
+                              "type": "Copy",
+                              "dependsOn": [],
+                              "typeProperties": {
+                                "source": {
+                                  "type": "DelimitedTextSource"
+                                },
+                                "sink": {
+                                  "type": "ParquetSink"
+                                },
+                                "enableStaging": false
+                              },
+                              "inputs": [
+                                {
+                                  "referenceName": "DS_In",
+                                  "type": "DatasetReference"
+                                }
+                              ],
+                              "outputs": [
+                                {
+                                  "referenceName": "DS_Out",
+                                  "type": "DatasetReference"
+                                }
+                              ],
+                              "policy": {
+                                "timeout": "0.12:00:00",
+                                "retry": 0,
+                                "retryIntervalInSeconds": 30,
+                                "secureOutput": false,
+                                "secureInput": false
+                              }
+                            }
+                          ]
+                        },
+                        {
+                          "value": "json",
+                          "activities": [
+                            {
+                              "name": "Copy_Json",
+                              "type": "Copy",
+                              "dependsOn": [],
+                              "typeProperties": {
+                                "source": {
+                                  "type": "JsonSource"
+                                },
+                                "sink": {
+                                  "type": "ParquetSink"
+                                },
+                                "enableStaging": false
+                              },
+                              "inputs": [
+                                {
+                                  "referenceName": "DS_In",
+                                  "type": "DatasetReference"
+                                }
+                              ],
+                              "outputs": [
+                                {
+                                  "referenceName": "DS_Out",
+                                  "type": "DatasetReference"
+                                }
+                              ],
+                              "policy": {
+                                "timeout": "0.12:00:00",
+                                "retry": 0,
+                                "retryIntervalInSeconds": 30,
+                                "secureOutput": false,
+                                "secureInput": false
+                              }
+                            },
+                            {
+                              "name": "Fail_Json",
+                              "type": "Fail",
+                              "dependsOn": [
+                                {
+                                  "activity": "Copy_Json",
+                                  "dependencyConditions": [
+                                    "Failed"
+                                  ]
+                                }
+                              ],
+                              "typeProperties": {
+                                "message": "bad json",
+                                "errorCode": "JSON1"
+                              }
+                            }
+                          ]
+                        }
+                      ],
+                      "defaultActivities": [
+                        {
+                          "name": "Log_Other",
+                          "type": "SetVariable",
+                          "dependsOn": [],
+                          "typeProperties": {
+                            "variableName": "ready",
+                            "value": "no"
+                          }
+                        }
+                      ]
+                    }
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      },
+      {
+        "name": "Final_Wait",
+        "type": "Wait",
+        "dependsOn": [
+          {
+            "activity": "ForEach_Item",
+            "dependencyConditions": [
+              "Completed"
+            ]
+          }
+        ],
+        "typeProperties": {
+          "waitTimeInSeconds": 1
+        }
+      }
+    ],
+    "parameters": {},
+    "variables": {
+      "ready": {
+        "type": "String"
+      }
+    }
+  }
+}
