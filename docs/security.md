@@ -110,6 +110,7 @@ These are exposed over HTTP, each with its own permission (the role table in `te
 | `POST .../provisioning/apply` | `migration:execute`; `apply: true` also needs `confirm: true` and a finished dry run of the same, approved, unchanged plan |
 | `POST .../stages/deploy_apply` | `migration:execute`; needs `confirm: true` and a dry run of the same pipelines in the same workspace within the last hour |
 | `POST .../stages/dependencies`, `workloads`, `validate` | `discovery:run` / `plans:generate` |
+| `POST .../stages/verify` with `run: true` (starts REAL Fabric runs, then compares with ADF) | `plans:generate` + `migration:execute`; needs `confirm: true` and 1-20 named pipelines; audited as `verify.run` |
 
 * Views go through `api/views.sanitize`: keys that can carry paths, tokens, connection strings, code or hashes are dropped, strings are
   scrubbed of paths and bearer tokens and bounded, and job results and errors leave the server the same way. Provisioning steps are shown by an

@@ -212,10 +212,10 @@ class ApiClient:
     # ---- stages + jobs -------------------------------------------------------------------------------------------------
     def run_stage(self, pid: str, stage: str, *, pipelines: Iterable[str] = (), workspace_id: Optional[str] = None,
                   with_children: bool = False, allow_unbound: bool = False, confirm: bool = False, validate_stages: Iterable[str] = (),
-                  idempotency_key: Optional[str] = None) -> dict:
+                  run: bool = False, idempotency_key: Optional[str] = None) -> dict:
         return self._post(f"/projects/{pid}/stages/{stage}",
                           {"pipelines": list(pipelines), "workspace_id": workspace_id, "with_children": with_children,
-                           "allow_unbound": allow_unbound, "confirm": confirm, "validate_stages": list(validate_stages)}, idempotency_key)
+                           "allow_unbound": allow_unbound, "confirm": confirm, "validate_stages": list(validate_stages), "run": run}, idempotency_key)
 
     # ---- views built and redacted on the server ------------------------------------------------------------------------
     def inventory(self, pid: str) -> dict:

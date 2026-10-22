@@ -30,6 +30,9 @@ completed). A state moves only on evidence; a dry run is not a deployment and a 
 * Dry runs are labelled "nothing is changed"; real runs are labelled "APPLIED". Real provisioning needs a dry run, then typing `APPLY`;
   deploy needs a dry run of the same pipelines, then typing `DEPLOY`; connection creation needs `CREATE`. The API requires `confirm: true`
   as well, so the UI is not the only gate.
+* Report → *Run in Fabric and compare* starts REAL runs of up to 20 chosen, deployed pipelines (they read sources and write
+  targets) after typing `RUN`; it needs `migration:execute`. A pipeline becomes runtime-validated only when its run completes and
+  matches the ADF baseline; a completed run without a baseline is not proof.
 * Buttons are disabled while a job runs; each intent carries an `Idempotency-Key`, so a double click starts one job.
 * Errors show the server's short message, what to do, and a request reference for 5xx; never a trace or a path.
 * Demo mode is labelled on every page and is refused in production mode. Production never shows sample data.

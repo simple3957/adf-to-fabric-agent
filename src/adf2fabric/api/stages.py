@@ -80,7 +80,8 @@ def conversion_summary(store: ProjectStore, pid: str, conv=None) -> dict[str, An
 
 
 def _verify(c: Container, session: Session, pid: str, options: dict, log: Log) -> dict[str, Any]:
-    """Run-and-compare on the latest finished Fabric runs. Read-only: from the UI it never starts a run."""
+    """Compare Fabric runs with ADF. By default read-only (the latest finished runs); with ``run`` (authorised, confirmed and audited by the
+    route) it STARTS a real run of each named pipeline and waits for it."""
     from adf2fabric.agent.deployment.verify import (AdfRuns, Factory, callers, load_record, record_path, render_report,
                                                     save_record, verify_all)
 
@@ -110,8 +111,11 @@ def _verify(c: Container, session: Session, pid: str, options: dict, log: Log) -
     except ProviderError as exc:
         raise StageError(str(exc), getattr(exc, "actions", None) or ["Sign in to Fabric on the Connections page."]) from None
     try:
-        results = verify_all(lambda: FabricClient(token, session=c.fabric_http), workspace, names, start=False, adf=adf, previous=previous,
-                             called=called, log=log)
+        start = bool(options.get("run"))
+        if start:
+            log(f"Starting real runs of {len(names)} pipeline(s) in Fabric")
+        results = verify_all(lambda: FabricClient(token, session=c.fabric_http), workspace, names, start=start, adf=adf, previous=previous,
+                             called=called, timeout_seconds=int(options.get("run_timeout") or 1800), log=log)
     except DeployError as exc:
         raise StageError(str(exc)) from None
     record = save_record(path, results)

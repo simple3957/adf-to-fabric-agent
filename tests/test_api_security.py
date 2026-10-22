@@ -227,6 +227,9 @@ ROUTES = [  # (method, path, body, permissions required)
     ("POST", "/projects/demo-estate/provisioning/approve", {"plan_ref": "0" * 16}, {G.provision_approve}),
     ("POST", "/projects/demo-estate/provisioning/apply", {"plan_ref": "0" * 16}, {G.migration_execute}),
     ("POST", "/projects/demo-estate/provisioning/verify", {}, {G.plans_generate}),
+    ("POST", "/projects/demo-estate/stages/verify", {"workspace_id": WS}, {G.projects_view, G.plans_generate}),
+    ("POST", "/projects/demo-estate/stages/verify", {"workspace_id": WS, "run": True, "confirm": True, "pipelines": ["PL"]},
+     {G.projects_view, G.plans_generate, G.migration_execute}),
     ("GET", "/admin/users", None, {G.users_manage}), ("GET", "/admin/audit", None, {G.users_manage}),
 ]
 ROLE_USERS = {"viewer": "vic", "analyst": "ann", "approver": "abe", "operator": "oscar", "admin": "root"}

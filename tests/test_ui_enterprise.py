@@ -235,3 +235,21 @@ def test_production_mode_hides_the_demo_toggle_and_shows_no_demo_data(tmp_path, 
     toggles = [t for t in at.toggle if t.label == "Demo"]
     assert toggles and toggles[0].disabled and toggles[0].value is False
     assert "DEMO DATA" not in _everything_shown(at) and PID not in _everything_shown(at)
+
+
+def test_running_pipelines_needs_a_selection_and_RUN_typed(worked, demo, open_steps):
+    d, _ = demo
+    assert worked.wait_job(worked.run_stage(PID, "deploy_dry_run", workspace_id=DEMO_WS, allow_unbound=True), interval=0.05)["state"] == "succeeded"
+    assert worked.wait_job(worked.run_stage(PID, "deploy_apply", workspace_id=DEMO_WS, allow_unbound=True, confirm=True), interval=0.05)["state"] == "succeeded"
+    at = _step(worked, "report")
+    assert at.button(key="run-go").disabled and at.text_input(key="run-confirm").disabled  # nothing chosen yet
+    assert "REAL RUNS" in _everything_shown(at)
+    first = at.multiselect(key="run-pipes").options[0]
+    at.multiselect(key="run-pipes").select(first).run()
+    assert at.button(key="run-go").disabled  # chosen, but not confirmed
+    at.text_input(key="run-confirm").set_value("RUN").run()
+    assert not at.button(key="run-go").disabled
+    before = len(d.fabric_http.runs)
+    at.button(key="run-go").click().run()
+    assert not at.exception, at.exception
+    assert len(d.fabric_http.runs) == before + 1

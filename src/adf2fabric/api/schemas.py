@@ -78,6 +78,8 @@ class StageBody(_In):
     allow_unbound: bool = False
     confirm: bool = False  # required by stages that change the target (deploy_apply)
     validate_stages: list[str] = Field(default_factory=list, max_length=4)  # validate stage: static | api | deployment | runtime
+    run: bool = False  # verify stage: START a real Fabric run of each named pipeline, then compare (needs migration:execute + confirm)
+    run_timeout: int = Field(default=1800, ge=60, le=7200)  # seconds to wait for each started run
 
 
 class WorkspaceBody(_In):

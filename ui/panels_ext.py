@@ -323,4 +323,24 @@ def report(api: ApiClient, pid: str, rep: dict | None, dest: dict) -> None:
     if rep["validation"].get("available"):
         with st.expander("Validation detail"):
             _validation_body(rep["validation"])
+    _run_and_compare(api, pid, rep, ws)
     st.caption("A generated file, a clean check or a successful call is never proof that a pipeline runs correctly: only a recorded real run compared with the source is.")
+
+
+def _run_and_compare(api: ApiClient, pid: str, rep: dict, ws: bool) -> None:
+    """Prove pipelines by running them: a REAL run in Fabric, compared with the last successful ADF run. Opt-in, confirmed, audited."""
+    deployed = [p["name"] for p in rep["pipelines"] if p["state"] in ("deployed", "runtime_validated")]
+    with st.expander("Run in Fabric and compare with ADF (real runs)"):
+        st.markdown(theme.badge("REAL RUNS: they read the pipelines' sources and write their targets", "warning"), unsafe_allow_html=True)
+        if not deployed:
+            st.caption("Deploy pipelines first: only deployed pipelines can be run.")
+            return
+        chosen = st.multiselect("Pipelines to run (up to 20)", deployed, key="run-pipes", max_selections=20)
+        sure = typed_confirm("Start real runs of the selected pipelines in Fabric", "RUN", "run-confirm", disabled=not chosen)
+        allowed = can("migration:execute")
+        if st.button("Run and compare", key="run-go", type="primary", disabled=not (ws and chosen and sure and allowed),
+                     help=None if allowed else "Your role cannot start runs (needs migration:execute)."):
+            if (job := run_job(lambda: api.run_stage(pid, "verify", pipelines=chosen, run=True, confirm=True, idempotency_key=intent("run-verify")),
+                               "Running in Fabric and comparing", intent_name="run-verify")) and job["state"] == "succeeded":
+                st.rerun()
+        st.caption("A pipeline becomes runtime-validated only when its run completes and matches the ADF baseline.")

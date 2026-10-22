@@ -488,3 +488,49 @@ def test_demo_mode_is_labelled_by_the_api_everywhere_it_applies(world):
 def test_other_people_never_see_data_from_a_demo_session_they_did_not_start(world):
     world.call("ann", "POST", "/mode", json_body={"mode": "demo"})
     assert world.call("bea", "GET", "/projects").json()["projects"] == []  # another organisation, live mode: nothing
+
+
+# =====================================================================================================================
+# 8. running pipelines to prove them: opt-in, authorised, confirmed, audited
+# =====================================================================================================================
+
+
+def _deployed(world):
+    prepare(world)
+    run(world, "oscar", "deploy_dry_run", {"workspace_id": DEMO_WS, "allow_unbound": True})
+    world.wait("oscar", stage(world, "oscar", "deploy_apply", {"workspace_id": DEMO_WS, "allow_unbound": True, "confirm": True}).json())
+    return next(p["name"] for p in world.call("vic", "GET", f"{P}/inventory").json()["pipelines"] if p["state"] == "deployed")
+
+
+def test_starting_runs_needs_execute_permission_a_confirmation_and_named_pipelines(world):
+    name = _deployed(world)
+    body = {"workspace_id": DEMO_WS, "run": True, "pipelines": [name]}
+    assert stage(world, "ann", "verify", {**body, "confirm": True}).status_code == 403  # an analyst may compare, not start runs
+    assert stage(world, "abe", "verify", {**body, "confirm": True}).status_code == 403
+    r = stage(world, "oscar", "verify", body)
+    assert r.status_code == 422 and "Confirm" in r.json()["error"]
+    r = stage(world, "oscar", "verify", {"workspace_id": DEMO_WS, "run": True, "confirm": True})
+    assert r.status_code == 422 and "Name the pipelines" in r.json()["error"]  # never "run everything" by default
+    assert stage(world, "oscar", "verify", {**body, "confirm": True, "pipelines": [f"P{i}" for i in range(21)]}).status_code == 422
+    assert stage(world, "oscar", "deploy_dry_run", {**body, "confirm": True}).status_code == 422  # run belongs to verify only
+
+
+def test_a_confirmed_run_starts_the_pipeline_compares_it_and_is_audited(world):
+    name = _deployed(world)
+    before = len(world.demo.fabric_http.runs)
+    j = run(world, "oscar", "verify", {"workspace_id": DEMO_WS, "run": True, "confirm": True, "pipelines": [name]})
+    assert j["state"] == "succeeded" and len(world.demo.fabric_http.runs) == before + 1  # exactly one run was started
+    res = j["result"]["results"][0]
+    assert res["pipeline"] == name and res["fabric_status"] == "Completed"
+    assert res["verdict"] != "matches"  # the demo has no ADF baseline: a completed run alone is not proof
+    state = next(p["state"] for p in world.call("vic", "GET", f"{P}/inventory").json()["pipelines"] if p["name"] == name)
+    assert state == "deployed"  # not runtime_validated without a matching baseline
+    ev = [e for e in world.audit.read(500) if e["action"] == "verify.run"]
+    assert ev and ev[-1]["actor"] == "oscar" and ev[-1]["detail"]["pipelines"] == 1
+
+
+def test_comparing_without_run_starts_nothing(world):
+    name = _deployed(world)
+    before = len(world.demo.fabric_http.runs)
+    j = run(world, "ann", "verify", {"workspace_id": DEMO_WS, "pipelines": [name]})
+    assert j["state"] == "succeeded" and len(world.demo.fabric_http.runs) == before

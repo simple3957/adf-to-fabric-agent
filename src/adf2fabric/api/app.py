@@ -775,6 +775,17 @@ def create_app(settings: Optional[Settings] = None, live: Optional[Container] = 
                 raise HTTPException(409, "Run a dry run of exactly these pipelines first (it must finish with nothing refused, within the last hour).")
         if stage == "deploy_apply" and body.allow_unbound:
             ctx.require(P.migration_execute)
+        if body.run:
+            if stage != "verify":
+                raise HTTPException(422, "run applies to the verify stage only.")
+            ctx.require(P.migration_execute)  # a real run reads the pipeline's sources and writes its targets
+            if not body.confirm:
+                raise HTTPException(422, "This starts real runs in Fabric that read sources and write targets. Confirm it (confirm: true).")
+            if not body.pipelines or len(body.pipelines) > 20:
+                raise HTTPException(422, "Name the pipelines to run (1 to 20): running everything is never the default.")
+            if not ws:
+                raise HTTPException(422, "Choose the Fabric workspace that holds the pipelines.")
+            ctx.audit("verify.run", "requested", resource="project", resource_id=slug, workspace=ws, pipelines=len(body.pipelines))
         key = _idem_key(ctx, request)
         replay = _idem_replay(key)
         if replay is not None:

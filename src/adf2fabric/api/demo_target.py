@@ -35,6 +35,7 @@ class DemoFabricHttp:
         self.items: list[dict] = []
         self.pools: list[dict] = []
         self.roles: list[dict] = []
+        self.runs: dict[str, dict] = {}  # job id -> {pipeline id, status, times}: demo runs complete at once, every activity succeeds
         self.workspace: dict[str, Any] = {"id": DEMO_WS, "displayName": "Demo Fabric workspace", "type": "Workspace", "capacityId": DEMO_CAP,
                                           "capacityRegion": "West Europe"}
 
@@ -79,6 +80,21 @@ class DemoFabricHttp:
                 return _Resp(200, {"value": [r for r in rows if not t or r["type"] == t.group(1)]})
             if a in self.pipes and rest == "jobs/Pipeline/schedules":
                 return _Resp(200, {"value": []})
+            if a in self.pipes and rest == "jobs/Pipeline/instances" and method == "POST":
+                job = str(uuid.uuid4())
+                self.runs[job] = {"id": job, "pipeline": a, "status": "Completed", "startTimeUtc": "2026-01-01T00:00:00Z", "endTimeUtc": "2026-01-01T00:01:00Z"}
+                return _Resp(202, None, {"Location": f"{FABRIC}workspaces/{DEMO_WS}/items/{a}/jobs/instances/{job}", "Retry-After": "0"})
+            if a in self.pipes and rest == "jobs/instances" and method == "GET":
+                return _Resp(200, {"value": [{k: v for k, v in r.items() if k != "pipeline"} for r in self.runs.values() if r["pipeline"] == a]})
+            if a in self.pipes and rest and rest.startswith("jobs/instances/") and rest.split("/")[-1] in self.runs:
+                r = self.runs[rest.split("/")[-1]]
+                return _Resp(200, {k: v for k, v in r.items() if k != "pipeline"})
+        if sub == "datapipelines" and a == "pipelineruns" and rest and rest.endswith("/queryactivityruns"):
+            r = self.runs.get(rest.split("/")[0])
+            if r is None:
+                return _Resp(404, {"errorCode": "NotFound"})
+            return _Resp(200, {"value": [{"activityName": n, "activityType": t_, "status": "Succeeded", "output": {}}
+                                         for n, t_ in _activities(self.pipes[r["pipeline"]].get("definition"))]})
         if sub == "spark" and a == "pools":
             if method == "GET":
                 return _Resp(200, {"value": self.pools})
@@ -102,3 +118,13 @@ class DemoFabricHttp:
             self.workspace["workspaceIdentity"] = {"applicationId": "demo", "servicePrincipalId": "demo"}
             return _Resp(200, {"applicationId": "demo", "servicePrincipalId": "demo"})
         return _Resp(404, {"errorCode": "NotFound"})
+
+
+def _activities(definition: Optional[dict]) -> list[tuple[str, str]]:
+    """(name, type) of the top-level activities in a stored definition."""
+    try:
+        part = next(p for p in (definition or {}).get("parts", []) if p.get("path") == "pipeline-content.json")
+        content = json.loads(base64.b64decode(part["payload"]))
+        return [(a["name"], a["type"]) for a in content["properties"]["activities"]]
+    except (StopIteration, KeyError, ValueError, TypeError):
+        return []
