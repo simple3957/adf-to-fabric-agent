@@ -36,6 +36,65 @@ from adf2fabric.project.models import (
 from adf2fabric.project.store import ProjectNotFoundError, ProjectStore, slugify
 
 
+def _os_user() -> str:
+    import getpass
+
+    try:
+        return f"os:{getpass.getuser()}"
+    except Exception:  # noqa: BLE001
+        return "os:unknown"
+
+
+def _audit_log():
+    import os
+    from pathlib import Path
+
+    from adf2fabric.api.security.audit import AuditLog
+
+    return AuditLog(Path(os.environ["ADF2FABRIC_AUDIT_DIR"]) if os.environ.get("ADF2FABRIC_AUDIT_DIR") else projects_root(load_config()))
+
+
+def _audited(action: str):
+    """Record a sensitive CLI command in the audit log: who (the OS user), what, and whether it finished. Never arguments that could hold a secret.
+
+    Commands with an ``--apply`` flag are recorded only when it is set (a dry run changes nothing); approval commands always.
+    """
+    import functools
+
+    def deco(fn):
+        @functools.wraps(fn)
+        def wrapper(*args, **kwargs):
+            if not kwargs.get("apply_", True):
+                return fn(*args, **kwargs)
+            try:
+                log = _audit_log()
+            except Exception:  # noqa: BLE001 - auditing must not stop the command, but the failure is visible
+                click.secho("warning: the audit log could not be opened; this action is not being recorded", fg="yellow", err=True)
+                return fn(*args, **kwargs)
+            detail = {k: kwargs[k] for k in ("project_name", "workspace_id", "workload", "by") if kwargs.get(k)}
+            log.event(f"cli.{action}", "requested", actor=_os_user(), org="cli", **detail)
+            try:
+                result = fn(*args, **kwargs)
+            except SystemExit as exc:
+                log.event(f"cli.{action}", "ok" if exc.code in (0, None) else "failed", actor=_os_user(), org="cli", **detail)
+                raise
+            except Exception:
+                log.event(f"cli.{action}", "failed", actor=_os_user(), org="cli", **detail)
+                raise
+            log.event(f"cli.{action}", "ok", actor=_os_user(), org="cli", **detail)
+            return result
+
+        return wrapper
+
+    return deco
+
+
+def _user_store():
+    from adf2fabric.api.security import UserStore
+
+    return UserStore(projects_root(load_config()))
+
+
 # --- shared Azure authentication options ---------------------------------------------------------------
 # Every command that talks to Azure accepts every mechanism the credential layer supports. Options name
 # environment variables (never values); only the ones the chosen mechanism needs are read.
@@ -741,6 +800,7 @@ def workloads_generate(project_name, compute_sources, databricks_token_env, allo
 @click.option("--by", "by", required=True, help="Who is approving.")
 @click.option("--reject", is_flag=True, help="Record a rejection instead.")
 @click.option("--note", default="", help="Why (optional).")
+@_audited("workloads.approve")
 def workloads_approve(project_name: str, workload: str, by: str, reject: bool, note: str) -> None:
     """Approve (or reject) a workload's CURRENT generated artifact for deployment to Fabric."""
     from adf2fabric.agent.workloads.lifecycle import LifecycleError, approve
@@ -764,6 +824,7 @@ def workloads_approve(project_name: str, workload: str, by: str, reject: bool, n
               help="With --apply: record notebook ids here so `convert --resolutions` binds the pipeline to them.")
 @azure_auth_options()
 @click.option("--apply", "apply_", is_flag=True, help="Actually create or update the Fabric items. Without it this only checks.")
+@_audited("workloads.deploy")
 def workloads_deploy(project_name, workspace_id, workloads, resolutions_path, apply_, auth, **auth_env) -> None:
     """Deploy APPROVED generated artifacts to Fabric (dry run unless --apply). Never deletes anything."""
     from pathlib import Path
@@ -900,6 +961,7 @@ def provision_plan(project_name, tenant_id, workspace_name, workspace_id, capaci
 @click.option("--all-approvable", is_flag=True, help="Approve every create/configure step that is not blocked.")
 @click.option("--by", required=True, help="Who is approving.")
 @click.option("--note", default="")
+@_audited("provision.approve")
 def provision_approve(project_name: str, steps: tuple, all_approvable: bool, by: str, note: str) -> None:
     """Approve named steps of the CURRENT plan. Nothing is created by approving."""
     from adf2fabric.agent.provisioning import service
@@ -923,6 +985,7 @@ def provision_approve(project_name: str, steps: tuple, all_approvable: bool, by:
 @click.option("--project", "project_name", required=True)
 @click.option("--apply", "apply_", is_flag=True, help="Actually create / configure the approved steps. Without it nothing is written.")
 @azure_auth_options()
+@_audited("provision.apply")
 def provision_apply(project_name: str, apply_: bool, auth: str, **auth_env) -> None:
     """Apply the approved steps (dry run unless --apply), then read the target back to verify. Never deletes."""
     from adf2fabric.agent.provisioning import service
@@ -1025,6 +1088,81 @@ def validate_cmd(project_name: str, stages: tuple, workspace_id, runtime_flag: b
         click.secho(f"  FAIL {x.id} {x.component or ''}: {x.summary}", fg="red")
     click.echo(f"  report: {d / 'report.md'}")
     if report.overall in ("FAILED",):
+        sys.exit(2)
+
+
+@cli.command(name="auth-user-create")
+@click.option("--id", "user_id", required=True, help="The user's id (letters, digits, _ . @ -).")
+@click.option("--org", required=True, help="The organisation that user belongs to. Projects and jobs are scoped to it.")
+@click.option("--role", "roles", multiple=True, required=True, help="viewer | analyst | approver | operator | admin (repeatable).")
+@click.option("--subscription", "subscriptions", multiple=True, help="An Azure subscription id the user may target, or *. Repeatable.")
+@click.option("--tenant", "tenants", multiple=True, help="A tenant id the user may target, or *. Repeatable.")
+@click.option("--account", "accounts", multiple=True, help="A signed-in Azure CLI account the user may act as, or *. Repeatable.")
+@click.option("--workspace", "workspaces", multiple=True, help="A Fabric workspace id the user may target, or *. Repeatable.")
+def auth_user_create(user_id, org, roles, subscriptions, tenants, accounts, workspaces) -> None:
+    """Create an API user and print its token ONCE. Run on the server as the operating-system user that owns the data."""
+    from adf2fabric.api.security import Grants, UserError
+
+    try:
+        rec, token = _user_store().create(user_id, org, list(roles), Grants(subscriptions=list(subscriptions), tenants=list(tenants), accounts=list(accounts),
+                                                                         workspaces=list(workspaces)), created_by=_os_user())
+    except UserError as exc:
+        click.secho(str(exc), fg="red", err=True)
+        sys.exit(1)
+    _audit_log().event("cli.user.create", "ok", actor=_os_user(), org="cli", resource="user", resource_id=rec.id, roles=",".join(rec.roles), user_org=org)
+    click.echo(f"Created {rec.id} (org {rec.org}, roles {', '.join(rec.roles)}).")
+    click.echo("Token (shown once; store it in a secret manager, send it as 'Authorization: Bearer <token>'):")
+    click.echo(token)
+
+
+@cli.command(name="auth-user-list")
+def auth_user_list() -> None:
+    """List API users (never their tokens)."""
+    for u in _user_store().list():
+        click.echo(f"{u.id}  org={u.org}  roles={','.join(u.roles)}  {'DISABLED' if u.disabled else 'active'}  token ends ...{u.token_hint}")
+
+
+@cli.command(name="auth-user-update")
+@click.option("--id", "user_id", required=True)
+@click.option("--role", "roles", multiple=True, help="Replace the roles.")
+@click.option("--disable/--enable", "disable", default=None)
+def auth_user_update(user_id, roles, disable) -> None:
+    """Change a user's roles or disable / enable it."""
+    from adf2fabric.api.security import UserError
+
+    try:
+        rec = _user_store().update(user_id, roles=list(roles) or None, disabled=disable)
+    except UserError as exc:
+        click.secho(str(exc), fg="red", err=True)
+        sys.exit(1)
+    _audit_log().event("cli.user.update", "ok", actor=_os_user(), org="cli", resource="user", resource_id=rec.id, roles=",".join(rec.roles), disabled=rec.disabled)
+    click.echo(f"{rec.id}: roles {', '.join(rec.roles)}; {'disabled' if rec.disabled else 'active'}.")
+
+
+@cli.command(name="auth-user-rotate")
+@click.option("--id", "user_id", required=True)
+def auth_user_rotate(user_id) -> None:
+    """Issue a new token for a user (the old one stops working) and print it ONCE."""
+    from adf2fabric.api.security import UserError
+
+    try:
+        rec, token = _user_store().rotate(user_id)
+    except UserError as exc:
+        click.secho(str(exc), fg="red", err=True)
+        sys.exit(1)
+    _audit_log().event("cli.user.rotate_token", "ok", actor=_os_user(), org="cli", resource="user", resource_id=rec.id)
+    click.echo(f"New token for {rec.id} (shown once):")
+    click.echo(token)
+
+
+@cli.command(name="audit-verify")
+def audit_verify() -> None:
+    """Check the audit log's hash chain. Tamper EVIDENCE only: see docs/security.md."""
+    broken = _audit_log().verify()
+    if broken is None:
+        click.echo("Audit log chain intact.")
+    else:
+        click.secho(f"Audit log chain BROKEN at line {broken}: a line was edited, removed or inserted.", fg="red", err=True)
         sys.exit(2)
 
 
@@ -1270,6 +1408,7 @@ def reconstruct(project_name: str) -> None:
 @azure_auth_options()
 @click.option("--apply", "apply_", is_flag=True,
               help="Actually create/overwrite pipelines in Fabric. Without it this is a dry run (read-only).")
+@_audited("deploy")
 def deploy_cmd(project_name: str, workspace_id: str, pipelines: tuple[str, ...], with_children: bool,
                allow_unbound: bool, schedules: bool, schedules_only: bool, enable_schedules: bool, apply_: bool,
                auth: str, **auth_env: str | None) -> None:
@@ -1383,6 +1522,7 @@ def deploy_cmd(project_name: str, workspace_id: str, pipelines: tuple[str, ...],
 @azure_auth_options()
 @click.option("--apply", "apply_", is_flag=True,
               help="Actually create what is missing. Without it this only reads. Nothing is deleted or overwritten.")
+@_audited("create_shortcut")
 def create_shortcut_cmd(workspace_id: str, lakehouse: str, name: str, path: str, account: str, subpath: str,
                         connection_id: str, apply_: bool, auth: str, **auth_env: str | None) -> None:
     """Create a lakehouse and an ADLS Gen2 shortcut so Fabric notebooks can read storage (dry run unless --apply)."""
@@ -1515,6 +1655,7 @@ def fetch_databricks_notebooks_cmd(project_name: str, linked_service: str | None
 @azure_auth_options()
 @click.option("--apply", "apply_", is_flag=True,
               help="Actually create or update the notebook. Without it this only checks (read-only).")
+@_audited("deploy_notebook")
 def deploy_notebook_cmd(workspace_id: str, file_path: str, name: str, source_name: str | None,
                         resolutions_path: str | None, apply_: bool, auth: str, **auth_env: str | None) -> None:
     """Create or update a Fabric notebook from a local file (dry run unless --apply)."""
@@ -1558,6 +1699,7 @@ def deploy_notebook_cmd(workspace_id: str, file_path: str, name: str, source_nam
 @click.option("--apply", "apply_", is_flag=True,
               help="Actually run the pipeline(s). A run executes the pipeline and uses capacity. Without it this only "
                    "checks the pipelines exist (read-only).")
+@_audited("run")
 def run_cmd(workspace_id: str, pipelines: tuple[str, ...], params: tuple[str, ...], no_wait: bool, timeout_seconds: int,
             apply_: bool, auth: str, **auth_env: str | None) -> None:
     """Run deployed pipelines on demand and report each result (dry run unless --apply)."""
@@ -1625,6 +1767,7 @@ def run_cmd(workspace_id: str, pipelines: tuple[str, ...], params: tuple[str, ..
 @click.option("--apply", "apply_", is_flag=True,
               help="Start a new Fabric run of each pipeline, then compare. Without it nothing is started: the latest finished "
                    "Fabric run of each pipeline is compared instead (read-only).")
+@_audited("verify")
 def verify_cmd(project_name: str, workspace_id: str, pipelines: tuple[str, ...], no_adf: bool, timeout_seconds: int,
                apply_: bool, auth: str, **auth_env: str | None) -> None:
     """Prove converted pipelines: compare each Fabric run with the last successful ADF run (or the previous Fabric run)."""
@@ -1717,6 +1860,7 @@ def handover_cmd(project_name: str) -> None:
 @click.option("--apply", "apply_", is_flag=True,
               help="Actually create what you approved. Without it this is a dry run (read-only). Requires --pool, "
                    "--environment or --all: nothing is created that you did not name.")
+@_audited("compute_deploy")
 def compute_deploy_cmd(project_name: str, workspace_id: str, pools: tuple[str, ...], environments: tuple[str, ...],
                        all_: bool, reuse: bool, publish: bool, apply_: bool, auth: str, **auth_env: str | None) -> None:
     """Create the Fabric Spark pools and environments the compute plan proposes (dry run unless --apply)."""

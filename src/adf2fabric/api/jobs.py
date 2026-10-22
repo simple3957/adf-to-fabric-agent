@@ -15,7 +15,13 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
 
+import tempfile
+from pathlib import Path
+
+from adf2fabric.api.security.guards import scrub
 from adf2fabric.connections.redaction import redact, redact_mapping
+
+_ROOTS = [Path(tempfile.gettempdir())]  # server paths in a job's log or error are replaced before anyone reads them
 
 QUEUED, RUNNING, SUCCEEDED, FAILED = "queued", "running", "succeeded", "failed"
 
@@ -35,6 +41,8 @@ class Job:
     error: Optional[str] = None
     created: float = field(default_factory=time.time)
     finished: Optional[float] = None
+    org: Optional[str] = None  # the organisation that started it: only that organisation can see it
+    owner: Optional[str] = None
 
     def public(self, since: int = 0) -> dict[str, Any]:
         return {"id": self.id, "kind": self.kind, "project_id": self.project_id, "state": self.state,
@@ -48,11 +56,12 @@ class JobRegistry:
         self._active: dict[str, str] = {}  # project id -> job id
         self._lock = threading.Lock()
 
-    def submit(self, kind: str, project_id: Optional[str], fn: Callable[[Callable[[str], None]], dict[str, Any]]) -> Job:
+    def submit(self, kind: str, project_id: Optional[str], fn: Callable[[Callable[[str], None]], dict[str, Any]], *, org: Optional[str] = None,
+               owner: Optional[str] = None) -> Job:
         with self._lock:
             if project_id and project_id in self._active and self._jobs[self._active[project_id]].state in (QUEUED, RUNNING):
                 raise JobConflict(f"A '{self._jobs[self._active[project_id]].kind}' job is already running for this project.")
-            job = Job(id=uuid.uuid4().hex[:12], kind=kind, project_id=project_id)
+            job = Job(id=uuid.uuid4().hex[:12], kind=kind, project_id=project_id, org=org, owner=owner)
             self._jobs[job.id] = job
             if project_id:
                 self._active[project_id] = job.id
@@ -63,13 +72,13 @@ class JobRegistry:
         job.state = RUNNING
 
         def log(message: str) -> None:
-            job.events.append({"t": round(time.time() - job.created, 2), "message": redact(message)})
+            job.events.append({"t": round(time.time() - job.created, 2), "message": scrub(redact(message), _ROOTS)})
 
         try:
             job.result = redact_mapping(fn(log))  # type: ignore[assignment]
             job.state = SUCCEEDED
         except Exception as exc:  # noqa: BLE001 - reported, redacted; the traceback never leaves the server
-            job.error = redact(f"{type(exc).__name__}: {exc}")[:400]
+            job.error = scrub(redact(f"{type(exc).__name__}: {exc}"), _ROOTS)[:400]
             job.state = FAILED
         finally:
             job.finished = time.time()
@@ -77,8 +86,8 @@ class JobRegistry:
     def get(self, job_id: str) -> Optional[Job]:
         return self._jobs.get(job_id)
 
-    def list(self, project_id: Optional[str] = None) -> list[Job]:
-        jobs = [j for j in self._jobs.values() if project_id is None or j.project_id == project_id]
+    def list(self, project_id: Optional[str] = None, org: Optional[str] = None) -> list[Job]:
+        jobs = [j for j in self._jobs.values() if (project_id is None or j.project_id == project_id) and (org is None or j.org == org)]
         return sorted(jobs, key=lambda j: j.created, reverse=True)
 
     def wait(self, job_id: str, timeout: float = 30) -> Optional[Job]:

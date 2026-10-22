@@ -34,6 +34,13 @@ def client() -> ApiClient:
     return st.session_state.api
 
 
+def can(permission: str) -> bool:
+    """Whether the signed-in person holds a permission, per the API. A CONVENIENCE for hiding buttons: the API enforces every permission
+    itself, so a hidden button is never the protection. Unknown (not asked yet) counts as allowed so nothing is hidden by mistake."""
+    held = st.session_state.get("permissions")
+    return True if held is None else permission in held
+
+
 def show_error(err: ApiError) -> None:
     st.error(err.message)
     for d in err.details:

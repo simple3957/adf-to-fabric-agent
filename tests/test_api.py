@@ -25,7 +25,7 @@ def client(monkeypatch, tmp_path):
     demo = build_demo_container()
     demo.upload_dir = tmp_path
     app = create_app(Settings(), live=demo, demo=demo)
-    c = TestClient(app, raise_server_exceptions=False)
+    c = TestClient(app, base_url="http://localhost", raise_server_exceptions=False)
     c.headers["X-Session-Id"] = "t1"
     return c
 
@@ -50,7 +50,7 @@ def test_auth_status_and_subscriptions_demo(client):
     assert client.get("/auth/azure_cli/status").json()["authenticated"] is True
     assert client.get("/auth/nope/status").status_code == 404
     assert client.get("/azure/subscriptions").json()["subscriptions"][0]["name"] == "Contoso Demo"
-    found = client.get("/azure/discover", params={"subscription_id": "x"}).json()
+    found = client.get("/azure/discover", params={"subscription_id": "00000000-0000-0000-0000-0000000005b1"}).json()
     assert found["factories"][0]["name"] == "contoso-adf"
 
 
@@ -90,11 +90,11 @@ def test_choice_secret_test_apply_report(client):
     assert held.json()["held"] == ["password"] and SECRET not in held.text
     card = next(c for c in client.get(p).json()["cards"] if c["name"] == "LS_Sales_SQL")
     assert card["secrets_held"] == ["password"] and SECRET not in json.dumps(card)
-    t = client.post(f"{p}/LS_Sales_SQL/test")
+    t = client.post(f"{p}/LS_Sales_SQL/test", json={})
     assert t.status_code == 200 and SECRET not in t.text
-    dry = client.post(f"{p}/apply", json={"names": ["LS_Sales_SQL"], "dry_run": True, "workspace_id": "w"})
+    dry = client.post(f"{p}/apply", json={"names": ["LS_Sales_SQL"], "dry_run": True, "workspace_id": "11111111-1111-1111-1111-111111111111"})
     assert dry.status_code == 200 and dry.json()["items"][0]["action"] in ("would_create", "reused", "manual")
-    real = client.post(f"{p}/apply", json={"names": ["LS_Sales_SQL"], "workspace_id": "w"})
+    real = client.post(f"{p}/apply", json={"names": ["LS_Sales_SQL"], "workspace_id": "11111111-1111-1111-1111-111111111111"})
     assert real.status_code == 200 and SECRET not in real.text
     rep = client.get(f"{p}/report")
     assert rep.status_code == 200 and SECRET not in rep.text
@@ -122,7 +122,7 @@ def test_stages_run_to_convert(client):
 def test_deploy_requires_workspace_and_azure_signin(client):
     j = wait(client, client.post("/projects/demo-estate/stages/deploy_dry_run", json={}).json())
     assert j["state"] == "failed" and "workspace" in j["error"].lower()
-    client.put("/session/destination", json={"provider": "fabric_cli", "workspace_id": "w"})
+    client.put("/session/destination", json={"provider": "fabric_cli", "workspace_id": "11111111-1111-1111-1111-111111111111"})
     j = wait(client, client.post("/projects/demo-estate/stages/deploy_dry_run", json={}).json())
     assert j["state"] == "failed" and "Azure CLI" in j["error"]
 
@@ -177,7 +177,7 @@ def test_zip_slip_rejected_over_api(client):
 def test_upload_cap_and_empty(monkeypatch, tmp_path):
     demo = build_demo_container()
     demo.upload_dir = tmp_path
-    c = TestClient(create_app(Settings(max_upload_bytes=100), live=demo, demo=demo), raise_server_exceptions=False)
+    c = TestClient(create_app(Settings(max_upload_bytes=100), live=demo, demo=demo), base_url="http://localhost", raise_server_exceptions=False)
     assert c.put("/uploads/zip", content=b"x" * 500).status_code == 413
     assert c.put("/uploads/zip", content=b"").status_code == 422
     assert c.post("/projects", json={"project_name": "x", "source": {"kind": "zip", "upload_id": "../../etc"}}).status_code == 422
@@ -197,7 +197,7 @@ def test_git_import_demo_and_token_not_leaked(client):
 def test_bearer_token_enforced(monkeypatch):
     monkeypatch.setenv("ADF2FABRIC_API_TOKEN", "tok123")
     demo = build_demo_container()
-    c = TestClient(create_app(Settings(), live=demo, demo=demo), raise_server_exceptions=False)
+    c = TestClient(create_app(Settings(), live=demo, demo=demo), base_url="http://localhost", raise_server_exceptions=False)
     assert c.get("/health").status_code == 200
     assert c.get("/projects").status_code == 401
     assert c.get("/projects", headers={"Authorization": "Bearer wrong"}).status_code == 401

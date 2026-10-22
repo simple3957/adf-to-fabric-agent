@@ -10,7 +10,7 @@ import streamlit as st
 
 import theme
 from api_client import ApiClient
-from components import STATE_LABELS, call, run_job, short_source, state_badge, status_badge, test_report
+from components import STATE_LABELS, call, can, run_job, short_source, state_badge, status_badge, test_report
 
 
 # ---- 1. discover ----------------------------------------------------------------------------------------------------------
@@ -240,8 +240,10 @@ def connect(api: ApiClient, pid: str, cards: list[dict] | None, workspace_id: st
             st.session_state.apply_preview = {"sig": sig, "res": res}
             st.session_state.pop("apply_result", None)
             st.rerun()
-    if b.button("Create in Fabric", type="primary", key="apply-go", disabled=not (workspace_id and valid),
-                help=None if valid else "Run Preview first, and create only what it showed."):
+    allowed = can("migration:execute")
+    if b.button("Create in Fabric", type="primary", key="apply-go", disabled=not (workspace_id and valid and allowed),
+                help=None if (valid and allowed) else ("Your role cannot change Fabric (needs migration:execute)." if not allowed
+                                                       else "Run Preview first, and create only what it showed.")):
         res = call(api.apply_connections, pid, names, dry_run=False, auto_match=auto, workspace_id=workspace_id)
         if res:
             st.session_state.apply_result = res
@@ -322,7 +324,8 @@ def deploy(api: ApiClient, pid: str, dest: dict, conversion: dict | None, result
     if a.button("Dry run", type="primary", key="dep-dry"):
         stage = "deploy_dry_run"
     sure = b.checkbox("I have checked the dry run and want to deploy for real", key="dep-sure")
-    if b.button("Deploy", disabled=not sure, key="dep-go"):
+    if b.button("Deploy", disabled=not (sure and can("migration:execute")), key="dep-go",
+                help=None if can("migration:execute") else "Your role cannot deploy (needs migration:execute)."):
         stage = "deploy_apply"
     if stage:
         job = run_job(lambda: api.run_stage(pid, stage, pipelines=pipes, with_children=children, allow_unbound=unbound),

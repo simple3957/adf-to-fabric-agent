@@ -24,6 +24,23 @@ nav = st.navigation(list(PAGES.values()), position="hidden")
 st.session_state.pages = PAGES
 
 
+def _sign_in(api) -> None:
+    """The API requires a token. Each person pastes their own; it is kept in this browser session only (never in a file or the URL)."""
+    st.markdown("### Sign in")
+    st.caption("This service requires an API token. Ask an administrator for yours (`adf2fabric auth-user-create`).")
+    token = st.text_input("API token", type="password", key="signin-token", label_visibility="collapsed", placeholder="a2f_...")
+    if st.button("Sign in", type="primary") and token:
+        api.set_token(token)
+        try:
+            api.me()
+        except ApiError as err:
+            api.clear_token()
+            st.error("That token was not accepted." if err.status == 401 else err.message)
+        else:
+            st.session_state.pop("signin-token", None)
+            st.rerun()
+
+
 def top_bar() -> None:
     api = client()
     with st.container(key="topbar"):
@@ -39,6 +56,23 @@ def top_bar() -> None:
             st.markdown(f'<div class="ma-note">⚠️ <span><strong>The accelerator service is not reachable.</strong> '
                         f'{theme.esc(err.message)} {theme.esc(" ".join(err.actions))}</span></div>', unsafe_allow_html=True)
             st.stop()
+
+        try:
+            who = api.me()
+        except ApiError as err:
+            if err.status != 401:
+                raise
+            st.session_state.pop("permissions", None)
+            _sign_in(api)
+            st.stop()
+        st.session_state.permissions = set(who.get("permissions") or [])
+        if who.get("auth_mode") == "token":
+            with st.popover(f"{who['id']} ({who['org']})"):
+                st.caption("Roles: " + ", ".join(who.get("roles") or []))
+                if st.button("Sign out"):
+                    api.clear_token()
+                    st.session_state.pop("permissions", None)
+                    st.rerun()
 
         if not st.session_state.get("url_applied"):  # ?demo=1&project=<id> opens straight into demo data
             st.session_state.url_applied = True

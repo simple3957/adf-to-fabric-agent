@@ -177,7 +177,7 @@ def test_a_saved_conversion_is_served_and_a_stale_one_is_marked():
     from adf2fabric.api.demo import build_demo_container
 
     demo = build_demo_container()
-    tc = TestClient(create_app(Settings(), live=demo, demo=demo), raise_server_exceptions=False)
+    tc = TestClient(create_app(Settings(), live=demo, demo=demo), base_url="http://localhost", raise_server_exceptions=False)
     h = {"X-Session-Id": "conv"}
     tc.post("/mode", json={"mode": "demo"}, headers=h)
     assert tc.get("/projects/demo-estate/conversion", headers=h).status_code == 404

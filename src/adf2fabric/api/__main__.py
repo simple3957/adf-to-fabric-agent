@@ -14,10 +14,16 @@ def main() -> None:
     ap.add_argument("--host", default="127.0.0.1", help="Bind address (default loopback; the API holds your Azure session).")
     ap.add_argument("--port", type=int, default=8765)
     args = ap.parse_args()
+    app = create_app()
+    mode = app.state.security.effective_mode(app.state.users.has_users())
     if args.host not in ("127.0.0.1", "localhost", "::1"):
-        print("WARNING: binding beyond loopback exposes the API; set ADF2FABRIC_API_TOKEN and use TLS in front of it.")
-    uvicorn.run(create_app(), host=args.host, port=args.port, log_level="info")
-
+        if mode != "token":
+            raise SystemExit("Refusing to bind beyond loopback without authentication. Create users (`adf2fabric auth-user-create`) or set "
+                             "ADF2FABRIC_API_TOKEN, then start again. Put TLS in front of the API: it receives bearer tokens.")
+        print("NOTE: bound beyond loopback. Terminate TLS in front of this server and set ADF2FABRIC_ALLOWED_HOSTS / _ORIGINS to your real names.")
+    elif mode == "disabled":
+        print("Authentication is OFF (local single-user mode: loopback only). Create a user to turn it on: adf2fabric auth-user-create --help")
+    uvicorn.run(app, host=args.host, port=args.port, log_level="info", server_header=False, proxy_headers=False)
 
 if __name__ == "__main__":
     main()

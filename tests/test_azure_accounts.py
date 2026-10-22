@@ -193,7 +193,7 @@ def _client():
     from adf2fabric.api.demo import build_demo_container
 
     demo = build_demo_container()
-    return TestClient(create_app(Settings(), live=demo, demo=demo), raise_server_exceptions=False)
+    return TestClient(create_app(Settings(), live=demo, demo=demo), base_url="http://localhost", raise_server_exceptions=False)
 
 
 def test_the_accounts_route_lists_who_is_signed_in():
@@ -210,7 +210,7 @@ def test_a_destination_remembers_which_account_it_uses():
     tc = _client()
     h = {"X-Session-Id": "a2"}
     tc.post("/mode", json={"mode": "demo"}, headers=h)
-    r = tc.put("/session/destination", json={"provider": "azure_cli", "account": PAL, "workspace_id": "w"}, headers=h)
+    r = tc.put("/session/destination", json={"provider": "azure_cli", "account": PAL, "workspace_id": "11111111-1111-1111-1111-111111111111"}, headers=h)
     assert r.status_code == 200 and r.json()["destination"]["account"] == PAL
     assert tc.get("/session", headers=h).json()["destination"]["account"] == PAL
 

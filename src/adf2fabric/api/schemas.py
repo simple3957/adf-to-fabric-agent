@@ -91,5 +91,24 @@ class ModeBody(_In):
     mode: str
 
 
+class GrantsBody(_In):
+    subscriptions: list[str] = Field(default_factory=list, max_length=200)
+    tenants: list[str] = Field(default_factory=list, max_length=200)
+    accounts: list[str] = Field(default_factory=list, max_length=200)
+    workspaces: list[str] = Field(default_factory=list, max_length=200)
+
+
+class UserCreate(_In):
+    id: str = Field(max_length=64)
+    roles: list[str] = Field(min_length=1, max_length=5)
+    grants: Optional[GrantsBody] = None
+
+
+class UserUpdate(_In):
+    roles: Optional[list[str]] = Field(default=None, min_length=1, max_length=5)
+    disabled: Optional[bool] = None
+    grants: Optional[GrantsBody] = None
+
+
 def dump(model: Any) -> Any:
     return model.model_dump(mode="json") if hasattr(model, "model_dump") else model

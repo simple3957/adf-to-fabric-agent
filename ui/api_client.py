@@ -68,9 +68,20 @@ class ApiClient:
     def _put(self, path: str, body: Any) -> Any:
         return self._request("PUT", path, json=body)
 
-    # ---- health + mode -------------------------------------------------------------------------------------------------
+    # ---- health + identity + mode --------------------------------------------------------------------------------------
     def health(self) -> dict:
         return self._get("/health")
+
+    def me(self) -> dict:
+        """Who the API thinks this is, with the permissions that identity holds. 401 when the API needs a token and none (or a wrong one) was sent."""
+        return self._get("/me")
+
+    def set_token(self, token: str) -> None:
+        """Use this person's own API token for every later call. It lives on this object (one per browser session) and nowhere else."""
+        self._token = token.strip() or None
+
+    def clear_token(self) -> None:
+        self._token = None
 
     def get_mode(self) -> str:
         return self._get("/mode")["mode"]

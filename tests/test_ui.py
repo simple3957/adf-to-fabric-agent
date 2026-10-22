@@ -39,8 +39,8 @@ class _Http:
 def api(monkeypatch):
     monkeypatch.delenv("ADF2FABRIC_API_TOKEN", raising=False)
     demo = build_demo_container()
-    tc = TestClient(create_app(Settings(), live=demo, demo=demo), raise_server_exceptions=False)
-    return ApiClient(session_id="ui1", base_url="http://testserver", token="", http=_Http(tc))
+    tc = TestClient(create_app(Settings(), live=demo, demo=demo), base_url="http://localhost", raise_server_exceptions=False)
+    return ApiClient(session_id="ui1", base_url="http://localhost", token="", http=_Http(tc))
 
 
 def test_client_demo_flow(api):
@@ -60,7 +60,7 @@ def test_client_demo_flow(api):
     assert card["secrets_held"] == ["password"] and SECRET not in str(card)
     assert "state" in api.test_connection("demo-estate", "LS_Sales_SQL")
 
-    res = api.apply_connections("demo-estate", ["LS_Sales_SQL"], dry_run=True, workspace_id="w")
+    res = api.apply_connections("demo-estate", ["LS_Sales_SQL"], dry_run=True, workspace_id="11111111-1111-1111-1111-111111111111")
     assert res["dry_run"] is True and res["items"][0]["action"] in ("would_create", "reused", "manual")
 
     events = []

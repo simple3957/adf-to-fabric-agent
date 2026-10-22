@@ -1,14 +1,23 @@
 """The FastAPI application. HTTP concerns only: every decision lives in the services it calls.
 
-Security posture: binds to loopback by default (see ``__main__``), optional bearer token (``ADF2FABRIC_API_TOKEN``), CORS only for
-the configured UI origins, validation errors never echo the submitted input (a secret field would otherwise be reflected back),
-and unexpected errors return a generic message. Secrets arrive as ``SecretStr``, go to the in-memory vault and are never returned.
+Security posture (details and limits in docs/security.md):
+
+* Authentication: bearer tokens of named users (hash-only store), or the historical local mode (one implicit user, loopback only).
+* Authorisation: every route declares the permission it needs and the server enforces it; projects, jobs, uploads and sessions
+  belong to an organisation and are checked on every access (another organisation's project is "not found").
+* A client may only point the server at subscriptions, tenants, accounts and workspaces its grants name; Git URLs are checked for
+  SSRF; identifiers that become paths are validated.
+* Request protections (Host / Origin / Content-Type / size / rate) run before routes (``security.middleware``); security headers on
+  every response; validation errors never echo the submitted input; unexpected errors return a generic message with no path or trace.
+* Sensitive actions are audited (who, what, outcome; never secrets or bodies). Secrets arrive as ``SecretStr``, go to the in-memory
+  vault and are never returned.
 """
 
 import hmac
 import json
 import re
 import shutil
+import tempfile
 import uuid
 from pathlib import Path
 from typing import Any, Optional
@@ -25,6 +34,14 @@ from adf2fabric.agent.intake.zip_source import ZipIntakeRequest, ZipSourceIntake
 from adf2fabric.api import schemas as S
 from adf2fabric.api.container import Container, Session, Settings
 from adf2fabric.api.jobs import JobConflict
+from adf2fabric.api.security import AuditLog, Grants, LOCAL, Permission as P, Principal, ProjectAccess, SecuritySettings, UserError, UserStore
+from adf2fabric.api.security import guards
+from adf2fabric.api.security.audit import addr_hash
+from adf2fabric.api.security.config import LOOPBACK_HOSTS
+from adf2fabric.api.security.middleware import SecurityMiddleware
+from adf2fabric.api.security.permissions import ROLES, permissions_for, valid_role
+from adf2fabric.api.security.principals import WILDCARD, make_principal
+from adf2fabric.api.security.ratelimit import RateLimiter
 from adf2fabric.api.stages import STAGES, StageError, run_stage
 from adf2fabric.connections import catalog
 from adf2fabric.connections.fabric import FabricApiError
@@ -37,23 +54,40 @@ from adf2fabric.connections.service import SCOPE
 from adf2fabric.project.store import ProjectNotFoundError, slugify
 
 SESSION_HEADER = "x-session-id"
-_ID = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+_ID = guards.ID
+_ZIP_MAGIC = (b"PK\x03\x04", b"PK\x05\x06")
+_FIELD = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
+_LS = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 _.\-]{0,127}$")
+MAX_PENDING_UPLOADS = 5
+
+# the permission each migration stage needs (the stage route re-checks against this, on top of its baseline)
+STAGE_PERMISSION = {"discovery": P.discovery_run, "semantic": P.discovery_run, "reconstruct": P.discovery_run, "convert": P.plans_generate,
+                    "compute": P.plans_generate, "deploy_dry_run": P.plans_generate, "verify": P.plans_generate, "deploy_apply": P.migration_execute}
 
 
-def _err(status: int, message: str, actions: Optional[list[str]] = None) -> JSONResponse:
-    return JSONResponse(status_code=status, content={"error": redact(message), "actions": [redact(a) for a in (actions or [])]})
-
-
-def create_app(settings: Optional[Settings] = None, live: Optional[Container] = None, demo: Optional[Container] = None) -> FastAPI:
+def create_app(settings: Optional[Settings] = None, live: Optional[Container] = None, demo: Optional[Container] = None,
+               security: Optional[SecuritySettings] = None) -> FastAPI:
     settings = settings or Settings()
-    app = FastAPI(title="ADF to Fabric Migration Accelerator API", version="0.1.0")
+    app = FastAPI(title="ADF to Fabric Migration Accelerator API", version="0.1.0", docs_url=None, redoc_url=None, openapi_url=None)
     app.state.containers = {"live": live or Container(settings), "demo": demo}
-    app.state.modes = {}  # session id -> "live" | "demo"
+    app.state.modes = {}  # scoped session key -> "live" | "demo"
+    root = app.state.containers["live"].store.projects_root
+    sec = security or SecuritySettings(root=root)
+    users, audit, limiter = UserStore(root), AuditLog(root), RateLimiter()
+    app.state.security, app.state.users, app.state.audit, app.state.limiter = sec, users, audit, limiter
+    path_roots = [root, Path(tempfile.gettempdir())]
 
-    app.add_middleware(CORSMiddleware, allow_origins=settings.allowed_origins, allow_methods=["*"],
-                       allow_headers=["Authorization", "Content-Type", "X-Session-Id"])
+    app.add_middleware(CORSMiddleware, allow_origins=sec.allowed_origins or settings.allowed_origins, allow_methods=["GET", "POST", "PUT", "DELETE", "PATCH"],
+                       allow_headers=["Authorization", "Content-Type", "X-Session-Id"], allow_credentials=False)
+    app.add_middleware(SecurityMiddleware, sec=sec, limiter=limiter, audit=audit)
 
-    # ---- errors: never echo input, never leak internals ----------------------------------------------------------------
+    def scrubbed(message: str) -> str:
+        return guards.scrub(redact(message), path_roots)
+
+    def _err(status: int, message: str, actions: Optional[list[str]] = None, headers: Optional[dict] = None) -> JSONResponse:
+        return JSONResponse(status_code=status, content={"error": scrubbed(message), "actions": [scrubbed(a) for a in (actions or [])]}, headers=headers)
+
+    # ---- errors: never echo input, never leak internals -----------------------------------------------------------------
     @app.exception_handler(RequestValidationError)
     async def _validation(_r: Request, exc: RequestValidationError):
         problems = [{"field": ".".join(str(p) for p in e.get("loc", ())), "problem": e.get("msg", "invalid")} for e in exc.errors()]
@@ -61,7 +95,11 @@ def create_app(settings: Optional[Settings] = None, live: Optional[Container] = 
 
     @app.exception_handler(HTTPException)
     async def _http(_r: Request, exc: HTTPException):
-        return _err(exc.status_code, str(exc.detail))
+        return _err(exc.status_code, str(exc.detail), headers=getattr(exc, "headers", None))
+
+    @app.exception_handler(guards.Rejected)
+    async def _rejected(_r: Request, exc: guards.Rejected):
+        return _err(422, str(exc))
 
     @app.exception_handler(StageError)
     async def _stage(_r: Request, exc: StageError):
@@ -70,8 +108,7 @@ def create_app(settings: Optional[Settings] = None, live: Optional[Container] = 
     @app.exception_handler(catalog.ChoiceError)
     async def _choice(_r: Request, exc: catalog.ChoiceError):
         return JSONResponse(status_code=422, content={"error": "The choice is not valid.",
-                                                      "details": [redact(str(p)) for p in getattr(exc, "problems", [str(exc)])],
-                                                      "actions": []})
+                                                      "details": [scrubbed(str(p)) for p in getattr(exc, "problems", [str(exc)])], "actions": []})
 
     @app.exception_handler(ProviderError)
     async def _provider(_r: Request, exc: ProviderError):
@@ -94,26 +131,91 @@ def create_app(settings: Optional[Settings] = None, live: Optional[Container] = 
     async def _conflict(_r: Request, exc: JobConflict):
         return _err(409, str(exc))
 
+    @app.exception_handler(UserError)
+    async def _user(_r: Request, exc: UserError):
+        return _err(422, str(exc))
+
+    @app.exception_handler(ZipRejected)
+    async def _zip(_r: Request, exc: ZipRejected):
+        return _err(422, f"The archive was rejected: {exc}", ["Export the source again as a plain ZIP of the ADF folders."])
+
     @app.exception_handler(Exception)
     async def _any(_r: Request, exc: Exception):  # noqa: BLE001
         return _err(500, f"Unexpected {type(exc).__name__}; see the server log.")
 
-    # ---- auth + context ------------------------------------------------------------------------------------------------
-    def _auth(request: Request) -> None:
-        token = settings.token
-        if not token or request.url.path == "/health":
-            return
+    # ---- authentication: who is calling ---------------------------------------------------------------------------------
+    def _mode() -> str:
+        return sec.effective_mode(users.has_users())
+
+    def _client(request: Request) -> str:
+        return getattr(request.state, "client", None) or addr_hash(request.client.host if request.client else None)
+
+    def _rid(request: Request) -> str:
+        return getattr(request.state, "request_id", "")
+
+    def _principal(request: Request) -> Principal:
+        cached = getattr(request.state, "principal", None)
+        if cached is not None:
+            return cached
+        if _mode() == "disabled":
+            request.state.principal = LOCAL
+            return LOCAL
+        client = _client(request)
+        wait = limiter.blocked(f"ip:{client}", "authfail", sec.auth_fail_limit, sec.auth_fail_window)
+        if wait is not None:
+            audit.event("auth.locked_out", "denied", request_id=_rid(request), client=client)
+            raise HTTPException(429, "Too many failed sign-ins. Try again later.", headers={"Retry-After": str(int(wait))})
         given = request.headers.get("authorization", "")
-        if not given.lower().startswith("bearer ") or not hmac.compare_digest(given[7:].strip(), token):
-            raise HTTPException(401, "A valid bearer token is required.")
+        token = given[7:].strip() if given.lower().startswith("bearer ") else ""
+        principal: Optional[Principal] = None
+        if token:
+            legacy = sec.legacy_token
+            if legacy and hmac.compare_digest(token, legacy):
+                principal = make_principal("legacy-token", sec.legacy_org, ["admin"],
+                                           Grants(subscriptions=[WILDCARD], tenants=[WILDCARD], accounts=[WILDCARD], workspaces=[WILDCARD]), "legacy_token")
+            else:
+                try:
+                    principal = users.authenticate(token)
+                except UserError:  # a damaged user store locks everyone out; it never lets anyone in
+                    audit.event("auth.unavailable", "failed", request_id=_rid(request))
+                    raise HTTPException(503, "Authentication is temporarily unavailable.") from None
+        if principal is None:
+            limiter.record(f"ip:{client}", "authfail")
+            audit.event("auth.failure", "denied", request_id=_rid(request), client=client, reason="missing" if not token else "invalid")
+            raise HTTPException(401, "A valid bearer token is required.", headers={"WWW-Authenticate": "Bearer"})
+        limiter.clear(f"ip:{client}", "authfail")
+        request.state.principal = principal
+        return principal
+
+    SENSITIVE = {P.sources_import, P.migration_execute, P.provision_approve, P.credentials_manage, P.users_manage}
+
+    def need(*perms: P):
+        """A route dependency: authenticate, then require EVERY listed permission, then apply the per-principal rate limit."""
+        def dep(request: Request) -> Principal:
+            p = _principal(request)
+            missing = [x for x in perms if not p.can(x)]
+            if missing:
+                audit.event("authz.denied", "denied", actor=p.id, org=p.org, request_id=_rid(request), path=request.url.path, method=request.method,
+                            needs=",".join(x.value for x in missing))
+                raise HTTPException(403, "Your role does not allow this action.")
+            bucket, limit = ("sensitive", sec.sensitive_per_min) if (set(perms) & SENSITIVE and request.method != "GET") else ("default", sec.rate_per_min)
+            wait = limiter.check(f"{p.org}:{p.id}", bucket, limit)
+            if wait is not None:
+                audit.event("rate.limited", "denied", actor=p.id, org=p.org, request_id=_rid(request), bucket=bucket)
+                raise HTTPException(429, "Too many requests.", headers={"Retry-After": str(int(wait))})
+            return p
+        return Depends(dep)
 
     class Ctx:
         def __init__(self, request: Request):
+            self.request = request
+            self.principal: Principal = _principal(request)
             sid = request.headers.get(SESSION_HEADER, "default")
             if not _ID.match(sid):
                 raise HTTPException(400, "X-Session-Id must be 1-64 letters, digits, '-' or '_'.")
-            self.sid = sid
-            mode = app.state.modes.get(sid, "live")
+            self.sid = sid  # what the client sent (shown back to it)
+            self.key = f"{self.principal.org}|{self.principal.id}|{sid}"  # what the server stores under: sessions never cross principals
+            mode = app.state.modes.get(self.key, "live")
             c = app.state.containers.get(mode)
             if c is None:
                 from adf2fabric.api.demo import build_demo_container
@@ -121,33 +223,62 @@ def create_app(settings: Optional[Settings] = None, live: Optional[Container] = 
                 c = app.state.containers[mode] = build_demo_container(settings)
             self.c: Container = c
             self.mode = mode
-            self.session: Session = c.session(sid)
+            self.session: Session = c.session(self.key)
+            self.access = ProjectAccess(c.store, sec.legacy_org)
 
         def project(self, pid: str) -> str:
-            slug = slugify(pid)
-            if not self.c.store.exists(slug):
-                raise HTTPException(404, f"Project '{pid}' does not exist.")
+            """The project's id if it exists AND the caller's organisation owns it. Otherwise 404, identical either way."""
+            try:
+                slug = slugify(pid)
+            except ValueError:
+                raise HTTPException(404, f"Project '{guards.scrub(pid[:40])}' does not exist.") from None
+            if not self.c.store.exists(slug) or not self.access.allowed(self.principal, slug):
+                raise HTTPException(404, f"Project '{guards.scrub(pid[:40])}' does not exist.")
             return slug
 
-    dep = [Depends(_auth)]
+        def require(self, perm: P) -> None:
+            if not self.principal.can(perm):
+                audit.event("authz.denied", "denied", actor=self.principal.id, org=self.principal.org, request_id=_rid(self.request), needs=perm.value,
+                            path=self.request.url.path)
+                raise HTTPException(403, "Your role does not allow this action.")
 
-    # ---- health + mode -------------------------------------------------------------------------------------------------
+        def grant(self, kind: str, value: Optional[str], what: str) -> str:
+            """The value if this principal may target it. A client-chosen subscription, tenant, account or workspace is never trusted."""
+            if not value or not self.principal.granted(kind, value):
+                audit.event("grant.denied", "denied", actor=self.principal.id, org=self.principal.org, request_id=_rid(self.request), kind=kind)
+                raise HTTPException(403, f"That {what} is not granted to you.")
+            return value
+
+        def audit(self, action: str, outcome: str = "ok", resource: str = "", resource_id: str = "", **detail: Any) -> None:
+            audit.event(action, outcome, actor=self.principal.id, org=self.principal.org, resource=resource, resource_id=resource_id,
+                        request_id=_rid(self.request), **detail)
+
+    def _guid(value: Optional[str], what: str) -> Optional[str]:
+        return guards.valid_guid(value, what) if value else value
+
+    # ---- health + identity + mode ---------------------------------------------------------------------------------------
     @app.get("/health")
     def health():
         return {"status": "ok", "version": app.version}
 
-    @app.get("/mode", dependencies=dep)
-    def get_mode(ctx: Ctx = Depends()):
+    @app.get("/me")
+    def me(request: Request):
+        p = _principal(request)
+        return {**p.public(), "auth_mode": _mode()}
+
+    @app.get("/mode")
+    def get_mode(ctx: Ctx = Depends(), _: Principal = need(P.projects_view)):
         return {"mode": ctx.mode, "modes": ["live", "demo"]}
 
-    @app.post("/mode", dependencies=dep)
-    def set_mode(body: S.ModeBody, request: Request):
+    @app.post("/mode")
+    def set_mode(body: S.ModeBody, request: Request, _: Principal = need(P.projects_view)):
         if body.mode not in ("live", "demo"):
             raise HTTPException(422, "mode must be 'live' or 'demo'.")
-        app.state.modes[request.headers.get(SESSION_HEADER, "default")] = body.mode
+        ctx = Ctx(request)
+        app.state.modes[ctx.key] = body.mode
         return {"mode": body.mode}
 
-    # ---- sign-in -------------------------------------------------------------------------------------------------------
+    # ---- sign-in to the server's Azure / Fabric CLI (machine-wide state) ------------------------------------------------
     def _provider_for(ctx: Ctx, which: str):
         if which == "azure_cli":
             return ctx.c.azure
@@ -155,20 +286,27 @@ def create_app(settings: Optional[Settings] = None, live: Optional[Container] = 
             return ctx.c.fabric_cli
         raise HTTPException(404, "Unknown provider. Use azure_cli or fabric_cli.")
 
-    @app.get("/auth/{provider}/status", dependencies=dep)
-    def auth_status(provider: str, refresh: bool = False, ctx: Ctx = Depends()):
+    @app.get("/auth/{provider}/status")
+    def auth_status(provider: str, refresh: bool = False, ctx: Ctx = Depends(), _: Principal = need(P.azure_use)):
         p = _provider_for(ctx, provider)
         return S.dump(p.status(refresh=refresh) if provider == "azure_cli" else p.status())
 
-    @app.post("/auth/{provider}/login", dependencies=dep)
-    def auth_login(provider: str, body: S.LoginBody, ctx: Ctx = Depends()):
+    @app.post("/auth/{provider}/login")
+    def auth_login(provider: str, body: S.LoginBody, ctx: Ctx = Depends(), _: Principal = need(P.credentials_manage)):
         p = _provider_for(ctx, provider)
+        if body.tenant_id:
+            guards.valid_guid(body.tenant_id, "tenant id")
+            ctx.grant("tenants", body.tenant_id, "tenant")
+        if body.certificate_path is not None:
+            raise HTTPException(422, "A certificate path cannot be supplied through the API; configure the Fabric CLI on the server instead.")
+        if body.client_id:
+            guards.valid_guid(body.client_id, "client id")
+        ctx.audit("credentials.login", resource="provider", resource_id=provider)
         try:
             if provider == "azure_cli":
                 attempt = p.start_login(tenant=body.tenant_id, device_code=body.device_code)
             else:
-                attempt = p.start_login(body.method, tenant=body.tenant_id, client_id=body.client_id,
-                                        certificate_path=body.certificate_path)
+                attempt = p.start_login(body.method, tenant=body.tenant_id, client_id=body.client_id, certificate_path=None)
         except RuntimeError as exc:  # a sign-in is already running: a conflict, not a server fault
             return _err(409, str(exc), ["Finish the sign-in already open in the browser, or wait up to 5 minutes "
                                         "for it to time out, then try again."])
@@ -176,51 +314,87 @@ def create_app(settings: Optional[Settings] = None, live: Optional[Container] = 
             return _err(422, str(exc))
         return attempt.public()
 
-    @app.post("/auth/{provider}/logout", dependencies=dep)
-    def auth_logout(provider: str, body: S.LogoutBody, ctx: Ctx = Depends()):
+    @app.post("/auth/{provider}/logout")
+    def auth_logout(provider: str, body: S.LogoutBody, ctx: Ctx = Depends(), _: Principal = need(P.credentials_manage)):
         p = _provider_for(ctx, provider)
+        if body.account:
+            ctx.grant("accounts", body.account, "account")
+        ctx.audit("credentials.logout", resource="provider", resource_id=provider)
         try:
             st = p.logout(body.account) if provider == "azure_cli" else p.logout()
         except ValueError as exc:
             return _err(422, str(exc))
         return S.dump(st)
 
-    @app.get("/auth/{provider}/login/{attempt_id}", dependencies=dep)
-    def auth_login_state(provider: str, attempt_id: str, ctx: Ctx = Depends()):
+    @app.get("/auth/{provider}/login/{attempt_id}")
+    def auth_login_state(provider: str, attempt_id: str, ctx: Ctx = Depends(), _: Principal = need(P.credentials_manage)):
+        guards.valid_id(attempt_id, "attempt id")
         a = _provider_for(ctx, provider).logins.get(attempt_id)
         if a is None:
             raise HTTPException(404, "No such sign-in attempt.")
         return a.public()
 
-    @app.get("/auth/azure_cli/accounts", dependencies=dep)
-    def accounts(refresh: bool = False, ctx: Ctx = Depends()):
-        """Everyone signed in to the Azure CLI on this machine. Source and destination each pick one of them."""
+    def _granted_only(items: list, kind: str, key, ctx: Ctx) -> list:
+        return [i for i in items if ctx.principal.granted(kind, key(i))]
+
+    @app.get("/auth/azure_cli/accounts")
+    def accounts(refresh: bool = False, ctx: Ctx = Depends(), _: Principal = need(P.azure_use)):
+        """The Azure CLI accounts signed in on this machine that THIS principal is granted. Others are not listed."""
         try:
-            return {"accounts": S.dump(ctx.c.azure.accounts(refresh=refresh))}
+            found = S.dump(ctx.c.azure.accounts(refresh=refresh))
         except ProviderError as exc:
             return _err(502, str(exc), exc.actions)
+        names = lambda a: (a.get("user") or a.get("name") or a.get("username") or "") if isinstance(a, dict) else str(a)  # noqa: E731
+        return {"accounts": _granted_only(found, "accounts", names, ctx)}
 
-    @app.get("/auth/azure_cli/tenants", dependencies=dep)
-    def tenants(ctx: Ctx = Depends()):
-        return {"tenants": ctx.c.azure.tenants()}
+    @app.get("/auth/azure_cli/tenants")
+    def tenants(ctx: Ctx = Depends(), _: Principal = need(P.azure_use)):
+        found = ctx.c.azure.tenants()
+        return {"tenants": [t for t in found if ctx.principal.granted("tenants", (t.get("id") or t.get("tenantId") or "") if isinstance(t, dict) else str(t))]}
 
-    @app.get("/session", dependencies=dep)
-    def session(ctx: Ctx = Depends()):
-        return {"id": ctx.sid, "mode": ctx.mode, "source": ctx.session.source, "destination": ctx.session.destination,
-                "tested": ctx.session.tested}
+    @app.get("/session")
+    def session(ctx: Ctx = Depends(), _: Principal = need(P.projects_view)):
+        return {"id": ctx.sid, "mode": ctx.mode, "source": ctx.session.source, "destination": ctx.session.destination, "tested": ctx.session.tested}
 
     # ---- source --------------------------------------------------------------------------------------------------------
-    @app.get("/azure/subscriptions", dependencies=dep)
-    def subscriptions(account: Optional[str] = None, refresh: bool = False, ctx: Ctx = Depends()):
-        return {"subscriptions": S.dump(ctx.c.azure.subscriptions(account=account, refresh=refresh))}
+    @app.get("/azure/subscriptions")
+    def subscriptions(account: Optional[str] = None, refresh: bool = False, ctx: Ctx = Depends(), _: Principal = need(P.azure_use)):
+        if account:
+            ctx.grant("accounts", account, "account")
+        found = S.dump(ctx.c.azure.subscriptions(account=account, refresh=refresh))
+        sid = lambda s: (s.get("id") or s.get("subscription_id") or "") if isinstance(s, dict) else str(s)  # noqa: E731
+        return {"subscriptions": _granted_only(found, "subscriptions", sid, ctx)}
 
-    @app.get("/azure/discover", dependencies=dep)
-    def azure_discover(subscription_id: str = Query(...), ctx: Ctx = Depends()):
+    @app.get("/azure/discover")
+    def azure_discover(subscription_id: str = Query(...), ctx: Ctx = Depends(), _: Principal = need(P.discovery_run, P.azure_use)):
+        guards.valid_guid(subscription_id, "subscription id")
+        ctx.grant("subscriptions", subscription_id, "subscription")
+        ctx.audit("azure.discover", resource="subscription", resource_id=subscription_id)
         found = ctx.c.azure.discover(subscription_id)
         return {k: S.dump(v) for k, v in found.items()}
 
-    @app.put("/session/source", dependencies=dep)
-    def select_source(body: S.SourceSelection, ctx: Ctx = Depends()):
+    def _source_checks(ctx: Ctx, src: S.SourceSelection) -> None:
+        """Validate and authorise a client-chosen source before the server does anything with it."""
+        if src.kind == "azure":
+            if src.subscription_id:
+                guards.valid_guid(src.subscription_id, "subscription id")
+                ctx.grant("subscriptions", src.subscription_id, "subscription")
+            for v, what in ((src.resource_group, "resource group"), (src.factory_name, "factory name")):
+                if v:
+                    guards.valid_resource_name(v, what)
+        elif src.kind == "git":
+            if src.repository_url:
+                guards.check_public_https_url(src.repository_url, sec.allowed_git_hosts)
+        if src.revision and not re.fullmatch(r"[A-Za-z0-9._/@^~-]{1,200}", src.revision) or (src.revision or "").startswith("-"):
+            raise guards.Rejected("The revision may use letters, digits and . _ / @ ^ ~ - only, and may not start with '-'.")
+        if src.subdirectory and (".." in src.subdirectory.replace("\\", "/").split("/") or src.subdirectory.startswith(("/", "\\")) or ":" in src.subdirectory or len(src.subdirectory) > 200):
+            raise guards.Rejected("The subdirectory must be a relative path inside the source.")
+        if src.upload_id:
+            guards.valid_id(src.upload_id, "upload id")
+
+    @app.put("/session/source")
+    def select_source(body: S.SourceSelection, ctx: Ctx = Depends(), _: Principal = need(P.sources_import)):
+        _source_checks(ctx, body)
         sel = body.model_dump(mode="json", exclude={"token"})  # the token is never kept on the session
         ctx.session.source, ctx.session.tested["source"] = sel, False
         return {"source": sel}
@@ -228,8 +402,9 @@ def create_app(settings: Optional[Settings] = None, live: Optional[Container] = 
     def _git_auth(src: S.SourceSelection) -> GitAuth:
         return GitAuth(token=src.token.get_secret_value() if src.token else None, username=src.username)
 
-    @app.post("/test/source", dependencies=dep)
-    def test_source(body: S.SourceSelection, ctx: Ctx = Depends()):
+    @app.post("/test/source")
+    def test_source(body: S.SourceSelection, ctx: Ctx = Depends(), _: Principal = need(P.sources_import)):
+        _source_checks(ctx, body)
         if body.kind == "azure":
             if not (body.subscription_id and body.resource_group and body.factory_name):
                 raise HTTPException(422, "subscription_id, resource_group and factory_name are required.")
@@ -247,56 +422,91 @@ def create_app(settings: Optional[Settings] = None, live: Optional[Container] = 
         ctx.session.tested["source"] = rep.ok
         return S.dump(rep)
 
-    # ---- zip upload ----------------------------------------------------------------------------------------------------
+    # ---- zip upload (owner-bound, size-capped, magic-checked) -----------------------------------------------------------
+    def _owner_file(ctx: Ctx, upload_id: str) -> Path:
+        return ctx.c.upload_dir / f"{upload_id}.owner"
+
     def _upload_path(ctx: Ctx, upload_id: Optional[str]) -> Path:
         if not upload_id or not _ID.match(upload_id):
             raise HTTPException(422, "upload_id is required (upload the ZIP first).")
         p = ctx.c.upload_dir / f"{upload_id}.zip"
-        if not p.exists():
-            raise HTTPException(404, "That upload does not exist or has been cleaned up.")
+        o = _owner_file(ctx, upload_id)
+        owner = o.read_text(encoding="utf-8").strip() if o.exists() else None
+        if not p.exists() or owner != f"{ctx.principal.org}|{ctx.principal.id}":
+            raise HTTPException(404, "That upload does not exist or has been cleaned up.")  # someone else's upload looks the same as none
         return p
 
-    @app.put("/uploads/zip", dependencies=dep)
-    async def upload_zip(request: Request, ctx: Ctx = Depends()):
-        """Raw ZIP bytes in the body (no multipart). Size-capped while streaming; nothing is extracted here."""
+    @app.put("/uploads/zip")
+    async def upload_zip(request: Request, ctx: Ctx = Depends(), _: Principal = need(P.sources_import)):
+        """Raw ZIP bytes in the body (no multipart). Size-capped while streaming; checked to be a ZIP; nothing is extracted here."""
         cap = settings.max_upload_bytes
         declared = request.headers.get("content-length")
         if declared and declared.isdigit() and int(declared) > cap:
             raise HTTPException(413, f"The upload is larger than the {cap // (1024 * 1024)} MB limit.")
+        mine = f"{ctx.principal.org}|{ctx.principal.id}"
+        pending = sum(1 for o in ctx.c.upload_dir.glob("*.owner") if o.read_text(encoding="utf-8").strip() == mine)
+        if pending >= MAX_PENDING_UPLOADS:
+            raise HTTPException(429, "Too many uploads are waiting. Import or discard them first.")
         upload_id = uuid.uuid4().hex[:16]
-        target, size = ctx.c.upload_dir / f"{upload_id}.zip", 0
+        target, size, head = ctx.c.upload_dir / f"{upload_id}.zip", 0, b""
         try:
             with target.open("wb") as fh:
                 async for chunk in request.stream():
                     size += len(chunk)
                     if size > cap:
                         raise HTTPException(413, f"The upload is larger than the {cap // (1024 * 1024)} MB limit.")
+                    if len(head) < 4:
+                        head = (head + chunk)[:4]
                     fh.write(chunk)
             if size == 0:
                 raise HTTPException(422, "The upload is empty.")
+            if head not in _ZIP_MAGIC:
+                raise HTTPException(415, "The upload is not a ZIP archive.")
         except Exception:
             target.unlink(missing_ok=True)
             raise
+        _owner_file(ctx, upload_id).write_text(mine, encoding="utf-8")
+        ctx.audit("upload.zip", resource="upload", resource_id=upload_id, bytes=size)
         return {"upload_id": upload_id, "bytes": size}
 
+    def _drop_upload(ctx: Ctx, upload_id: Optional[str]) -> None:
+        if upload_id and _ID.match(upload_id):
+            (ctx.c.upload_dir / f"{upload_id}.zip").unlink(missing_ok=True)
+            _owner_file(ctx, upload_id).unlink(missing_ok=True)
+
     # ---- destination ---------------------------------------------------------------------------------------------------
-    @app.put("/session/destination", dependencies=dep)
-    def select_destination(body: S.DestinationSelection, ctx: Ctx = Depends()):
+    def _dest_checks(ctx: Ctx, provider: Optional[str], account: Optional[str], tenant: Optional[str], workspace: Optional[str]) -> None:
+        if account:
+            ctx.grant("accounts", account, "account")
+        if tenant:
+            guards.valid_guid(tenant, "tenant id")
+            ctx.grant("tenants", tenant, "tenant")
+        if workspace:
+            guards.valid_guid(workspace, "workspace id")
+            ctx.grant("workspaces", workspace, "workspace")
+
+    @app.put("/session/destination")
+    def select_destination(body: S.DestinationSelection, ctx: Ctx = Depends(), _: Principal = need(P.azure_use)):
         if body.provider not in ("azure_cli", "fabric_cli"):
             raise HTTPException(422, "provider must be azure_cli or fabric_cli.")
+        _dest_checks(ctx, body.provider, body.account, body.tenant_id, body.workspace_id)
         ctx.session.destination, ctx.session.tested["destination"] = body.model_dump(mode="json"), False
         return {"destination": ctx.session.destination}
 
-    @app.get("/fabric/workspaces", dependencies=dep)
-    def fabric_workspaces(provider: Optional[str] = None, account: Optional[str] = None, ctx: Ctx = Depends()):
-        return {"workspaces": S.dump(ctx.c.fabric(ctx.session, provider, account).workspaces())}
+    @app.get("/fabric/workspaces")
+    def fabric_workspaces(provider: Optional[str] = None, account: Optional[str] = None, ctx: Ctx = Depends(), _: Principal = need(P.azure_use)):
+        _dest_checks(ctx, provider, account, None, None)
+        found = S.dump(ctx.c.fabric(ctx.session, provider, account).workspaces())
+        return {"workspaces": _granted_only(found, "workspaces", lambda w: (w.get("id") or "") if isinstance(w, dict) else str(w), ctx)}
 
-    @app.get("/fabric/capacities", dependencies=dep)
-    def fabric_capacities(provider: Optional[str] = None, account: Optional[str] = None, ctx: Ctx = Depends()):
+    @app.get("/fabric/capacities")
+    def fabric_capacities(provider: Optional[str] = None, account: Optional[str] = None, ctx: Ctx = Depends(), _: Principal = need(P.azure_use)):
+        _dest_checks(ctx, provider, account, None, None)
         return {"capacities": ctx.c.fabric(ctx.session, provider, account).capacities()}
 
-    @app.post("/test/destination", dependencies=dep)
-    def test_destination(body: S.DestinationSelection, ctx: Ctx = Depends()):
+    @app.post("/test/destination")
+    def test_destination(body: S.DestinationSelection, ctx: Ctx = Depends(), _: Principal = need(P.azure_use)):
+        _dest_checks(ctx, body.provider, body.account, body.tenant_id, body.workspace_id)
         svc = ctx.c.fabric(ctx.session, body.provider, body.account)
         if not body.workspace_id:
             raise HTTPException(422, "workspace_id is required.")
@@ -305,16 +515,23 @@ def create_app(settings: Optional[Settings] = None, live: Optional[Container] = 
         return S.dump(rep)
 
     # ---- projects ------------------------------------------------------------------------------------------------------
-    @app.get("/projects", dependencies=dep)
-    def projects(ctx: Ctx = Depends()):
+    @app.get("/projects")
+    def projects(ctx: Ctx = Depends(), _: Principal = need(P.projects_view)):
         out = []
-        for pid in ctx.c.store.list_ids():
-            out.append({"id": pid, "has_semantic": ctx.c.store.has_adf_semantic_discovery(pid),
-                        "has_conversion": ctx.c.store.has_conversion(pid)})
+        for pid in ctx.access.visible(ctx.principal):  # only the caller's organisation's projects
+            out.append({"id": pid, "has_semantic": ctx.c.store.has_adf_semantic_discovery(pid), "has_conversion": ctx.c.store.has_conversion(pid)})
         return {"projects": out}
 
-    @app.get("/projects/{pid}", dependencies=dep)
-    def project(pid: str, ctx: Ctx = Depends()):
+    def _visible_source_url(ctx: Ctx, url: Optional[str]) -> Optional[str]:
+        """A live-factory source URL names a subscription and resource group: show it only to callers granted that subscription."""
+        if url and url.startswith("azure://"):
+            m = re.match(r"azure://subscriptions/([^/]+)/", url)
+            if not m or not ctx.principal.granted("subscriptions", m.group(1)):
+                return "azure://(hidden: not in your granted subscriptions)"
+        return url
+
+    @app.get("/projects/{pid}")
+    def project(pid: str, ctx: Ctx = Depends(), _: Principal = need(P.projects_view)):
         slug = ctx.project(pid)
         p = ctx.c.store.load(slug)
         has = ctx.c.store.has_adf_semantic_discovery(slug)
@@ -323,27 +540,38 @@ def create_app(settings: Optional[Settings] = None, live: Optional[Container] = 
         return {"id": slug, "name": p.name, "has_semantic": has and not stale, "semantic_stale": stale,
                 "has_conversion": ctx.c.store.has_conversion(slug),
                 "source": {"provider": p.repository.provider if p.repository else None,
-                           "url": p.repository.repository_url if p.repository else None,
+                           "url": _visible_source_url(ctx, p.repository.repository_url if p.repository else None),
                            "commit": p.repository.commit_sha if p.repository else None}}
 
-    @app.post("/projects", dependencies=dep, status_code=202)
-    def import_project(body: S.ImportBody, ctx: Ctx = Depends()):
+    @app.post("/projects", status_code=202)
+    def import_project(body: S.ImportBody, ctx: Ctx = Depends(), _: Principal = need(P.sources_import)):
         src, c = body.source, ctx.c
+        guards.valid_name(body.project_name, "project name")
+        slug_new = slugify(body.project_name)
+        if ctx.access.would_collide(ctx.principal, slug_new):
+            raise HTTPException(409, "That project name is not available.")  # never overwrite another organisation's project
+        if len(body.pipelines) > 500 or any(len(x) > 200 for x in body.pipelines):
+            raise guards.Rejected("Too many pipeline names, or a name is too long.")
+        _source_checks(ctx, src)
         if src.kind == "git" and not src.repository_url:
             raise HTTPException(422, "repository_url is required for a Git source.")
         if src.kind == "azure" and not (src.resource_group and src.factory_name):
             raise HTTPException(422, "resource_group and factory_name are required for an Azure source.")
+        if src.kind == "azure" and src.subscription_id is None and not ctx.principal.granted("subscriptions", WILDCARD):
+            raise HTTPException(422, "subscription_id is required for an Azure source.")
         zip_path = _upload_path(ctx, src.upload_id) if src.kind == "zip" else None
         if src.kind not in ("azure", "git", "zip"):
             raise HTTPException(422, "kind must be azure, git or zip.")
         token = src.token  # held by this closure for the fetch only
+        principal = ctx.principal
+        ctx.audit("project.import", resource="project", resource_id=slug_new, kind=src.kind)
 
         def work(log) -> dict[str, Any]:
             try:
                 return _import(log)
             finally:  # an uploaded archive is not kept, whether the import worked or not
                 if zip_path is not None:
-                    zip_path.unlink(missing_ok=True)
+                    _drop_upload(ctx, src.upload_id)
 
         def _import(log) -> dict[str, Any]:
             log(f"importing from {src.kind}")
@@ -360,13 +588,14 @@ def create_app(settings: Optional[Settings] = None, live: Optional[Container] = 
                     project_name=body.project_name, zip_path=str(zip_path), subdirectory=src.subdirectory, pipelines=body.pipelines))
             if not r.success:
                 raise StageError(r.error or "The import failed.")
+            ProjectAccess(c.store, sec.legacy_org).record(r.project.id, principal)  # the importer's organisation owns it from now on
             log("import complete")
             return {"project_id": r.project.id, "message": r.message}
 
-        return c.jobs.submit("import", slugify(body.project_name), work).public()
+        return c.jobs.submit("import", slug_new, work, org=principal.org, owner=principal.id).public()
 
-    @app.get("/projects/{pid}/conversion", dependencies=dep)
-    def conversion(pid: str, ctx: Ctx = Depends()):
+    @app.get("/projects/{pid}/conversion")
+    def conversion(pid: str, ctx: Ctx = Depends(), _: Principal = need(P.reports_view)):
         from adf2fabric.api.stages import conversion_summary
 
         slug = ctx.project(pid)
@@ -374,8 +603,8 @@ def create_app(settings: Optional[Settings] = None, live: Optional[Container] = 
             raise HTTPException(404, "This project has not been converted yet.")
         return conversion_summary(ctx.c.store, slug)
 
-    @app.get("/projects/{pid}/handover", dependencies=dep)
-    def handover(pid: str, ctx: Ctx = Depends()):
+    @app.get("/projects/{pid}/handover")
+    def handover(pid: str, ctx: Ctx = Depends(), _: Principal = need(P.reports_view)):
         from adf2fabric.agent.handover import render
 
         slug = ctx.project(pid)
@@ -383,8 +612,8 @@ def create_app(settings: Optional[Settings] = None, live: Optional[Container] = 
             raise HTTPException(404, "This project has not been converted yet.")
         return {"markdown": render(ctx.c.store, slug)}
 
-    @app.get("/projects/{pid}/linked-services", dependencies=dep)
-    def linked_services(pid: str, ctx: Ctx = Depends()):
+    @app.get("/projects/{pid}/linked-services")
+    def linked_services(pid: str, ctx: Ctx = Depends(), _: Principal = need(P.projects_view)):
         slug = ctx.project(pid)
         d = ctx.c.connections.semantic(slug)
         return {"linked_services": [{"name": x.name, "type": x.type} for x in d.linked_services],
@@ -397,81 +626,192 @@ def create_app(settings: Optional[Settings] = None, live: Optional[Container] = 
         except Exception:  # noqa: BLE001 - cards still render without Fabric; the card says what is unverified
             return None
 
-    @app.get("/connectors", dependencies=dep)
-    def connectors():
+    def _ls(value: str) -> str:
+        if not _LS.match(value or ""):
+            raise guards.Rejected("The linked service name is not valid.")
+        return value
+
+    @app.get("/connectors")
+    def connectors(_: Principal = need(P.projects_view)):
         return {"connectors": [{"id": s.id, "label": s.label, "adf_types": list(s.adf_types), "fabric_type": s.fabric_type,
                                 "endpoint": [e.field.public() for e in s.endpoint], "methods": [m.public() for m in s.methods],
                                 "notes": s.notes} for s in catalog.CONNECTORS]}
 
-    @app.get("/projects/{pid}/connections", dependencies=dep)
-    def cards(pid: str, ctx: Ctx = Depends()):
+    @app.get("/projects/{pid}/connections")
+    def cards(pid: str, ctx: Ctx = Depends(), _: Principal = need(P.reports_view)):
         slug = ctx.project(pid)
-        return {"cards": S.dump(ctx.c.connections.cards(slug, ctx.sid, _fabric_or_none(ctx)))}
+        return {"cards": S.dump(ctx.c.connections.cards(slug, ctx.key, _fabric_or_none(ctx)))}
 
-    @app.put("/projects/{pid}/connections/{ls}/choice", dependencies=dep)
-    def set_choice(pid: str, ls: str, body: S.ChoiceBody, ctx: Ctx = Depends()):
+    @app.put("/projects/{pid}/connections/{ls}/choice")
+    def set_choice(pid: str, ls: str, body: S.ChoiceBody, ctx: Ctx = Depends(), _: Principal = need(P.plans_generate)):
         slug = ctx.project(pid)
-        saved = ctx.c.connections.set_choice(slug, ConnectionChoice(linked_service=ls, **body.model_dump()))
+        saved = ctx.c.connections.set_choice(slug, ConnectionChoice(linked_service=_ls(ls), **body.model_dump()))
         return S.dump(saved)
 
-    @app.put("/projects/{pid}/connections/{ls}/secrets", dependencies=dep)
-    def put_secret(pid: str, ls: str, body: S.SecretBody, ctx: Ctx = Depends()):
+    @app.put("/projects/{pid}/connections/{ls}/secrets")
+    def put_secret(pid: str, ls: str, body: S.SecretBody, ctx: Ctx = Depends(), _: Principal = need(P.plans_generate)):
         slug = ctx.project(pid)
-        ctx.c.connections.put_secret(ctx.sid, slug, ls, body.field, body.value.get_secret_value())
-        return {"held": ctx.c.vault.fields(ctx.sid, SCOPE, next((x.name for x in ctx.c.connections.semantic(slug).linked_services if x.name.lower() == ls.lower()), ls))}  # field names only
+        _ls(ls)
+        if not _FIELD.match(body.field) or len(body.value.get_secret_value()) > 8192:
+            raise guards.Rejected("The field name or the value is not acceptable.")
+        ctx.c.connections.put_secret(ctx.key, slug, ls, body.field, body.value.get_secret_value())
+        ctx.audit("connection.secret_held", resource="linked_service", resource_id=ls)  # the fact only: never the field value
+        return {"held": ctx.c.vault.fields(ctx.key, SCOPE, next((x.name for x in ctx.c.connections.semantic(slug).linked_services if x.name.lower() == ls.lower()), ls))}  # field names only
 
-    @app.delete("/projects/{pid}/connections/secrets", dependencies=dep)
-    def clear_secrets(pid: str, ls: Optional[str] = None, ctx: Ctx = Depends()):
+    @app.delete("/projects/{pid}/connections/secrets")
+    def clear_secrets(pid: str, ls: Optional[str] = None, ctx: Ctx = Depends(), _: Principal = need(P.plans_generate)):
         ctx.project(pid)
-        return {"cleared": ctx.c.connections.clear_secrets(ctx.sid, ls)}
+        return {"cleared": ctx.c.connections.clear_secrets(ctx.key, _ls(ls) if ls else None)}
 
-    @app.post("/projects/{pid}/connections/{ls}/test", dependencies=dep)
-    def test_connection(pid: str, ls: str, ctx: Ctx = Depends()):
+    @app.post("/projects/{pid}/connections/{ls}/test")
+    def test_connection(pid: str, ls: str, ctx: Ctx = Depends(), _: Principal = need(P.plans_generate)):
         slug = ctx.project(pid)
-        return S.dump(ctx.c.connections.test(slug, ctx.sid, ls, _fabric_or_none(ctx)))
+        return S.dump(ctx.c.connections.test(slug, ctx.key, _ls(ls), _fabric_or_none(ctx)))
 
-    @app.post("/projects/{pid}/connections/apply", dependencies=dep)
-    def apply(pid: str, body: S.ApplyBody, ctx: Ctx = Depends()):
+    @app.post("/projects/{pid}/connections/apply")
+    def apply(pid: str, body: S.ApplyBody, ctx: Ctx = Depends(), _: Principal = need(P.plans_generate)):
         slug = ctx.project(pid)
+        if not body.dry_run:
+            ctx.require(P.migration_execute)  # creating connections in the target changes it
         ws = body.workspace_id or ctx.session.destination.get("workspace_id")
-        res = ctx.c.connections.apply(slug, ctx.sid, ctx.c.fabric(ctx.session), workspace_id=ws, names=body.names or None,
+        if ws:
+            guards.valid_guid(ws, "workspace id")
+            ctx.grant("workspaces", ws, "workspace")
+        ctx.audit("connections.apply", "ok" if body.dry_run else "requested", resource="project", resource_id=slug, dry_run=body.dry_run, workspace=ws)
+        res = ctx.c.connections.apply(slug, ctx.key, ctx.c.fabric(ctx.session), workspace_id=ws, names=[_ls(n) for n in body.names] or None,
                                       auto_match=body.auto_match, dry_run=body.dry_run)
         return S.dump(res)
 
-    @app.post("/projects/{pid}/connections/workspace-identity", dependencies=dep)
-    def identity(pid: str, body: S.IdentityBody, ctx: Ctx = Depends()):
-        ctx.project(pid)
+    @app.post("/projects/{pid}/connections/workspace-identity")
+    def identity(pid: str, body: S.IdentityBody, ctx: Ctx = Depends(), _: Principal = need(P.provision_approve, P.migration_execute)):
+        slug = ctx.project(pid)
         ws = body.workspace_id or ctx.session.destination.get("workspace_id")
         if not ws:
             raise HTTPException(422, "workspace_id is required.")
+        guards.valid_guid(ws, "workspace id")
+        ctx.grant("workspaces", ws, "workspace")
+        ctx.audit("workspace_identity.provision", "requested", resource="workspace", resource_id=ws, project=slug)
         return ctx.c.connections.provision_identity(ctx.c.fabric(ctx.session), ws)
 
-    @app.get("/projects/{pid}/connections/report", dependencies=dep)
-    def report(pid: str, ctx: Ctx = Depends()):
+    @app.get("/projects/{pid}/connections/report")
+    def report(pid: str, ctx: Ctx = Depends(), _: Principal = need(P.reports_view)):
         slug = ctx.project(pid)
-        paths = ctx.c.connections.write_report(slug, ctx.sid, _fabric_or_none(ctx))
+        paths = ctx.c.connections.write_report(slug, ctx.key, _fabric_or_none(ctx))
         base = ctx.c.store.conversion_dir(slug)
         return {"files": paths, "markdown": (base / paths["markdown"]).read_text(encoding="utf-8"),
                 "rows": json.loads((base / paths["json"]).read_text(encoding="utf-8"))}
 
     # ---- migration stages ------------------------------------------------------------------------------------------------
-    @app.post("/projects/{pid}/stages/{stage}", dependencies=dep, status_code=202)
-    def stage(pid: str, stage: str, body: S.StageBody, ctx: Ctx = Depends()):
+    @app.post("/projects/{pid}/stages/{stage}", status_code=202)
+    def stage(pid: str, stage: str, body: S.StageBody, ctx: Ctx = Depends(), _: Principal = need(P.projects_view)):
         slug = ctx.project(pid)
         if stage not in STAGES:
             raise HTTPException(404, f"Unknown stage. Use one of: {', '.join(STAGES)}.")
+        ctx.require(STAGE_PERMISSION[stage])  # each stage needs ITS permission: planning does not imply executing
+        if len(body.pipelines) > 500 or any(len(x) > 200 for x in body.pipelines):
+            raise guards.Rejected("Too many pipeline names, or a name is too long.")
+        if stage == "verify":  # ADF run history is read with the project's own factory: that subscription must be one this caller may use
+            from adf2fabric.agent.deployment.verify import Factory
+
+            proj = ctx.c.store.load(slug)
+            fac = Factory.from_source(proj.repository.repository_url if proj.repository else None)
+            if fac is not None:
+                ctx.grant("subscriptions", fac.subscription, "subscription")
+        ws = body.workspace_id or (ctx.session.destination.get("workspace_id") if stage in ("deploy_dry_run", "deploy_apply", "verify") else None)
+        if stage in ("deploy_dry_run", "deploy_apply", "verify") and ws:
+            guards.valid_guid(ws, "workspace id")
+            ctx.grant("workspaces", ws, "workspace")
+        elif body.workspace_id:
+            guards.valid_guid(body.workspace_id, "workspace id")
+            ctx.grant("workspaces", body.workspace_id, "workspace")
+        if stage in ("deploy_apply",) and body.allow_unbound:
+            ctx.require(P.migration_execute)
         opts = body.model_dump()
-        return ctx.c.jobs.submit(stage, slug, lambda log: run_stage(ctx.c, ctx.session, slug, stage, log, opts)).public()
+        ctx.audit(f"stage.{stage}", "requested", resource="project", resource_id=slug, workspace=ws or "")
+        return ctx.c.jobs.submit(stage, slug, lambda log: run_stage(ctx.c, ctx.session, slug, stage, log, opts),
+                                 org=ctx.principal.org, owner=ctx.principal.id).public()
 
-    @app.get("/jobs", dependencies=dep)
-    def jobs(project_id: Optional[str] = None, ctx: Ctx = Depends()):
-        return {"jobs": [j.public() for j in ctx.c.jobs.list(project_id)]}
+    @app.get("/jobs")
+    def jobs(project_id: Optional[str] = None, ctx: Ctx = Depends(), _: Principal = need(P.reports_view)):
+        slug = ctx.project(project_id) if project_id else None
+        return {"jobs": [j.public() for j in ctx.c.jobs.list(slug, org=ctx.principal.org)]}
 
-    @app.get("/jobs/{job_id}", dependencies=dep)
-    def job(job_id: str, since: int = 0, ctx: Ctx = Depends()):
+    @app.get("/jobs/{job_id}")
+    def job(job_id: str, since: int = 0, ctx: Ctx = Depends(), _: Principal = need(P.reports_view)):
         j = ctx.c.jobs.get(job_id)
-        if j is None:
-            raise HTTPException(404, "No such job.")
-        return j.public(since)
+        if j is None or (j.org is not None and j.org != ctx.principal.org):
+            raise HTTPException(404, "No such job.")  # another organisation's job looks the same as none
+        return j.public(max(0, since))
+
+    # ---- users (own organisation only) ---------------------------------------------------------------------------------
+    def _require_token_mode() -> None:
+        if _mode() != "token":
+            raise HTTPException(409, "User management needs authentication to be enabled (token mode).")
+
+    def _cannot_exceed(p: Principal, roles: list[str], grants: Optional[Grants]) -> None:
+        """Privilege-escalation guard: nobody can hand out more than they hold."""
+        want = permissions_for(roles)
+        if not want <= p.permissions:
+            raise HTTPException(403, "You cannot grant a role with permissions you do not hold.")
+        if grants is not None:
+            for kind in ("subscriptions", "tenants", "accounts", "workspaces"):
+                for v in getattr(grants, kind):
+                    if v == WILDCARD and not p.granted(kind, WILDCARD):
+                        raise HTTPException(403, "You cannot grant access you do not hold.")
+                    if v != WILDCARD and not p.granted(kind, v):
+                        raise HTTPException(403, "You cannot grant access you do not hold.")
+
+    def _public_user(u) -> dict:
+        return {"id": u.id, "org": u.org, "roles": u.roles, "disabled": u.disabled, "token_hint": u.token_hint,
+                "grants": u.grants.model_dump(), "created_at": u.created_at.isoformat()}
+
+    @app.get("/admin/users")
+    def list_users(ctx: Ctx = Depends(), _: Principal = need(P.users_manage)):
+        _require_token_mode()
+        return {"users": [_public_user(u) for u in users.list(ctx.principal.org)]}
+
+    @app.post("/admin/users", status_code=201)
+    def create_user(body: S.UserCreate, ctx: Ctx = Depends(), _: Principal = need(P.users_manage)):
+        _require_token_mode()
+        grants = Grants(**body.grants.model_dump()) if body.grants else Grants()
+        _cannot_exceed(ctx.principal, body.roles, grants)
+        rec, token = users.create(body.id, ctx.principal.org, body.roles, grants, created_by=ctx.principal.id)  # the organisation is the caller's, never client-chosen
+        ctx.audit("user.create", resource="user", resource_id=rec.id, roles=",".join(rec.roles))
+        return {**_public_user(rec), "token": token, "note": "Shown once. Store it in a secret manager; it cannot be shown again."}
+
+    def _target(ctx: Ctx, uid: str):
+        rec = users.get(uid)
+        if rec is None or rec.org != ctx.principal.org:
+            raise HTTPException(404, "No such user.")  # other organisations' users are invisible
+        return rec
+
+    @app.patch("/admin/users/{uid}")
+    def update_user(uid: str, body: S.UserUpdate, ctx: Ctx = Depends(), _: Principal = need(P.users_manage)):
+        _require_token_mode()
+        rec = _target(ctx, uid)
+        grants = Grants(**body.grants.model_dump()) if body.grants else None
+        if body.roles is not None or grants is not None:
+            _cannot_exceed(ctx.principal, body.roles or rec.roles, grants)
+        if rec.id.lower() == ctx.principal.id.lower() and (body.disabled or (body.roles is not None and "admin" not in body.roles)):
+            raise HTTPException(409, "You cannot disable yourself or remove your own admin role.")
+        if (body.disabled or (body.roles is not None and "admin" not in body.roles)) and "admin" in rec.roles and users.admin_count(rec.org) <= 1:
+            raise HTTPException(409, "That would leave the organisation without an administrator.")
+        new = users.update(rec.id, roles=body.roles, disabled=body.disabled, grants=grants)
+        ctx.audit("user.update", resource="user", resource_id=new.id, roles=",".join(new.roles), disabled=new.disabled)
+        return _public_user(new)
+
+    @app.post("/admin/users/{uid}/rotate-token")
+    def rotate_token(uid: str, ctx: Ctx = Depends(), _: Principal = need(P.users_manage)):
+        _require_token_mode()
+        rec = _target(ctx, uid)
+        if not set(permissions_for(rec.roles)) <= ctx.principal.permissions:
+            raise HTTPException(403, "You cannot rotate the token of a user who holds more permissions than you.")
+        new, token = users.rotate(rec.id)
+        ctx.audit("user.rotate_token", resource="user", resource_id=new.id)
+        return {**_public_user(new), "token": token, "note": "Shown once."}
+
+    @app.get("/admin/audit")
+    def read_audit(limit: int = 100, ctx: Ctx = Depends(), _: Principal = need(P.users_manage)):
+        return {"events": audit.read(max(1, min(limit, 500)), org=ctx.principal.org), "chain_intact": audit.verify() is None}
 
     return app

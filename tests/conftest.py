@@ -56,3 +56,9 @@ def make_git_repo():
 def source_repo(tmp_path):
     """A ready-made local source repository on branch ``main``."""
     return make_repo(tmp_path / "origin")
+
+
+@pytest.fixture(autouse=True)
+def _audit_to_tmp(tmp_path_factory, monkeypatch):
+    """CLI audit events from tests never touch the real projects folder."""
+    monkeypatch.setenv("ADF2FABRIC_AUDIT_DIR", str(tmp_path_factory.mktemp("audit")))
