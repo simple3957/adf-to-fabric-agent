@@ -16,6 +16,14 @@ import theme
 from api_client import ApiClient
 from components import call, can, empty_state
 
+_SPECIAL = frozenset("\\`*_{}[]()#+-.!|<>~$")
+
+
+def _plain(text: object) -> str:
+    """Text someone typed (an owner, a note, a free-text answer) shown as text: no link, image, heading or HTML from another person's words."""
+    return "".join("\\" + c if c in _SPECIAL else c for c in str(text))
+
+
 EFFECT_TONE = {"run": "info", "gate": "warning", "record": "neutral"}
 SOURCE_TEXT = {"config": "From the configuration", "person": "Answered", "recommendation": "Recommendation (not yet accepted)", "open": "Open"}
 STATE_TONE = {"draft": "neutral", "submitted": "info", "approved": "success"}
@@ -35,6 +43,13 @@ def consult(api: ApiClient, pid: str, brief: dict | None) -> None:
     cols[1].metric("To accept", c["assumed"], help="Recommendations not yet accepted as answers.")
     cols[2].metric("Required and open", c["need_person"])
     cols[3].metric("Conflicts", c["conflicts"])
+    if brief.get("workspace_changed"):
+        st.warning("The Fabric workspace chosen now is not the one this brief was agreed for. Deploying and real runs are refused until the brief "
+                   "is reviewed and approved for this workspace, or the original workspace is chosen again.")
+        if st.button("Use the workspace chosen now", key="consult-rerecord", disabled=not can("plans:generate"),
+                     help="Records the current workspace with the brief. The brief goes back to draft: submit and approve it again."):
+            if call(api.brief_answers, pid, {}) is not None:
+                st.rerun()
     if brief.get("changed_since_approval"):
         st.warning("The answers changed since the last approved version, so the run no longer follows a brief. Submit and approve them again.")
     for x in brief["conflicts"]:
@@ -89,7 +104,7 @@ def _actions(api: ApiClient, pid: str, brief: dict) -> None:
 def _widget(q: dict, key: str):
     opts = [o["value"] for o in q["options"]]
     labels = {o["value"]: o["label"] + (f" — {o['description']}" if o.get("description") else "") for o in q["options"]}
-    current = q["value"] if q["source"] in ("person", "recommendation") else None
+    current = q["value"] if q["source"] == "person" else None  # a recommendation is shown, never pre-selected: saving a form must not accept what nobody chose
     if q["kind"] == "text":
         return st.text_input(q["text"], value=current or "", key=key, placeholder=q.get("placeholder") or "", label_visibility="collapsed")
     if q["kind"] == "multi":
@@ -107,31 +122,26 @@ def _topic_form(api: ApiClient, pid: str, topic: str, items: list[dict], editabl
                         + ("" if not q["required"] else " " + theme.badge("Required", "neutral")), unsafe_allow_html=True)
             st.caption(q["help"])
             if q["source"] == "config":
-                st.info(f"{q['label']} — read from the configuration, not asked. {q['recommendation']['reason'] if q.get('recommendation') else ''}")
+                st.info(f"{_plain(q['label'])} — read from the configuration, not asked. {q['recommendation']['reason'] if q.get('recommendation') else ''}")
                 continue
+            if q.get("problem"):
+                st.error(f"The saved answer is no longer valid and is ignored: {q['problem']}")
             rec = q.get("recommendation")
             if rec:
-                st.caption(f"💡 Recommended: **{rec['label']}** — {rec['reason']}")
-            st.caption(f"{SOURCE_TEXT.get(q['source'], q['source'])}" + (f": {q['label']}" if q["source"] == "person" else "")
+                st.caption(f"💡 Recommended: **{_plain(rec['label'])}** — {rec['reason']}")
+            st.caption(f"{SOURCE_TEXT.get(q['source'], q['source'])}" + (f": {_plain(q['label'])}" if q["source"] == "person" else "")
                        + f" · Changes: {q['applies_to']}")
             chosen[q["id"]] = _widget(q, f"consult-q-{q['id']}")
             st.divider()
         save = st.form_submit_button("Save answers", type="primary", disabled=not editable)
     if save:
-        changed = {}
         by_id = {q["id"]: q for q in items}
-        for qid, value in chosen.items():
-            q = by_id[qid]
-            if value is None or value == "" or (q["source"] == "person" and value == q["value"]):
-                continue
-            if q["source"] == "recommendation" and value == q["value"] and q["kind"] != "text":
-                changed[qid] = value  # saving the recommendation as shown makes it an answer
-            elif value != q["value"] or q["source"] != "person":
-                changed[qid] = value
+        changed = {qid: value for qid, value in chosen.items()
+                   if value not in (None, "", []) and value != by_id[qid]["value" if by_id[qid]["source"] == "person" else "source"]}
         if changed and call(api.brief_answers, pid, changed) is not None:
             st.rerun()
         elif not changed:
-            st.caption("Nothing changed.")
+            st.caption("Nothing to save: choose an answer, or use \"Accept recommendations\" above.")
 
 
 def _settings(brief: dict) -> None:
@@ -174,4 +184,4 @@ def _exchange(api: ApiClient, pid: str, brief: dict) -> None:
             if call(api.brief_note, pid, note) is not None:
                 st.rerun()
         for n in reversed(brief.get("notes") or []):
-            st.caption(f"{n['at']} · {n.get('by') or n['kind']}: {n['text']}")
+            st.caption(f"{_plain(n['at'])} · {_plain(n.get('by') or n['kind'])}: {_plain(n['text'])}")

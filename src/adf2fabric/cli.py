@@ -1518,6 +1518,9 @@ def convert(project_name: str, pipelines: tuple[str, ...], resolutions_path: str
             click.secho("--from-brief: there is no approved, current consultation brief. Run `brief`, answer, submit and approve it first.",
                         fg="red", err=True)
             sys.exit(1)
+        if not pipelines and agreed.get("pipelines") is not None and not agreed["pipelines"]:
+            click.secho("--from-brief: the approved brief leaves no pipeline to convert (every one is held back).", fg="red", err=True)
+            sys.exit(1)
         pipelines = tuple(pipelines) or tuple(agreed.get("pipelines") or ())
         lakehouse = lakehouse or agreed.get("lakehouse")
         apply_reconstruction = apply_reconstruction or bool(agreed.get("apply_reconstruction"))
@@ -1664,6 +1667,13 @@ def deploy_cmd(project_name: str, workspace_id: str, pipelines: tuple[str, ...],
     except Exception as exc:  # noqa: BLE001
         click.secho(f"Deploy failed: {exc}", fg="red", err=True)
         sys.exit(1)
+    if apply_ and store.has_adf_semantic_discovery(slugify(project_name)):
+        from adf2fabric.agent.consultation import brief_record as BR
+
+        drift = BR.workspace_mismatch(store, slugify(project_name), workspace_id)
+        if drift:
+            click.secho(f"Deploy refused: {drift}", fg="red", err=True)
+            sys.exit(1)
     base = store.conversion_dir(project_name)
     available: dict[str, DeployItem] = {}
     for p in conversion.pipelines:

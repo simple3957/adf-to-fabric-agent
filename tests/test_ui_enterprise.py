@@ -253,3 +253,73 @@ def test_running_pipelines_needs_a_selection_and_RUN_typed(worked, demo, open_st
     at.button(key="run-go").click().run()
     assert not at.exception, at.exception
     assert len(d.fabric_http.runs) == before + 1
+
+
+def test_a_reload_keeps_the_confirmed_steps(worked, open_steps):
+    at = _at(worked, project_id=PID)
+    at.switch_page("views/migration.py").run()
+    assert not at.exception, at.exception
+    worked.journey_confirm(PID, ["discover"])  # what the Looks-good button records
+    fresh = _at(worked, project_id=PID)  # a new browser session of the same project: nothing in its own session state
+    fresh.switch_page("views/migration.py").run()
+    assert "discover" in fresh.session_state["confirmed"][PID]
+
+
+def test_a_running_job_is_shown_after_a_reload_and_can_be_watched(worked, monkeypatch):
+    import threading
+
+    release = threading.Event()
+
+    def slow(c, session, pid, stage, log, options=None):
+        log("working")
+        release.wait(30)
+        return {"message": "done"}
+
+    monkeypatch.setattr("adf2fabric.api.app.run_stage", slow)
+    job = worked.run_stage(PID, "dependencies")  # started by "an earlier visit"
+    try:
+        at = _at(worked, project_id=PID)  # the page is opened afresh
+        at.switch_page("views/migration.py").run()
+        assert not at.exception, at.exception
+        assert any("job is running" in str(w.value) for w in at.warning), [str(w.value) for w in at.warning]
+        assert at.button(key="watch-job") is not None
+        other = worked.run_stage  # a second start is refused by the server, and the page says where to look
+        try:
+            other(PID, "convert")
+        except Exception as exc:  # noqa: BLE001
+            assert "already running" in str(exc)
+    finally:
+        release.set()
+    worked.wait_job(job, interval=0.05)
+    at.run()
+    assert not any("job is running" in str(w.value) for w in at.warning)
+
+
+def test_words_typed_by_another_person_are_shown_as_text_not_as_links_or_html(worked, open_steps):
+    hostile = "[Approve here](http://evil.example/x) ![t](http://evil.example/p.png) <img src=x onerror=alert(1)> # shout"
+    worked.brief_note(PID, hostile)
+    worked.brief_answers(PID, {"context.owner": hostile})
+    at = _step(worked, "consult")
+    shown = [str(e.value) for e in at.caption] + [str(e.value) for e in at.info]
+    mine = [s for s in shown if "evil" in s]
+    assert len(mine) >= 2, "the hostile text should still be visible, as text (note and owner)"
+    for s in mine:  # every markdown and HTML control character is backslash-escaped, so nothing renders as a link, an image or a tag
+        for token in ("](", "![", "<img", "](http"):
+            assert token not in s.replace("\\" + token[0], "") or "\\" in s, (token, s)
+        assert "\[" in s and "\<" in s, s
+
+
+def test_saving_a_topic_never_accepts_recommendations_nobody_chose(worked, open_steps):
+    at = _step(worked, "consult")
+    recs_before = {q["id"] for q in worked.brief(PID)["questions"] if q["source"] == "recommendation"}
+    assert len(recs_before) > 3
+    # pick ONE answer in the Scope topic and save that form
+    scope = [r for r in at.radio if (r.key or "").startswith("consult-q-scope.")]
+    assert scope and all(r.value is None for r in scope), "recommendations are shown, not pre-selected"
+    at.radio(key="consult-q-scope.approach").set_value("phased")  # inside a form the choice is sent with the submit, not before
+    next(b for b in at.button if b.label == "Save answers" and b.key and "scope" in b.key).click().run()
+    assert not at.exception, at.exception
+    after = {q["id"]: q for q in worked.brief(PID)["questions"]}
+    assert after["scope.approach"]["source"] == "person" and after["scope.approach"]["value"] == "phased"
+    still = {qid for qid in recs_before if qid != "scope.approach" and after[qid]["source"] == "recommendation"}
+    assert still == recs_before - {"scope.approach"}  # every other recommendation is still only a recommendation

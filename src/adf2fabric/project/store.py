@@ -68,6 +68,19 @@ def slugify(name: str) -> str:
     return slug
 
 
+class ProjectPathError(OSError):
+    """A project file could not be written. On Windows the usual cause is a path over 260 characters: say so, and what to do."""
+
+    def __init__(self, target: Path, cause: OSError):
+        n = len(str(target))
+        if n >= 240 or getattr(cause, "winerror", None) in (3, 206):
+            msg = (f"The project's file path is {n} characters long, over what Windows allows (260). Move the projects folder closer to the "
+                   "drive root (projects_root in config/config.yaml), or turn on Windows long-path support, then run this step again.")
+        else:
+            msg = f"A project file could not be written ({type(cause).__name__}). Check the projects folder exists and is writable, and that the disk is not full."
+        super().__init__(msg)
+
+
 class ProjectNotFoundError(Exception):
     pass
 
@@ -557,8 +570,11 @@ class ProjectStore:
         root = self.conversion_dir(project_id).resolve()
         if root not in target.parents:
             raise ValueError(f"Refusing to write outside the conversion folder: {relative_path}")
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(text, encoding="utf-8")
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(text, encoding="utf-8")
+        except OSError as exc:
+            raise ProjectPathError(target, exc) from None
         return target
 
     # --- Reconstruction record + proposed completion -------------------------

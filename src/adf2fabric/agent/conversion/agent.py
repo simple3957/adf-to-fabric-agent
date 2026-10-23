@@ -36,7 +36,7 @@ from adf2fabric.project.conversion import (
 )
 from adf2fabric.project.discovery import UNPROCESSED_LOSS_REASONS, AdfSemanticDiscovery, AdfSemanticStatus
 from adf2fabric.project.reconstruction import Proposal
-from adf2fabric.project.store import ProjectNotFoundError, ProjectStore, slugify
+from adf2fabric.project.store import ProjectNotFoundError, ProjectPathError, ProjectStore, slugify
 
 _PROVENANCE = {
     "input": "adf_semantic_discovery",
@@ -83,7 +83,7 @@ class ConversionAgent:
     def run(self, request: ConversionRequest) -> ConversionResult:
         try:
             return self._run(request)
-        except ProjectNotFoundError as exc:
+        except (ProjectNotFoundError, ProjectPathError) as exc:
             return ConversionResult(success=False, message="Conversion failed.", error=str(exc))
 
     def _run(self, request: ConversionRequest) -> ConversionResult:

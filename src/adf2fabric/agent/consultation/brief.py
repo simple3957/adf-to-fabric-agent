@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from collections import Counter
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional, Union
@@ -59,6 +60,7 @@ class Facts:
     storage_undecided: int = 0  # file datasets the storage map cannot map
     shortcuts_planned: int = 0
     pipeline_waves: list[list[str]] = field(default_factory=list)  # dependency waves holding pipelines, in order
+    calls: dict[str, list[str]] = field(default_factory=dict)  # pipeline -> the pipelines it invokes (they must be deployed first)
     blocked_activities: Optional[int] = None  # activities whose type has no automatic Fabric route (conversion rules)
     blocked_pipelines: list[str] = field(default_factory=list)
     reconstruction_proposals: Optional[int] = None  # safe proposals; None before reconstruction
@@ -91,12 +93,15 @@ def read_facts(store: Any, pid: str, destination: Optional[dict] = None) -> Fact
     """Facts from the project's own records. Each source is read on its own: one unreadable record hides nothing else."""
     from adf2fabric.agent.discovery.adf_semantic.pipeline_analysis import walk
 
-    f = Facts(fabric_workspace=(destination or {}).get("workspace_name") or (destination or {}).get("workspace_id"))
+    chosen = (destination or {}).get("workspace_id") or (destination or {}).get("workspace_name")
+    # shown by description, never by id: an ordinary view carries no resource identifiers
+    f = Facts(fabric_workspace="the workspace chosen on the Connections step" if chosen else None)
     if not store.has_adf_semantic_discovery(pid):
         return f
     d = store.load_adf_semantic_discovery(pid)
     f.discovered = True
     f.pipelines = sorted(p.name for p in d.pipelines)
+    f.calls = {p.name: sorted(set(p.pipeline_dependencies)) for p in d.pipelines if p.pipeline_dependencies}
     f.activities = dict(Counter(a.type for p in d.pipelines for a in walk(p.activities) if a.type))
     f.linked_services = len(d.linked_services)
     f.linked_service_types = dict(Counter(ls.type or "?" for ls in d.linked_services))
@@ -196,6 +201,7 @@ class Question:
     resolve: Optional[Callable[[Facts], Optional[Recommendation]]] = None
     recommend: Optional[Callable[[Facts, Answers], Optional[Recommendation]]] = None
     placeholder: str = ""
+    check: Optional[Callable[[str], Optional[str]]] = None  # a free-text answer's own rule: the problem in words, or None when fine
 
 
 TOPICS = [
@@ -213,6 +219,14 @@ TOPIC_TITLE = {t[0]: t[1] for t in TOPICS}
 
 O = Option
 R = Recommendation
+
+
+_ITEM_NAME = re.compile(r"^[A-Za-z0-9_.\-]{1,256}$")
+
+
+def _item_name(text: str) -> Optional[str]:
+    """A lakehouse name as the OneLake path and the pipeline's lakehouse link need it (no spaces, commas or path characters)."""
+    return None if _ITEM_NAME.match(text) else "Use letters, digits, _ . - only (no spaces or commas), up to 256 characters."
 
 
 def _waves(f: Facts) -> int:
@@ -311,7 +325,7 @@ QUESTIONS: list[Question] = [
              if f.shortcuts_planned else R("connections", "No shortcut can be planned from what discovery found.")),
     Question("storage.lakehouse", "storage", "Which lakehouse holds the shortcuts?",
              "A lakehouse name is never invented. Bind its id in the resolutions (ItemToId lakehouse:<name>) or create it on the Plan step.",
-             "text", True, "run", "The lakehouse conversion repoints to.", placeholder="e.g. LH_Migration",
+             "text", True, "run", "The lakehouse conversion repoints to.", placeholder="e.g. LH_Migration", check=_item_name,
              when=lambda f, a: a.get("storage.route") == "lakehouse",
              resolve=lambda f: R(f.lakehouse_bound, "A lakehouse already bound in the resolutions.") if f.lakehouse_bound else None),
     Question("storage.undecided", "storage", "Some file datasets cannot be mapped to a shortcut. What should happen to them?",
@@ -495,6 +509,7 @@ class Resolved:
     value: Optional[AnswerValue]
     source: str  # config | person | recommendation | open
     rec: Optional[Recommendation]
+    problem: str = ""  # a stored answer that no longer passes the question's own rules: it is ignored, and this says why
 
 
 def _blank(v: Any) -> bool:
@@ -512,12 +527,18 @@ def resolve(facts: Facts, given: Answers) -> list[Resolved]:
         config = q.resolve(facts) if applies and q.resolve else None
         rec = config or (q.recommend(facts, effective) if applies and q.recommend else None)
         mine = given.get(q.id)
+        problem = ""
+        if config is None and not _blank(mine) and applies:
+            try:  # a stored answer is checked again every time it is read: a rule that tightened, or a hand-edited file, never slips through
+                mine = validate_answer(q, facts, mine)
+            except ValueError as exc:
+                problem, mine = str(exc), None
         has = config is None and not _blank(mine)
         value = config.value if config else mine if has else (rec.value if rec else None)
         if applies and value is not None:
             effective[q.id] = value
         source = "open" if not applies else "config" if config else "person" if has else "recommendation" if rec else "open"
-        out.append(Resolved(q, applies, value if applies else None, source, rec))
+        out.append(Resolved(q, applies, value if applies else None, source, rec, problem))
     return out
 
 
@@ -530,7 +551,11 @@ def validate_answer(q: Question, facts: Facts, value: Any) -> AnswerValue:
     if q.kind == "text":
         if not isinstance(value, str) or len(value) > 2000:
             raise ValueError(f"'{q.id}' takes text of up to 2000 characters.")
-        return value.strip()
+        value = value.strip()
+        problem = q.check(value) if q.check and value else None
+        if problem:
+            raise ValueError(f"'{q.id}': {problem}")
+        return value
     allowed = {o.value for o in q.options(facts)}
     if q.kind == "multi":
         if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
@@ -616,6 +641,16 @@ def conflicts(facts: Facts, rs: list[Resolved]) -> list[str]:
         out.append("Validation is set to start real runs, but real runs are blocked until a data owner approves: choose a read-only depth, or lift the restriction.")
     if a.get("scope.mode") == "selected" and not a.get("scope.pipelines"):
         out.append("The scope is 'selected pipelines' but none is selected.")
+    s = settings_from(facts, rs)
+    if s.pipelines is not None and not s.pipelines:
+        out.append("Every pipeline in scope is held back (activities with no Fabric equivalent), so there is nothing to convert: change the scope, "
+                   "or choose 'Deploy the rest and flag them'.")
+    chosen = set(s.pipelines if s.pipelines is not None else facts.pipelines)
+    for caller in sorted(chosen):
+        missing = [c for c in facts.calls.get(caller, []) if c not in chosen]
+        if missing:
+            out.append(f"{caller} invokes {', '.join(missing[:3])}, which the scope leaves out: deployment refuses a pipeline whose child "
+                       "is neither selected nor already in the workspace.")
     if a.get("scope.mode") == "pilot" and not facts.pipeline_waves:
         out.append("A pilot needs the dependency waves: run 'Resolve dependencies' on the Review step first.")
     if a.get("storage.route") == "lakehouse" and not facts.shortcuts_planned:

@@ -568,7 +568,7 @@ def _fill_brief(w: World, who: str = "ann") -> dict:
     w.call(who, "POST", f"{B}/accept")
     for _ in range(5):
         v = w.call(who, "GET", B).json()
-        open_ = {q["id"]: ("Owner, platform lead" if q["kind"] == "text" else [q["options"][0]["value"]] if q["kind"] == "multi" else q["options"][0]["value"])
+        open_ = {q["id"]: (("LH_Test" if q["id"] == "storage.lakehouse" else "Owner, platform lead") if q["kind"] == "text" else [q["options"][0]["value"]] if q["kind"] == "multi" else q["options"][0]["value"])
                  for q in v["questions"] if q["required"] and q["source"] == "open"}
         if not open_:
             return v
@@ -659,3 +659,60 @@ def test_real_runs_are_refused_when_the_approved_brief_does_not_allow_them(world
     fp = world.call("ann", "POST", f"{B}/submit").json()["fingerprint"]
     world.call("abe", "POST", f"{B}/approve", json_body={"fingerprint": fp})
     assert stage(world, "oscar", "verify", {"workspace_id": DEMO_WS, "run": True, "confirm": True, "pipelines": [name]}).status_code == 202
+
+
+def test_a_key_may_repeat_only_the_request_it_was_first_used_for(world):
+    prepare(world, through="discovery")
+    h = {"Idempotency-Key": "reused-key-000001"}
+    first = stage(world, "ann", "dependencies", headers=h)
+    world.wait("ann", first.json())
+    again = stage(world, "ann", "dependencies", headers=h)  # the same request: the same job
+    assert again.status_code == 202 and again.json()["id"] == first.json()["id"]
+    other = stage(world, "ann", "convert", headers=h)  # a different request under the same key is refused, never answered with the old job
+    assert other.status_code == 422 and "different request" in other.json()["error"]
+    other_body = stage(world, "ann", "dependencies", {"pipelines": ["PL_X"]}, headers=h)
+    assert other_body.status_code == 422
+    jobs = [j for j in world.call("ann", "GET", "/jobs").json()["jobs"] if j["kind"] == "convert"]
+    assert jobs == []  # and nothing was started
+
+
+def test_deploy_and_real_runs_are_refused_for_another_workspace_than_the_brief_was_agreed_for(world):
+    name = _deployed(world)
+    _fill_brief(world, "ann")
+    world.call("ann", "PUT", f"{B}/answers", json_body={"answers": {"validation.depth": "run"}})
+    fp = world.call("ann", "POST", f"{B}/submit").json()["fingerprint"]
+    world.call("abe", "POST", f"{B}/approve", json_body={"fingerprint": fp})
+    other = "99999999-9999-9999-9999-999999999999"
+    world.users.get("oscar")  # oscar's grants are open (ALL): the brief is what stops this, not a grant
+    for body in ({"workspace_id": other, "confirm": True, "allow_unbound": True}, ):
+        r = stage(world, "oscar", "deploy_apply", body)
+        assert r.status_code == 409 and "different Fabric workspace" in r.json()["error"] and other not in r.json()["error"]
+    r = stage(world, "oscar", "verify", {"workspace_id": other, "run": True, "confirm": True, "pipelines": [name]})
+    assert r.status_code == 409 and "different Fabric workspace" in r.json()["error"]
+    # a dry run reads only: it is never refused for this
+    assert stage(world, "oscar", "deploy_dry_run", {"workspace_id": other, "allow_unbound": True}).status_code in (202, 403, 409)
+    v = world.call("oscar", "GET", B).json()
+    assert v["state"] == "approved" and not PATH_RE.search(json.dumps(v)) and DEMO_WS not in json.dumps(v)
+
+
+def test_confirmed_steps_are_kept_on_the_server_per_project_and_only_known_steps(world):
+    prepare(world, through="discovery")
+    J = f"{P}/journey"
+    assert world.call("vic", "GET", J).json() == {"confirmed": []}
+    assert world.call("vic", "PUT", J, json_body={"steps": ["discover"]}).status_code == 403  # a viewer reads, never confirms
+    assert world.call("ann", "PUT", J, json_body={"steps": ["review", "discover"]}).json() == {"confirmed": ["discover", "review"]}
+    assert world.call("ann", "PUT", J, json_body={"steps": ["bogus"]}).status_code == 422
+    assert world.call("oscar", "GET", J).json() == {"confirmed": ["discover", "review"]}  # another person, another browser: the same walk-through
+    assert world.call("bob", "GET", J).status_code == 404 and world.call(None, "GET", J).status_code == 401
+    assert world.call("ann", "POST", f"{J}/reset", json_body={"steps": ["review"]}).json() == {"confirmed": ["discover"]}
+    assert {"journey.confirm", "journey.reset"} <= {e["action"] for e in world.audit.read(500)}
+
+
+def test_a_brief_that_holds_back_every_pipeline_never_becomes_convert_everything(world, monkeypatch):
+    prepare(world, through="semantic")
+    monkeypatch.setattr("adf2fabric.api.stages._approved_brief", lambda c, s, pid, log: {"pipelines": [], "version": 1, "lakehouse": None})
+    j = run(world, "ann", "convert")
+    assert j["state"] == "failed" and "no pipeline to convert" in j["error"]
+    assert not world.demo.store.has_conversion("demo-estate")  # nothing was converted
+    j = run(world, "ann", "convert", {"pipelines": [next(p["name"] for p in world.call("vic", "GET", f"{P}/inventory").json()["pipelines"])]})
+    assert j["state"] == "succeeded"  # an explicit choice by the person still works

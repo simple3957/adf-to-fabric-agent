@@ -9,7 +9,7 @@ import panels
 import panels_consult
 import panels_ext
 import theme
-from components import call, client
+from components import active_jobs, call, client, watch_job
 from journey import (STEPS, connect_facts, consult_facts, convert_facts, deploy_facts, discover_facts, done_count, first_open, plan_facts, report_facts, review_facts,
                      statuses, validate_facts)
 
@@ -47,11 +47,25 @@ facts = {"discover": discover_facts(project, found), "review": review_facts(inve
          "plan": plan_facts(provisioning), "convert": convert_facts(conversion), "validate": validate_facts(validation),
          "deploy": deploy_facts(deployed), "report": report_facts(report)}
 confirmed: set = st.session_state.setdefault("confirmed", {}).setdefault(pid, set())
+if pid not in st.session_state.setdefault("confirmed_loaded", set()):  # confirmations are kept on the server: a reload or a new tab keeps the walk-through
+    st.session_state["confirmed_loaded"].add(pid)
+    confirmed |= set(call(api.journey, pid) or [])
 steps = statuses(facts, confirmed)
 by_key = {s.step.key: s for s in steps}
 selected = st.session_state.get("step", {}).get(pid)
 if selected not in by_key or by_key[selected].locked:
     selected = first_open(steps)
+
+# ---- a job already running for this project (started before a reload, in another tab, or past the page's own wait) ----------------
+running = active_jobs(pid) if discovered else []
+if running:
+    job = running[0]
+    with st.container(key="running-job"):
+        st.warning(f"A '{job['kind']}' job is running for this project ({job.get('elapsed', 0):g}s so far). "
+                   "Starting another is refused until it finishes. It keeps running if you close this page.")
+        if st.button("Watch its progress", key="watch-job", type="primary"):
+            watch_job(job, f"{job['kind']}")
+            st.rerun()
 
 # ---- layout: stepper on the left, the open step on the right ---------------------------------------------------------------
 done = done_count(steps)
@@ -105,6 +119,7 @@ with right:
             if cur.step.key in ("convert", "deploy"):
                 st.write("It also forgets this session's results for the step. Files in the project and anything already created in Fabric are kept.")
             if st.button("Reset", type="primary", key="reset-go"):
+                call(api.journey_reset, pid, [s.step.key for s in steps[cur.index:]])
                 for s in steps[cur.index:]:
                     confirmed.discard(s.step.key)
                 if cur.step.key == "convert":
@@ -163,6 +178,7 @@ with right:
             if action and c.button(action, key="go-next", type="primary", disabled=not enabled, help=None if enabled else f.waiting,
                                    width="stretch"):
                 confirmed.add(cur.step.key)
+                call(api.journey_confirm, pid, [cur.step.key])
                 if nxt:
                     st.session_state.setdefault("step", {})[pid] = nxt.step.key
                 st.rerun()

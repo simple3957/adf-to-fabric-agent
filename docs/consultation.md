@@ -137,6 +137,16 @@ before anything moves (`agent/consultation/brief.py`, `brief_record.py`). Ideas 
   of the answers they read. Changing an answer, or a change in what discovery found, puts it back to draft; the run then
   stops following it until it is approved again. Carrying out the brief (converting its subset) never takes its approval away.
 
+Guards found by testing the consultation against misuse:
+
+* The brief is bound to the Fabric workspace it was agreed for (recorded with it, never shown by id). Deploying, or starting real
+  runs, in another workspace is refused until the brief is reviewed and approved for that workspace ("Use the workspace chosen now").
+* A stored answer is validated again each time it is read (a rule that tightened, a hand-edited file): an invalid one is ignored,
+  its question is open again, and the reason is shown. A lakehouse name must be a name (letters, digits, `_ . -`), not a sentence.
+* Holding back every pipeline is a conflict, and an empty scope never turns into "convert everything". A scope that leaves out a
+  pipeline the chosen one invokes is a conflict too (deployment would refuse the caller).
+* Saving a topic never accepts a recommendation nobody chose: recommendations are shown, not pre-selected.
+
 What the approved brief drives today:
 
 | Answer | Effect |

@@ -127,7 +127,7 @@ def approve_brief(api, pid="demo-estate"):
     api.brief_accept(pid)
     for _ in range(5):
         v = api.brief(pid)
-        open_ = {q["id"]: ("Test owner, platform lead" if q["kind"] == "text" else [q["options"][0]["value"]] if q["kind"] == "multi"
+        open_ = {q["id"]: (("LH_Test" if q["id"] == "storage.lakehouse" else "Test owner, platform lead") if q["kind"] == "text" else [q["options"][0]["value"]] if q["kind"] == "multi"
                            else q["options"][0]["value"]) for q in v["questions"] if q["required"] and q["source"] == "open"}
         if not open_:
             break

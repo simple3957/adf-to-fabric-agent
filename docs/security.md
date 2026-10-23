@@ -116,7 +116,7 @@ These are exposed over HTTP, each with its own permission (the role table in `te
   scrubbed of paths and bearer tokens and bounded, and job results and errors leave the server the same way. Provisioning steps are shown by an
   opaque `ref` and the workspace by its display name, never by resource id. Redaction is server-side; the UI never masks.
 * `Idempotency-Key` (8-64 chars `[A-Za-z0-9_-]`) makes a repeated submission return the first job (`Idempotent-Replay: true`) for 15 minutes,
-  per person. Without it, a second job while one runs on the project is refused (409).
+  per person and only for the exact same project, action and request: the same key for anything else is a 422. Without it, a second job while one runs on the project is refused (409).
 * `ADF2FABRIC_ENV=production` refuses demo mode (403) and builds no stand-in Fabric: nothing canned can pass for a real result.
 * The UI hides buttons the signed-in person's role cannot use. That is a convenience; the API enforces every permission itself.
 

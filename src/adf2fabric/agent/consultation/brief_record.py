@@ -7,6 +7,7 @@ stops treating it as approved until it is submitted and approved again. Approval
 
 from __future__ import annotations
 
+import hashlib
 import json
 from datetime import datetime, timezone
 from pathlib import Path
@@ -42,12 +43,36 @@ def load(store: Any, pid: str) -> dict[str, Any]:
 def _config(data: dict, destination: Optional[dict], capture: bool) -> dict:
     """The configuration the brief reads (the Fabric workspace), kept WITH the brief so it says the same to everyone who looks at it.
 
-    Only a person who changes the brief records their session's destination; viewers and approvers read what was recorded."""
+    Only a person who changes the brief records their session's destination; viewers and approvers read what was recorded.
+    The workspace id stays in the record (it is compared at deploy time) and is never part of a view."""
     dest = destination or {}
-    ws = dest.get("workspace_name") or dest.get("workspace_id")
+    ws = dest.get("workspace_id") or dest.get("workspace_name")
     if capture and ws and data["config"].get("workspace") != ws:
         data["config"]["workspace"] = ws
-    return {"workspace_name": data["config"].get("workspace")} if data["config"].get("workspace") else {}
+    return {"workspace_id": data["config"].get("workspace")} if data["config"].get("workspace") else {}
+
+
+def _stamp(fp: str, data: dict) -> str:
+    """The answers' fingerprint AND the workspace the brief was agreed for: another workspace is another brief."""
+    return hashlib.sha256(f"{fp}|{data['config'].get('workspace') or ''}".encode("utf-8")).hexdigest()[:16]
+
+
+def workspace_changed(data: dict, destination: Optional[dict]) -> bool:
+    now = (destination or {}).get("workspace_id") or (destination or {}).get("workspace_name")
+    then = data["config"].get("workspace")
+    return bool(now and then and str(now).lower() != str(then).lower())
+
+
+def workspace_mismatch(store: Any, pid: str, target_workspace: Optional[str]) -> Optional[str]:
+    """When an approved, current brief was agreed for another workspace than ``target_workspace``, why that must stop; else None."""
+    data = load(store, pid)
+    agreed = data["config"].get("workspace")
+    if not (target_workspace and agreed) or str(target_workspace).lower() == str(agreed).lower():
+        return None
+    if approved_settings(store, pid) is None:
+        return None
+    return ("The approved consultation brief was agreed for a different Fabric workspace than the one chosen now. Review the brief for this "
+            "workspace and approve it again (Consult step: 'Use the workspace chosen now'), or choose the workspace it was agreed for.")
 
 
 def save(store: Any, pid: str, data: dict[str, Any]) -> None:
@@ -68,7 +93,7 @@ def view(store: Any, pid: str, destination: Optional[dict] = None) -> dict[str, 
     data = load(store, pid)
     facts = B.read_facts(store, pid, _config(data, destination, capture=False))
     rs = B.resolve(facts, data["answers"])
-    fp = B.fingerprint(rs)
+    fp = _stamp(B.fingerprint(rs), data)
     latest = data["versions"][-1] if data["versions"] else None
     current = latest if latest and latest.get("fingerprint") == fp else None
     state = "draft" if not current else "approved" if current.get("approved_at") else "submitted"
@@ -79,13 +104,14 @@ def view(store: Any, pid: str, destination: Optional[dict] = None) -> dict[str, 
             "id": r.q.id, "topic": r.q.topic, "text": r.q.text, "help": r.q.help, "kind": r.q.kind, "required": r.q.required,
             "effect": r.q.effect, "effect_label": B.EFFECT_LABEL[r.q.effect], "applies_to": r.q.applies, "placeholder": r.q.placeholder,
             "options": [{"value": o.value, "label": o.label, "description": o.description} for o in r.q.options(facts)] if r.q.kind != "text" else [],
-            "value": r.value, "label": B.answer_label(r.q, facts, r.value), "source": r.source,
+            "value": r.value, "label": B.answer_label(r.q, facts, r.value), "source": r.source, "problem": r.problem,
             "recommendation": {"value": r.rec.value, "reason": r.rec.reason, "label": B.answer_label(r.q, facts, r.rec.value)} if r.rec else None,
         } for r in rs if r.applies],
         "counts": B.counts(facts, rs),
         "conflicts": B.conflicts(facts, rs),
         "state": state,
         "fingerprint": fp,
+        "workspace_changed": workspace_changed(data, destination),
         "current_version": current,
         "versions": data["versions"],
         "changed_since_approval": current is None and any(v.get("approved_at") for v in data["versions"]),
@@ -119,7 +145,7 @@ def set_answers(store: Any, pid: str, answers: dict[str, Any], by: str = "", des
             data["answers"][qid] = B.validate_answer(q, facts, value)
         except ValueError as exc:
             raise BriefError(str(exc)) from None
-    _note(data, f"{len(answers)} answer(s) changed.", "person", by)
+    _note(data, f"{len(answers)} answer(s) changed." if answers else "Workspace recorded again.", "person", by)
     save(store, pid, data)
     return len(answers)
 

@@ -145,16 +145,30 @@ def run_job(start: Callable[[], dict], label: str, intent_name: Optional[str] = 
         job = start()
     except ApiError as err:
         if err.status == 409:
-            st.warning(err.message + " Wait for it to finish; this page will not start a second one.")
+            st.warning(err.message + " Watch it from the banner at the top of this page; a second one is not started.")
         else:
             show_error(err)
         return None
+    return watch_job(job, label, intent_name)
+
+
+def active_jobs(project_id: str) -> list[dict]:
+    """Jobs of this project still queued or running on the server (they outlive a reload, a closed tab and the 30-minute wait)."""
+    try:
+        return [j for j in client().jobs(project_id) if j.get("state") in ("queued", "running")]
+    except ApiError:
+        return []
+
+
+def watch_job(job: dict, label: str, intent_name: Optional[str] = None) -> Optional[dict]:
+    """Follow a job already started (by this page, an earlier visit or another tab) to its end."""
     with st.status(label, expanded=True) as box:
         try:
             final = client().wait_job(job, on_event=lambda e: st.write(f"`{e['t']:>6}s` {e['message']}"))
         except ApiError as err:
-            box.update(label=f"{label}: still running", state="error")
+            box.update(label=f"{label}: still running on the server", state="error")
             show_error(err)
+            st.info("The job keeps running on the server. Reload this page to watch it again.")
             return None
         if final["state"] == "succeeded":
             box.update(label=f"{label}: done in {final.get('elapsed', 0):g}s", state="complete", expanded=False)

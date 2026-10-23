@@ -147,6 +147,8 @@ def _map_dataset(ds: AdfDataset, ls: Optional[AdfLinkedService], used: list[Use]
         why = _NOT_MAPPED_WHY.get(kind, f"Location type '{loc.get('type')}' is not recognised, so it is not mapped.")
         return DatasetMap(**base, status="needs_decision", reason=why, action="Decide where this data lives in Fabric, then map it by hand.")
     container, c_dyn = _text(loc.get("fileSystem"))
+    if container and not c_dyn:
+        container = container.strip().lower()  # Azure container names are lowercase and case-insensitive: 'Raw' and 'raw' are one container
     folder, f_dyn = _text(loc.get("folderPath"))
     file_, n_dyn = _text(loc.get("fileName"))
     account, url, problem = _account(ls)

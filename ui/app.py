@@ -108,7 +108,7 @@ def top_bar() -> None:
                                help="Sample data and canned Azure/Fabric, no sign-in needed." if demo_ok else "Demo data is switched off in production mode.")
         if demo_ok and demo != (mode == "demo"):
             call(api.set_mode, "demo" if demo else "live")
-            for k in ("project_id", "conversion", "deploy", "confirmed", "step"):
+            for k in ("project_id", "conversion", "deploy", "confirmed", "confirmed_loaded", "step"):
                 st.session_state.pop(k, None)
             st.rerun()
     st.session_state.mode = mode

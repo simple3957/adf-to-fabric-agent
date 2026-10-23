@@ -104,6 +104,10 @@ class ProvisionPlanBody(_In):
     provision_identity: bool = False
 
 
+class JourneyBody(_In):
+    steps: list[str] = Field(max_length=20)  # step keys to confirm (PUT) or to forget (DELETE-style reset)
+
+
 class BriefAnswersBody(_In):
     answers: dict[str, Any] = Field(max_length=100)  # question id -> answer (None clears it)
 

@@ -724,20 +724,29 @@ def create_app(settings: Optional[Settings] = None, live: Optional[Container] = 
             raise HTTPException(400, "Idempotency-Key must be 8-64 letters, digits, '-' or '_'.")
         return (ctx.key, raw)
 
-    def _idem_replay(k: Optional[tuple[str, str]]) -> Optional[JSONResponse]:
+    def _idem_sig(pid: str, what: str, body: Any) -> str:
+        """What a key stands for: the project, the action and the exact request. A key may repeat only THAT request."""
+        import hashlib
+
+        payload = body.model_dump() if hasattr(body, "model_dump") else body
+        return hashlib.sha256(json.dumps([pid, what, payload], sort_keys=True, default=str).encode("utf-8")).hexdigest()[:24]
+
+    def _idem_replay(k: Optional[tuple[str, str]], sig: str = "") -> Optional[JSONResponse]:
         import time as _t
 
         now = _t.time()
-        for old in [x for x, (at, _b) in app.state.idem.items() if now - at > IDEMPOTENCY_TTL]:
+        for old in [x for x, v in app.state.idem.items() if now - v[0] > IDEMPOTENCY_TTL]:
             del app.state.idem[old]
         hit = app.state.idem.get(k) if k else None
+        if hit and hit[2] != sig:  # the same key for a different request would hand back a job the caller did not ask for
+            raise HTTPException(422, "This Idempotency-Key was already used for a different request. Use a new key for a new request.")
         return JSONResponse(status_code=202, content=hit[1], headers={"Idempotent-Replay": "true"}) if hit else None
 
-    def _idem_remember(k: Optional[tuple[str, str]], body: dict) -> dict:
+    def _idem_remember(k: Optional[tuple[str, str]], body: dict, sig: str = "") -> dict:
         import time as _t
 
         if k:
-            app.state.idem[k] = (_t.time(), body)
+            app.state.idem[k] = (_t.time(), body, sig)
         return body
 
     @app.post("/projects/{pid}/stages/{stage}", status_code=202)
@@ -762,6 +771,10 @@ def create_app(settings: Optional[Settings] = None, live: Optional[Container] = 
         elif body.workspace_id:
             guards.valid_guid(body.workspace_id, "workspace id")
             ctx.grant("workspaces", body.workspace_id, "workspace")
+        if stage == "deploy_apply" or (stage == "verify" and body.run):
+            drift = brief_record.workspace_mismatch(ctx.c.store, slug, ws)  # an approval is for the workspace it was agreed for
+            if drift:
+                raise HTTPException(409, drift)
         if stage == "deploy_apply":
             if not body.confirm:
                 raise HTTPException(422, "This changes Fabric. Confirm it (confirm: true) after reading the dry run.")
@@ -798,7 +811,8 @@ def create_app(settings: Optional[Settings] = None, live: Optional[Container] = 
             if agreed is not None and not agreed.get("allow_real_runs"):
                 raise HTTPException(409, "The approved consultation brief does not allow real runs (validation depth, or data restrictions). Change the brief to allow them.")
         key = _idem_key(ctx, request)
-        replay = _idem_replay(key)
+        sig = _idem_sig(slug, f"stage.{stage}", body)
+        replay = _idem_replay(key, sig)
         if replay is not None:
             return replay
         opts = body.model_dump()
@@ -807,7 +821,7 @@ def create_app(settings: Optional[Settings] = None, live: Optional[Container] = 
         ctx.audit(f"stage.{stage}", "requested", resource="project", resource_id=slug, workspace=ws or "")
         job = ctx.c.jobs.submit(stage, slug, lambda log: run_stage(ctx.c, ctx.session, slug, stage, log, opts),
                                 org=ctx.principal.org, owner=ctx.principal.id).public()
-        return _idem_remember(key, job)
+        return _idem_remember(key, job, sig)
 
     def _pub_job(j, since: int = 0) -> dict:
         """A job as the browser sees it: the result passes through the same redaction as every other view (paths, secrets and code are dropped)."""
@@ -859,6 +873,48 @@ def create_app(settings: Optional[Settings] = None, live: Optional[Container] = 
     from adf2fabric.agent.provisioning import service as prov
     from adf2fabric.agent.provisioning.executor import ApplyRefused
     from adf2fabric.project.provisioning import ProvisioningApproval, ProvisioningPlan, ProvisioningRun, TargetSpec
+
+    # ---- journey: which steps a person confirmed, kept per project so a page reload does not reset the walk-through ------------
+    JOURNEY_STEPS = ("discover", "review", "consult", "connect", "plan", "convert", "validate", "deploy", "report")
+
+    def _journey_file(ctx: Ctx, slug: str) -> Path:
+        return ctx.c.store.project_dir(slug) / "journey.json"
+
+    def _journey_read(ctx: Ctx, slug: str) -> list[str]:
+        f = _journey_file(ctx, slug)
+        try:
+            return [s for s in json.loads(f.read_text(encoding="utf-8")).get("confirmed", []) if s in JOURNEY_STEPS] if f.exists() else []
+        except (OSError, ValueError):
+            return []
+
+    def _journey_write(ctx: Ctx, slug: str, steps: list[str]) -> None:
+        f = _journey_file(ctx, slug)
+        f.parent.mkdir(parents=True, exist_ok=True)
+        tmp = f.with_suffix(".tmp")
+        tmp.write_text(json.dumps({"confirmed": [s for s in JOURNEY_STEPS if s in steps]}), encoding="utf-8")
+        tmp.replace(f)
+
+    @app.get("/projects/{pid}/journey")
+    def journey_get(pid: str, ctx: Ctx = Depends(), _: Principal = need(P.projects_view)):
+        return {"confirmed": _journey_read(ctx, ctx.project(pid))}
+
+    @app.put("/projects/{pid}/journey")
+    def journey_confirm(pid: str, body: S.JourneyBody, ctx: Ctx = Depends(), _: Principal = need(P.plans_generate)):
+        slug = ctx.project(pid)
+        bad = [s for s in body.steps if s not in JOURNEY_STEPS]
+        if bad:
+            raise HTTPException(422, f"Unknown step(s): {', '.join(bad[:3])}.")
+        merged = sorted(set(_journey_read(ctx, slug)) | set(body.steps))
+        _journey_write(ctx, slug, merged)
+        ctx.audit("journey.confirm", "ok", resource="project", resource_id=slug, steps=",".join(body.steps))
+        return {"confirmed": _journey_read(ctx, slug)}
+
+    @app.post("/projects/{pid}/journey/reset")
+    def journey_reset(pid: str, body: S.JourneyBody, ctx: Ctx = Depends(), _: Principal = need(P.plans_generate)):
+        slug = ctx.project(pid)
+        _journey_write(ctx, slug, [s for s in _journey_read(ctx, slug) if s not in set(body.steps)])
+        ctx.audit("journey.reset", "ok", resource="project", resource_id=slug, steps=",".join(body.steps))
+        return {"confirmed": _journey_read(ctx, slug)}
 
     # ---- consultation brief: how the migration should happen, agreed after discovery ----------------------------------------
     def _brief_project(ctx: Ctx, pid: str) -> str:
@@ -1037,7 +1093,8 @@ def create_app(settings: Optional[Settings] = None, live: Optional[Container] = 
             if not (run and run.dry_run and run.plan_hash == plan.plan_hash and run.finished_at is not None):
                 raise HTTPException(409, "Run the dry run of this plan first.")
         key = _idem_key(ctx, request)
-        replay = _idem_replay(key)
+        sig = _idem_sig(slug, "provisioning.apply", body)
+        replay = _idem_replay(key, sig)
         if replay is not None:
             return replay
         ctx.audit("provisioning.apply", "requested" if body.apply else "dry_run", resource="project", resource_id=slug)
@@ -1054,7 +1111,7 @@ def create_app(settings: Optional[Settings] = None, live: Optional[Container] = 
                     "dry_run": run.dry_run, "failed": failed, "verified": bool(report and report.all_verified)}
 
         return _idem_remember(key, ctx.c.jobs.submit("provision_apply" if body.apply else "provision_dry_run", slug, work, org=ctx.principal.org,
-                                                      owner=ctx.principal.id).public())
+                                                      owner=ctx.principal.id).public(), sig)
 
     @app.post("/projects/{pid}/provisioning/verify", status_code=202)
     def provisioning_verify(pid: str, ctx: Ctx = Depends(), _: Principal = need(P.plans_generate)):

@@ -154,3 +154,9 @@ def test_a_shortcut_name_can_be_chosen_and_bad_choices_are_refused():
                      ({("acctone", "data"): "a/b"}, "cannot be"), ({("acctone", "data"): "a'b"}, "cannot be")):
         with pytest.raises(StorageMapError, match=why):
             build_storage_map(d, names=bad)
+
+
+def test_a_container_written_in_two_cases_is_one_container():
+    m = build_storage_map(disc([ds("A", adls("Raw", "x")), ds("B", adls("raw", "y"))]))
+    assert [s.shortcut for s in m.shortcuts] == ["raw"] and m.shortcuts[0].datasets == 2
+    assert row(m, "A").lakehouse_path == "Files/raw/x"

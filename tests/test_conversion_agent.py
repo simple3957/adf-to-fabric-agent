@@ -356,3 +356,22 @@ def test_the_report_has_a_connector_coverage_section_with_counts(tmp_path):
     assert "## Connector coverage" in text and "can be created in Fabric by this tool" in text
     assert text.index("## Connector coverage") < text.index("## Prerequisites (all pipelines)")
     assert all(x.level in ("created", "manual", "unsupported", "unlisted") for x in r.conversion.connector_coverage)
+
+
+def test_a_path_too_long_for_windows_is_explained_not_a_raw_file_error(tmp_path, monkeypatch):
+    from adf2fabric.project.store import ProjectPathError, ProjectStore
+
+    store = ProjectStore(tmp_path / ("d" * 120) / ("e" * 120))
+    real = type(tmp_path).write_text
+
+    def boom(self, *a, **k):
+        err = OSError(2, "No such file or directory")
+        err.winerror = 3
+        raise err
+
+    monkeypatch.setattr(type(tmp_path), "write_text", boom)
+    monkeypatch.setattr(type(tmp_path), "mkdir", lambda self, *a, **k: None)
+    with pytest.raises(ProjectPathError) as exc:
+        store.write_conversion_file("p", "pipelines/PL_X.DataPipeline/pipeline-content.json", "{}")
+    assert "260" in str(exc.value) and "projects_root" in str(exc.value) and str(tmp_path) not in str(exc.value)
+    monkeypatch.setattr(type(tmp_path), "write_text", real)

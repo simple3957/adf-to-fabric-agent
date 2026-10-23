@@ -230,6 +230,15 @@ class ApiClient:
     def report(self, pid: str) -> dict:
         return self._get(f"/projects/{pid}/report")
 
+    def journey(self, pid: str) -> list[str]:
+        return self._get(f"/projects/{pid}/journey")["confirmed"]
+
+    def journey_confirm(self, pid: str, steps: Iterable[str]) -> list[str]:
+        return self._put(f"/projects/{pid}/journey", {"steps": list(steps)})["confirmed"]
+
+    def journey_reset(self, pid: str, steps: Iterable[str]) -> list[str]:
+        return self._post(f"/projects/{pid}/journey/reset", {"steps": list(steps)})["confirmed"]
+
     # ---- consultation brief -------------------------------------------------------------------------------------------
     def brief(self, pid: str) -> dict:
         return self._get(f"/projects/{pid}/brief")

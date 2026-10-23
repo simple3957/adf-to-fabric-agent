@@ -222,6 +222,9 @@ def run_stage(c: Container, session: Session, pid: str, stage: str, log: Log, op
         res = c.store.conversion_dir(pid) / "resolutions.json"
         brief = _approved_brief(c, session, pid, log)
         pipelines = options.get("pipelines") or (brief or {}).get("pipelines") or []
+        if brief and not options.get("pipelines") and brief.get("pipelines") is not None and not brief["pipelines"]:
+            # an empty list means "every pipeline" to the converter: a brief that holds them all back must never turn into that
+            raise StageError("The approved brief leaves no pipeline to convert.", ["Change the scope or the held-back pipelines in the consultation."])
         lakehouse = (brief or {}).get("lakehouse")
         if lakehouse:  # repointing reads the storage map; the brief's choice brings it up to date first (read-only)
             _write_storage_map(c, pid, lakehouse)

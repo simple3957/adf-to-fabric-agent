@@ -26,6 +26,14 @@ steps before it are confirmed and complete.
 (generated, nothing more claimed), `deployed` (a real deploy is on record), `runtime_validated` (a recorded run matched its baseline and
 completed). A state moves only on evidence; a dry run is not a deployment and a differing run is not validation.
 
+## Things that go wrong in use, and what the UI does
+
+* **Reload, new tab, or a long job.** Step confirmations are kept on the server per project, and the Migration page shows a job that is
+  already running (with a button to watch it), so nothing is lost and a second job is not started by mistake. A job outlives the
+  page's own 30-minute wait.
+* **Text from another person** (notes, the owner's name, free-text answers) is shown as text, never as a link, image or HTML.
+* **A deploy for another workspace than the approved brief** is refused with a banner and a one-click way to review it again.
+
 ## Safety rules
 
 * Dry runs are labelled "nothing is changed"; real runs are labelled "APPLIED". Real provisioning needs a dry run, then typing `APPLY`;

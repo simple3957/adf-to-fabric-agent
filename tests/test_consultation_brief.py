@@ -233,3 +233,89 @@ def test_the_record_keeps_notes_and_versions_and_holds_no_secrets(rec):
         BR.add_note(rec, "p", "   ")
     BR.reset(rec, "p")
     assert BR.load(rec, "p")["answers"] == {} and BR.load(rec, "p")["versions"]  # history kept
+
+
+def _approve_for(rec, ws):
+    BR.accept_recommendations(rec, "p", destination={"workspace_id": ws})
+    BR.set_answers(rec, "p", {"target.workspace": "existing", "target.capacity": "assigned", "storage.lakehouse": "LH", "context.owner": "Ann, lead"}, destination={"workspace_id": ws})
+    BR.submit(rec, "p", destination={"workspace_id": ws})
+    BR.approve(rec, "p", BR.view(rec, "p")["fingerprint"], "abe")
+
+
+WS_A, WS_B = "11111111-1111-1111-1111-111111111111", "22222222-2222-2222-2222-222222222222"
+
+
+def test_an_approval_is_for_the_workspace_it_was_agreed_for(rec):
+    _approve_for(rec, WS_A)
+    assert BR.workspace_mismatch(rec, "p", WS_A) is None and BR.workspace_mismatch(rec, "p", WS_A.upper()) is None
+    msg = BR.workspace_mismatch(rec, "p", WS_B)
+    assert msg and "different Fabric workspace" in msg and WS_A not in msg and WS_B not in msg  # no id in what a person reads
+    v = BR.view(rec, "p", {"workspace_id": WS_B})
+    assert v["workspace_changed"] is True and v["state"] == "approved"  # the approval stands, the deploy is what stops
+    assert BR.view(rec, "p", {"workspace_id": WS_A})["workspace_changed"] is False
+    assert BR.view(rec, "p")["workspace_changed"] is False  # a viewer with no destination is told nothing false
+
+
+def test_recording_the_new_workspace_returns_the_brief_to_draft_until_approved_again(rec):
+    _approve_for(rec, WS_A)
+    BR.set_answers(rec, "p", {}, destination={"workspace_id": WS_B})  # "Use the workspace chosen now"
+    v = BR.view(rec, "p", {"workspace_id": WS_B})
+    assert v["state"] == "draft" and v["workspace_changed"] is False and v["changed_since_approval"] is True
+    assert BR.workspace_mismatch(rec, "p", WS_B) is None  # not approved, so nothing is claimed about it
+    BR.submit(rec, "p", destination={"workspace_id": WS_B})
+    BR.approve(rec, "p", BR.view(rec, "p")["fingerprint"], "abe")
+    assert BR.workspace_mismatch(rec, "p", WS_B) is None and BR.workspace_mismatch(rec, "p", WS_A)
+
+
+def test_no_workspace_id_reaches_a_view(rec):
+    _approve_for(rec, WS_A)
+    text = json.dumps(BR.view(rec, "p", {"workspace_id": WS_A})) + B.brief_markdown(rec.f, B.resolve(rec.f, {}), "p", 1, "approved")
+    assert WS_A not in text
+
+
+@pytest.mark.parametrize("bad", ["Dana Lee, platform lead", "LH Migration", "a/b", "x" * 257, "lh;drop", "../x", 'q"uote'])
+def test_a_lakehouse_name_must_be_a_name_not_a_sentence(bad):
+    with pytest.raises(ValueError, match="letters, digits"):
+        B.validate_answer(B.QUESTION_BY_ID["storage.lakehouse"], facts(), bad)
+
+
+def test_a_valid_lakehouse_name_is_kept_and_other_free_text_is_not_restricted():
+    f = facts()
+    assert B.validate_answer(B.QUESTION_BY_ID["storage.lakehouse"], f, "  LH_Migration-2  ") == "LH_Migration-2"
+    assert B.validate_answer(B.QUESTION_BY_ID["context.owner"], f, "Dana Lee, platform lead") == "Dana Lee, platform lead"
+
+
+def test_a_stored_answer_that_no_longer_passes_its_rules_is_ignored_and_says_why():
+    f = facts()
+    rs = B.resolve(f, {"storage.route": "lakehouse", "storage.lakehouse": "Dana Lee, platform lead", "scope.mode": "everything"})
+    lh, mode = get(rs, "storage.lakehouse"), get(rs, "scope.mode")
+    assert lh.source == "open" and lh.value is None and "letters, digits" in lh.problem
+    assert mode.source == "recommendation" and "takes one of" in mode.problem  # falls back to the recommendation, not to the bad value
+    assert B.settings_from(f, rs).lakehouse is None  # and the run never sees it
+
+
+def test_a_hand_edited_record_cannot_put_an_invalid_answer_into_the_run(rec):
+    _answer_required(rec)
+    data = BR.load(rec, "p")
+    data["answers"]["storage.lakehouse"] = "bad name, with comma"
+    BR.save(rec, "p", data)
+    v = BR.view(rec, "p")
+    assert next(q for q in v["questions"] if q["id"] == "storage.lakehouse")["problem"]
+    with pytest.raises(BR.BriefError, match="required"):
+        BR.submit(rec, "p")  # the question is open again until someone answers it properly
+
+
+def test_holding_back_every_pipeline_is_a_conflict_not_an_empty_list_that_means_all():
+    f = facts(blocked_activities=3, blocked_pipelines=["PL_A", "PL_B", "PL_C"])
+    rs = B.resolve(f, {"pipelines.unsupported": "hold"})
+    assert B.settings_from(f, rs).pipelines == []  # kept as 'none', never silently 'all'
+    assert any("nothing to convert" in c for c in B.conflicts(f, rs))
+
+
+def test_a_scope_that_leaves_out_a_pipeline_the_chosen_one_calls_is_a_conflict():
+    f = facts(calls={"PL_C": ["PL_A"]})
+    rs = B.resolve(f, {"scope.mode": "selected", "scope.pipelines": ["PL_C"]})
+    msgs = B.conflicts(f, rs)
+    assert any("PL_C invokes PL_A" in m for m in msgs)
+    assert not B.conflicts(f, B.resolve(f, {"scope.mode": "selected", "scope.pipelines": ["PL_C", "PL_A"]}))
+    assert not B.conflicts(f, B.resolve(f, {"scope.mode": "pilot"}))  # the first wave holds the children first

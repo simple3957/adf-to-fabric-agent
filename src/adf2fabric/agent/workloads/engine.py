@@ -641,8 +641,12 @@ def _assess(spec: _Spec, d: AdfSemanticDiscovery, plan: Any, resolver: SourceRes
     for target in sorted(set(deps)):
         entry.required_resources.append(RequiredResource(kind="notebook", name=target, reason="Called by this workload; it must be migrated and deployed too, and referenced by NAME."))
     if an is not None and an.accounts:
-        for acct in an.accounts:
-            entry.required_resources.append(RequiredResource(kind="identity_access", name=acct, reason="The code reads this storage account directly; the identity running the item needs data access (or use a shortcut)."))
+        for acct in dict.fromkeys(an.accounts):
+            direct = [f for f in entry.findings if f.code == "adls_direct_path" and f.construct.lower().endswith("@" + acct)]
+            if direct and all(f.rewritten for f in direct):  # every path to it now goes through a planned OneLake shortcut
+                entry.required_resources.append(RequiredResource(kind="shortcut", name=f"OneLake shortcut to {acct}", reason="The code's paths to this account were routed through the shortcut; it must exist before the notebook runs."))
+            else:
+                entry.required_resources.append(RequiredResource(kind="identity_access", name=acct, reason="The code reads this storage account directly; the identity running the item needs data access (or use a shortcut)."))
     if any(f.code == "metastore_tables" for f in entry.findings):
         entry.required_resources.append(RequiredResource(kind="lakehouse", name="default lakehouse", reason="Metastore tables resolve against the notebook's default lakehouse."))
     if any(f.code in ("mount_point", "dbfs_path", "uc_volume") for f in entry.findings):
