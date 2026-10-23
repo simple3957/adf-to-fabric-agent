@@ -6,10 +6,11 @@ import io
 import streamlit as st
 
 import panels
+import panels_consult
 import panels_ext
 import theme
 from components import call, client
-from journey import (STEPS, connect_facts, convert_facts, deploy_facts, discover_facts, done_count, first_open, plan_facts, report_facts, review_facts,
+from journey import (STEPS, connect_facts, consult_facts, convert_facts, deploy_facts, discover_facts, done_count, first_open, plan_facts, report_facts, review_facts,
                      statuses, validate_facts)
 
 api = client()
@@ -39,8 +40,10 @@ inventory = call(api.inventory, pid) if discovered else None
 provisioning = call(api.provisioning, pid) if discovered else None
 validation = call(api.validation, pid) if discovered else None
 report = call(api.report, pid) if discovered else None
+brief = call(api.brief, pid) if discovered else None
 
-facts = {"discover": discover_facts(project, found), "review": review_facts(inventory), "connect": connect_facts(cards),
+facts = {"discover": discover_facts(project, found), "review": review_facts(inventory), "consult": consult_facts(brief),
+         "connect": connect_facts(cards),
          "plan": plan_facts(provisioning), "convert": convert_facts(conversion), "validate": validate_facts(validation),
          "deploy": deploy_facts(deployed), "report": report_facts(report)}
 confirmed: set = st.session_state.setdefault("confirmed", {}).setdefault(pid, set())
@@ -114,6 +117,8 @@ with right:
             panels.discover(api, pid, project, found)
         elif selected == "review":
             panels_ext.review(api, pid, inventory)
+        elif selected == "consult":
+            panels_consult.consult(api, pid, brief)
         elif selected == "connect":
             panels.connect(api, pid, cards, dest.get("workspace_id"))
         elif selected == "plan":

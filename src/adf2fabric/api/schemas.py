@@ -104,6 +104,22 @@ class ProvisionPlanBody(_In):
     provision_identity: bool = False
 
 
+class BriefAnswersBody(_In):
+    answers: dict[str, Any] = Field(max_length=100)  # question id -> answer (None clears it)
+
+
+class BriefApproveBody(_In):
+    fingerprint: str = Field(max_length=64)  # the answers the approver read: a brief that changed since is refused
+
+
+class BriefImportBody(_In):
+    questionnaire: dict[str, Any]
+
+
+class BriefNoteBody(_In):
+    text: str = Field(max_length=2000)
+
+
 class ProvisionApproveBody(_In):
     plan_ref: str = Field(max_length=64)  # the plan the person reviewed: an approval of a different plan is refused
     steps: Optional[list[str]] = Field(default=None, max_length=200)  # None = every step that can be approved

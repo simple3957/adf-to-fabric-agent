@@ -122,6 +122,21 @@ def test_setup_without_project_shows_launch_bar_disabled(api):
     assert start and start[0].disabled
 
 
+def approve_brief(api, pid="demo-estate"):
+    """Answer what the consultation needs (recommendations, then the first option of any open required question), submit, approve."""
+    api.brief_accept(pid)
+    for _ in range(5):
+        v = api.brief(pid)
+        open_ = {q["id"]: ("Test owner, platform lead" if q["kind"] == "text" else [q["options"][0]["value"]] if q["kind"] == "multi"
+                           else q["options"][0]["value"]) for q in v["questions"] if q["required"] and q["source"] == "open"}
+        if not open_:
+            break
+        api.brief_answers(pid, open_)
+        api.brief_accept(pid)
+    v = api.brief_submit(pid)
+    return api.brief_approve(pid, v["fingerprint"])
+
+
 def test_discover_then_confirm_opens_connect(api):
     at = _app(api, project_id="demo-estate")
     at.switch_page("views/migration.py").run()
@@ -132,7 +147,12 @@ def test_discover_then_confirm_opens_connect(api):
     nxt.click().run()
     assert "discover" in at.session_state["confirmed"]["demo-estate"]
     assert at.session_state["step"]["demo-estate"] == "review"
-    at.button(key="go-next").click().run()  # the review is read, then Connect opens
+    at.button(key="go-next").click().run()  # the review is read, then the consultation opens
+    assert at.session_state["step"]["demo-estate"] == "consult"
+    assert at.button(key="go-next").disabled  # not until the brief is approved
+    assert approve_brief(api)["state"] == "approved"
+    at.run()
+    at.button(key="go-next").click().run()
     assert at.session_state["step"]["demo-estate"] == "connect"
     assert not at.button(key="open-discover").disabled  # done steps can be reopened
     assert at.button(key="open-convert").disabled  # still locked until Connect and Plan are confirmed
@@ -259,8 +279,10 @@ def test_the_connect_step_shows_one_editor_not_one_per_linked_service(api):
     at = _app(api, project_id="demo-estate")
     at.switch_page("views/migration.py").run()
     at.button(key="run-discover").click().run()
-    at.button(key="go-next").click().run()
-    at.button(key="go-next").click().run()  # discover -> review -> connect
+    approve_brief(api)
+    at.run()
+    for _ in range(3):  # discover -> review -> consult -> connect
+        at.button(key="go-next").click().run()
     assert at.session_state["step"]["demo-estate"] == "connect"
     assert len(at.dataframe) >= 1 and not at.exception, at.exception
     forms = [k for k in (s.key for s in at.selectbox) if k and k.startswith("m-")]
@@ -281,8 +303,10 @@ def test_the_editor_offers_to_skip_and_does_not_force_a_connection(api):
     at = _app(api, project_id="demo-estate")
     at.switch_page("views/migration.py").run()
     at.button(key="run-discover").click().run()
-    at.button(key="go-next").click().run()
-    at.button(key="go-next").click().run()  # discover -> review -> connect
+    approve_brief(api)
+    at.run()
+    for _ in range(3):  # discover -> review -> consult -> connect
+        at.button(key="go-next").click().run()
     skip = [b for b in at.button if b.key and b.key.startswith("skip-")]
     assert len(skip) == 1 and not at.exception, at.exception
     skip[0].click().run()
@@ -290,7 +314,9 @@ def test_the_editor_offers_to_skip_and_does_not_force_a_connection(api):
 
 
 def test_creating_connections_needs_a_preview_first(api):
-    at = _app(api, project_id="demo-estate", confirmed={"demo-estate": {"discover", "review"}}, step={"demo-estate": "connect"})
+    api.set_mode("demo")
+    approve_brief(api)  # Connect opens only after an approved consultation brief
+    at = _app(api, project_id="demo-estate", confirmed={"demo-estate": {"discover", "review", "consult"}}, step={"demo-estate": "connect"})
     at.switch_page("views/migration.py").run()
     at.button(key="run-discover").click().run() if [b for b in at.button if b.key == "run-discover"] else None
     go = [b for b in at.button if b.key == "apply-go"]
@@ -335,11 +361,12 @@ def test_forgetting_by_prefix_leaves_other_keys():
 
 
 def test_journey_rules():
-    f = {"discover": journey.StepFacts(complete=True, metric="x"), "review": journey.StepFacts(complete=True), "connect": journey.StepFacts(attention="1 need attention")}
+    f = {"discover": journey.StepFacts(complete=True, metric="x"), "review": journey.StepFacts(complete=True), "consult": journey.StepFacts(complete=True),
+         "connect": journey.StepFacts(attention="1 need attention")}
     s = journey.statuses(f, set())
-    assert [x.label for x in s] == ["Ready to confirm"] + ["Locked"] * 7
-    s = journey.statuses(f, {"discover", "review"})
-    assert [x.label for x in s][:3] == ["Done", "Done", "Needs attention"] and journey.first_open(s) == "connect"
+    assert [x.label for x in s] == ["Ready to confirm"] + ["Locked"] * 8
+    s = journey.statuses(f, {"discover", "review", "consult"})
+    assert [x.label for x in s][:4] == ["Done", "Done", "Done", "Needs attention"] and journey.first_open(s) == "connect"
     s = journey.statuses({"discover": journey.StepFacts()}, {"discover"})  # confirmed, but results gone
     assert s[0].label == "Run again" and s[1].locked
     cards = [{"state": "connection_tested"}, {"state": "manual_action_required"}, {"state": "resource_discovered"}]

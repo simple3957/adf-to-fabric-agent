@@ -113,3 +113,44 @@ After the readiness decision is recorded, Consultation **hard-stops**. It does
 not read `source/`, does not inspect ADF JSON, does not enumerate ADF artifacts /
 SQL schemas or tables / ADLS containers, directories or files, and does not
 create Fabric artifacts. Those belong to Discovery and later stages.
+
+
+## The migration consultation (after discovery): how the migration should happen
+
+Readiness (above) answers "can we start?". The migration consultation answers "how should it happen?", after discovery and
+before anything moves (`agent/consultation/brief.py`, `brief_record.py`). Ideas taken from the Synapse accelerator's agent mode.
+
+* **Grounded in discovery.** A question is asked only when discovery found what it is about: notebook activities, file
+  datasets, self-hosted runtimes, Key Vault secrets, linked-service parameters without a value, schedule or event triggers,
+  data flows, activity types with no automatic Fabric route (from the conversion rules, over the whole estate), safe
+  reconstruction proposals. Things discovery cannot see (network rules, data volumes, the capacity actually needed) are asked
+  and listed as not visible.
+* **Read, not asked.** The Fabric workspace chosen on the Connections step, a lakehouse already bound and the Invoke-pipeline
+  connection are read from the configuration. That configuration is recorded with the brief, so everyone who looks at it
+  sees the same brief (an approver's own session never changes it).
+* **Recommendations with reasons.** Each recommendation is computed from the discovered counts and says why. It is used only
+  where nothing is answered, shown as a recommendation, and becomes an answer only when someone accepts it.
+* **Every question says what its answer does:** `run` (the run follows it), `gate` (the agent stops for a person), or
+  `record` (kept in the brief for the team).
+* **A versioned, approved brief.** Answers are checked against each question's own options. A brief is submitted (every
+  required question answered, no conflicts), then approved by someone holding `provision:approve`, against the fingerprint
+  of the answers they read. Changing an answer, or a change in what discovery found, puts it back to draft; the run then
+  stops following it until it is approved again. Carrying out the brief (converting its subset) never takes its approval away.
+
+What the approved brief drives today:
+
+| Answer | Effect |
+|---|---|
+| Scope (all, selected pipelines, pilot = first dependency wave), unsupported activities held back | the pipelines `convert` takes |
+| Storage: repoint to a lakehouse, its name | `convert --lakehouse` (the storage map is refreshed first) |
+| Reconstruction proposals | `convert --apply-reconstruction` |
+| Validation depth, sensitive-data restriction | validation stages; whether real runs may be started (`verify` with `run` is refused otherwise) |
+| Gateways, network, capacity, Invoke-pipeline connection | prerequisites listed for a person |
+
+The API's `convert` stage follows an approved, current brief automatically; the CLI does with `convert --from-brief`.
+Everything else is recorded in the brief (Markdown download) for the team.
+
+CLI: `brief` (show; `--markdown`, `--questionnaire` to export), `brief-answer --set ID=VALUE`, `brief-accept`,
+`brief-import --file`, `brief-submit`, `brief-approve --fingerprint --by`. API: `GET/PUT /projects/{id}/brief…`
+(read: `reports:view`; answer, accept, import, submit: `plans:generate`; approve: `provision:approve`; audited).
+UI: the Consult step, between Review and Connect.

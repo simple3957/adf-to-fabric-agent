@@ -3,18 +3,19 @@
 The Streamlit UI (`ui/`) holds no migration logic. It calls the API through `ui/api_client.py`; everything it shows has been redacted and
 authorised by the server (see [security.md](security.md)).
 
-## The eight steps
+## The nine steps
 
 | # | Step | Backend | Done when |
 |---|---|---|---|
 | 1 | Discover | `discovery`, `semantic` stages | semantic record exists |
 | 2 | Review | `GET /inventory`, `/compatibility`; `dependencies`, `workloads` stages | the person has read the inventory |
-| 3 | Connect | connection cards, tests, apply | every linked service has a verdict |
-| 4 | Plan target | `/provisioning` plan, approve, dry run, apply, verify | a current plan exists; apply only after approval and a dry run |
-| 5 | Convert | `convert` stage | pipelines generated |
-| 6 | Validate | `validate` stage | a validation result exists |
-| 7 | Deploy | `deploy_dry_run`, `deploy_apply` | dry run done; apply confirmed |
-| 8 | Report | `GET /report` | always readable; "verified" only if the backend says so |
+| 3 | Consult | `GET/PUT /brief`, submit, approve | the current answers are approved; the run follows the brief |
+| 4 | Connect | connection cards, tests, apply | every linked service has a verdict |
+| 5 | Plan target | `/provisioning` plan, approve, dry run, apply, verify | a current plan exists; apply only after approval and a dry run |
+| 6 | Convert | `convert` stage | pipelines generated |
+| 7 | Validate | `validate` stage | a validation result exists |
+| 8 | Deploy | `deploy_dry_run`, `deploy_apply` | dry run done; apply confirmed |
+| 9 | Report | `GET /report` | always readable; "verified" only if the backend says so |
 
 Sign-in (token mode) and project access come first: no project data is requested before `/me` succeeds. A step stays locked until the
 steps before it are confirmed and complete.

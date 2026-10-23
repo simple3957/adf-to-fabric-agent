@@ -230,6 +230,34 @@ class ApiClient:
     def report(self, pid: str) -> dict:
         return self._get(f"/projects/{pid}/report")
 
+    # ---- consultation brief -------------------------------------------------------------------------------------------
+    def brief(self, pid: str) -> dict:
+        return self._get(f"/projects/{pid}/brief")
+
+    def brief_answers(self, pid: str, answers: dict) -> dict:
+        return self._put(f"/projects/{pid}/brief/answers", {"answers": answers})
+
+    def brief_accept(self, pid: str) -> dict:
+        return self._post(f"/projects/{pid}/brief/accept")
+
+    def brief_submit(self, pid: str) -> dict:
+        return self._post(f"/projects/{pid}/brief/submit")
+
+    def brief_approve(self, pid: str, fingerprint: str) -> dict:
+        return self._post(f"/projects/{pid}/brief/approve", {"fingerprint": fingerprint})
+
+    def brief_import(self, pid: str, questionnaire: dict) -> dict:
+        return self._post(f"/projects/{pid}/brief/import", {"questionnaire": questionnaire})
+
+    def brief_note(self, pid: str, text: str) -> dict:
+        return self._post(f"/projects/{pid}/brief/notes", {"text": text})
+
+    def brief_markdown(self, pid: str) -> str:
+        return self._get(f"/projects/{pid}/brief/markdown")["markdown"]
+
+    def brief_questionnaire(self, pid: str) -> dict:
+        return self._get(f"/projects/{pid}/brief/questionnaire")
+
     def provisioning(self, pid: str) -> dict:
         return self._get(f"/projects/{pid}/provisioning")
 

@@ -21,6 +21,7 @@ class Step:
 STEPS: tuple[Step, ...] = (
     Step("discover", "Discover", "🔎", "Read the pipelines, linked services and runtimes in the ADF source."),
     Step("review", "Review", "🧭", "Check discovery is complete; review pipelines, activities, dependencies, compute and compatibility."),
+    Step("consult", "Consult", "💬", "Agree with the client how the migration should happen: scope, target, storage, compute and validation."),
     Step("connect", "Connect", "🔌", "Decide how each linked service becomes a Fabric connection, and test it."),
     Step("plan", "Plan target", "🏗️", "See what the target needs, what exists, and approve what may be created."),
     Step("convert", "Convert", "🔁", "Turn the ADF pipelines into Fabric pipelines."),
@@ -141,6 +142,26 @@ def review_facts(inv: Optional[dict]) -> StepFacts:
         return StepFacts(complete=True, metric=metric, outcome=f"Discovery is complete: {metric}.")
     return StepFacts(complete=True, metric=metric, attention="discovery has gaps",
                      outcome=f"{metric}, but discovery has gaps (see the Review step).")
+
+
+def consult_facts(brief: Optional[dict]) -> StepFacts:
+    """Complete only when the current answers are approved: an approval of answers that changed since does not count."""
+    if not brief:
+        return StepFacts(waiting="Run discovery first: the consultation asks only about what discovery found.", metric="-")
+    c = brief["counts"]
+    metric = f"{c['answered']}/{c['applicable']} answered"
+    if brief["state"] == "approved":
+        v = brief["current_version"]
+        return StepFacts(complete=True, metric=f"Brief v{v['version']} approved",
+                         outcome=f"Brief v{v['version']} approved by {v['approved_by']}; the run follows it.")
+    if c["conflicts"]:
+        return StepFacts(waiting="Resolve the conflicting answers.", metric=metric, attention=f"{c['conflicts']} conflict(s)")
+    if brief["state"] == "submitted":
+        return StepFacts(waiting="An approver approves the submitted brief.", metric=f"v{brief['current_version']['version']} awaiting approval")
+    if brief.get("changed_since_approval"):
+        return StepFacts(waiting="The answers changed since approval: submit them again.", metric=metric, attention="changed since approval")
+    open_ = c["need_person"]
+    return StepFacts(waiting=f"{open_} required question(s) are open." if open_ else "Submit the brief for approval.", metric=metric)
 
 
 def plan_facts(prov: Optional[dict]) -> StepFacts:

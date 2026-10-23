@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import sys
+from pathlib import Path
 
 import click
 
@@ -1193,6 +1194,152 @@ def audit_verify() -> None:
         sys.exit(2)
 
 
+def _brief_store(project_name: str):
+    store = ProjectStore(projects_root(load_config()))
+    pid = slugify(project_name)
+    if not store.has_adf_semantic_discovery(pid):
+        click.secho(f"No ADF semantic discovery for '{pid}'. The consultation asks only about what discovery found: run "
+                    f"`adf2fabric discovery-adf-semantic --project {pid}` first.", fg="red", err=True)
+        sys.exit(1)
+    return store, pid
+
+
+def _print_brief(v: dict) -> None:
+    c = v["counts"]
+    click.echo(f"CONSULTATION BRIEF  state: {v['state'].upper()}" + (f" (version {v['current_version']['version']})" if v["current_version"] else "")
+               + f"  fingerprint: {v['fingerprint']}")
+    click.echo(f"  questions: {c['applicable']}   answered: {c['answered']} ({c['from_config']} from the configuration)   "
+               f"recommendation only: {c['assumed']}   open and required: {c['need_person']}   conflicts: {c['conflicts']}")
+    topic = None
+    for q in v["questions"]:
+        if q["topic"] != topic:
+            topic = q["topic"]
+            click.echo(f"  [{next(t['title'] for t in v['topics'] if t['id'] == topic)}]")
+        mark = {"config": "cfg", "person": "ans", "recommendation": "rec", "open": "---"}[q["source"]]
+        click.echo(f"    {mark} {q['id']:<26} {q['label'][:70]}" + ("   (required)" if q["required"] and q["source"] == "open" else ""))
+    for x in v["conflicts"]:
+        click.secho(f"  CONFLICT: {x}", fg="yellow")
+    if v["changed_since_approval"]:
+        click.secho("  The answers changed since the last approved version: submit and approve them again.", fg="yellow")
+
+
+@cli.command(name="brief")
+@click.option("--project", "project_name", required=True, help="Project name (discovery must have run).")
+@click.option("--markdown", "markdown_out", type=click.Path(dir_okay=False), default=None, help="Write the brief as Markdown to this file.")
+@click.option("--questionnaire", "questionnaire_out", type=click.Path(dir_okay=False), default=None,
+              help="Write the applicable questions as a JSON questionnaire for the client.")
+def brief_cmd(project_name: str, markdown_out: Optional[str], questionnaire_out: Optional[str]) -> None:
+    """Show the migration consultation: the questions discovery makes relevant, their answers and recommendations."""
+    from adf2fabric.agent.consultation import brief as B
+    from adf2fabric.agent.consultation import brief_record as BR
+
+    store, pid = _brief_store(project_name)
+    v = BR.view(store, pid)
+    _print_brief(v)
+    facts = B.read_facts(store, pid)
+    rs = B.resolve(facts, BR.load(store, pid)["answers"])
+    if markdown_out:
+        Path(markdown_out).write_text(B.brief_markdown(facts, rs, pid, v["current_version"]["version"] if v["current_version"] else None, v["state"]),
+                                      encoding="utf-8")
+        click.echo(f"  brief: {markdown_out}")
+    if questionnaire_out:
+        Path(questionnaire_out).write_text(json.dumps(B.questionnaire(facts, rs), indent=2), encoding="utf-8")
+        click.echo(f"  questionnaire: {questionnaire_out}")
+
+
+@cli.command(name="brief-answer")
+@click.option("--project", "project_name", required=True)
+@click.option("--set", "pairs", multiple=True, required=True,
+              help="QUESTION_ID=VALUE. A multi-choice answer is a JSON list (scope.pipelines=[\"PL_A\",\"PL_B\"]). An empty VALUE clears it.")
+def brief_answer_cmd(project_name: str, pairs: tuple[str, ...]) -> None:
+    """Answer consultation questions (each answer is checked against the question's own options)."""
+    from adf2fabric.agent.consultation import brief_record as BR
+
+    store, pid = _brief_store(project_name)
+    answers: dict = {}
+    for item in pairs:
+        key, sep, val = item.partition("=")
+        if not sep or not key.strip():
+            raise click.UsageError(f"--set must look like QUESTION_ID=VALUE, got '{item}'.")
+        val = val.strip()
+        try:
+            answers[key.strip()] = None if not val else json.loads(val) if val.startswith("[") else val
+        except ValueError:
+            raise click.UsageError(f"'{key.strip()}': a list must be valid JSON, e.g. [\"PL_A\"].") from None
+    try:
+        BR.set_answers(store, pid, answers, by="cli")
+    except BR.BriefError as exc:
+        click.secho(f"Not saved: {exc}", fg="red", err=True)
+        sys.exit(1)
+    _print_brief(BR.view(store, pid))
+
+
+@cli.command(name="brief-accept")
+@click.option("--project", "project_name", required=True)
+def brief_accept_cmd(project_name: str) -> None:
+    """Record every recommendation that is not yet answered as the answer."""
+    from adf2fabric.agent.consultation import brief_record as BR
+
+    store, pid = _brief_store(project_name)
+    click.echo(f"Accepted {BR.accept_recommendations(store, pid, by='cli')} recommendation(s).")
+    _print_brief(BR.view(store, pid))
+
+
+@cli.command(name="brief-import")
+@click.option("--project", "project_name", required=True)
+@click.option("--file", "file_path", type=click.Path(exists=True, dir_okay=False), required=True, help="A filled questionnaire (JSON).")
+def brief_import_cmd(project_name: str, file_path: str) -> None:
+    """Import the answers of a filled questionnaire. Unknown, inapplicable or invalid answers are skipped."""
+    from adf2fabric.agent.consultation import brief_record as BR
+
+    store, pid = _brief_store(project_name)
+    try:
+        n = BR.import_answers(store, pid, json.loads(Path(file_path).read_text(encoding="utf-8")), by="cli")
+    except (BR.BriefError, ValueError) as exc:
+        click.secho(f"Import failed: {exc}", fg="red", err=True)
+        sys.exit(1)
+    click.echo(f"Imported {n} answer(s).")
+    _print_brief(BR.view(store, pid))
+
+
+@cli.command(name="brief-submit")
+@click.option("--project", "project_name", required=True)
+def brief_submit_cmd(project_name: str) -> None:
+    """Submit the brief for approval (every required question answered, no conflicts)."""
+    from adf2fabric.agent.consultation import brief_record as BR
+
+    store, pid = _brief_store(project_name)
+    try:
+        v = BR.submit(store, pid, by="cli")
+    except BR.BriefError as exc:
+        click.secho(f"Not submitted: {exc}", fg="red", err=True)
+        sys.exit(1)
+    click.echo(f"Brief v{v['version']} submitted. Approve it with: adf2fabric brief-approve --project {pid} --fingerprint {v['fingerprint']} --by <name>")
+
+
+@cli.command(name="brief-approve")
+@click.option("--project", "project_name", required=True)
+@click.option("--fingerprint", required=True, help="The fingerprint `brief` shows: proves the approver read these exact answers.")
+@click.option("--by", "approver", required=True, help="Who approves (name and role).")
+@_audited("brief_approve")
+def brief_approve_cmd(project_name: str, fingerprint: str, approver: str) -> None:
+    """Approve the submitted brief. From then on the run follows it, until an answer changes."""
+    from adf2fabric.agent.consultation import brief_record as BR
+
+    store, pid = _brief_store(project_name)
+    try:
+        v = BR.approve(store, pid, fingerprint, approver)
+    except BR.BriefError as exc:
+        click.secho(f"Not approved: {exc}", fg="red", err=True)
+        sys.exit(1)
+    click.echo(f"Brief v{v['version']} approved by {v['approved_by']}.")
+    s = BR.approved_settings(store, pid) or {}
+    click.echo(f"  the run follows it: pipelines {('all' if s.get('pipelines') is None else len(s['pipelines']))}, lakehouse {s.get('lakehouse') or '-'}, "
+               f"validation {', '.join(s.get('validate_stages', []))}, real runs {'allowed' if s.get('allow_real_runs') else 'not allowed'}")
+    for x in s.get("prerequisites", []):
+        click.echo(f"  prerequisite: {x}")
+
+
 @cli.command(name="storage-map")
 @click.option("--project", "project_name", required=True, help="Project name (`discovery-adf-semantic` must have run).")
 @click.option("--lakehouse", "lakehouse", default=None, help="Target lakehouse NAME, shown in the plan. It is never invented: leave it out if undecided.")
@@ -1355,11 +1502,26 @@ def discovery_adf_semantic(project_name: str) -> None:
     help="Repoint ADLS datasets (CSV, Parquet) to this lakehouse through the storage map's OneLake shortcuts. Opt-in; "
          "bind the lakehouse with ItemToId 'lakehouse:<name>' in --resolutions. Others stay on their connection, with the reason.",
 )
+@click.option("--from-brief", "from_brief", is_flag=True,
+              help="Take scope, lakehouse repointing and reconstruction from the approved consultation brief (refused when it is not approved).")
 def convert(project_name: str, pipelines: tuple[str, ...], resolutions_path: str | None,
-            apply_reconstruction: bool, compute_sources_path: str | None, lakehouse: str | None) -> None:
+            apply_reconstruction: bool, compute_sources_path: str | None, lakehouse: str | None, from_brief: bool) -> None:
     """Convert the discovered ADF pipelines to Fabric pipeline definitions (deterministic, no LLM)."""
     config = load_config()
     store = ProjectStore(projects_root(config))
+    if from_brief:
+        from adf2fabric.agent.consultation import brief_record as BR
+
+        pid = slugify(project_name)
+        agreed = BR.approved_settings(store, pid) if store.has_adf_semantic_discovery(pid) else None
+        if agreed is None:
+            click.secho("--from-brief: there is no approved, current consultation brief. Run `brief`, answer, submit and approve it first.",
+                        fg="red", err=True)
+            sys.exit(1)
+        pipelines = tuple(pipelines) or tuple(agreed.get("pipelines") or ())
+        lakehouse = lakehouse or agreed.get("lakehouse")
+        apply_reconstruction = apply_reconstruction or bool(agreed.get("apply_reconstruction"))
+        click.echo(f"Following the approved brief: {len(pipelines) or 'all'} pipeline(s), lakehouse {lakehouse or '-'}.")
     result = ConversionAgent(store).run(
         ConversionRequest(project_name=project_name, pipelines=list(pipelines), resolutions_path=resolutions_path,
                           apply_reconstruction=apply_reconstruction, compute_sources_path=compute_sources_path,

@@ -555,3 +555,107 @@ def test_a_replayed_run_request_is_not_audited_twice(world):
     b = stage(world, "oscar", "verify", body, headers=h)
     assert b.headers["idempotent-replay"] == "true"
     assert len([e for e in world.audit.read(500) if e["action"] == "verify.run"]) == 1
+
+
+# =====================================================================================================================
+# 9. the consultation brief: who may answer, submit and approve; the run follows only an approved, current brief
+# =====================================================================================================================
+
+B = f"{P}/brief"
+
+
+def _fill_brief(w: World, who: str = "ann") -> dict:
+    w.call(who, "POST", f"{B}/accept")
+    for _ in range(5):
+        v = w.call(who, "GET", B).json()
+        open_ = {q["id"]: ("Owner, platform lead" if q["kind"] == "text" else [q["options"][0]["value"]] if q["kind"] == "multi" else q["options"][0]["value"])
+                 for q in v["questions"] if q["required"] and q["source"] == "open"}
+        if not open_:
+            return v
+        assert w.call(who, "PUT", f"{B}/answers", json_body={"answers": open_}).status_code == 200
+        w.call(who, "POST", f"{B}/accept")
+    return w.call(who, "GET", B).json()
+
+
+def test_the_brief_needs_discovery_and_stays_inside_the_organisation(world):
+    store = world.demo.store
+    store.save(store.load("demo-estate").model_copy(update={"id": "empty-estate"}))
+    assert world.call("vic", "GET", "/projects/empty-estate/brief").status_code == 409
+    prepare(world, through="discovery")
+    assert world.call("vic", "GET", B).status_code == 200
+    assert world.call("bob", "GET", B).status_code == 404
+    assert world.call(None, "GET", B).status_code == 401
+
+
+def test_analysts_answer_and_submit_approvers_approve_viewers_only_read(world):
+    prepare(world, through="discovery")
+    assert world.call("vic", "PUT", f"{B}/answers", json_body={"answers": {"scope.approach": "phased"}}).status_code == 403
+    v = _fill_brief(world, "ann")
+    assert v["counts"]["need_person"] == 0
+    assert world.call("abe", "POST", f"{B}/submit").status_code == 403  # an approver does not submit
+    sub = world.call("ann", "POST", f"{B}/submit")
+    assert sub.status_code == 200 and sub.json()["state"] == "submitted"
+    fp = sub.json()["fingerprint"]
+    assert world.call("ann", "POST", f"{B}/approve", json_body={"fingerprint": fp}).status_code == 403  # nor does the analyst approve
+    assert world.call("oscar", "POST", f"{B}/approve", json_body={"fingerprint": fp}).status_code == 403
+    ok = world.call("abe", "POST", f"{B}/approve", json_body={"fingerprint": fp})
+    assert ok.status_code == 200 and ok.json()["state"] == "approved"
+    assert ok.json()["current_version"]["approved_by"] == "abe"  # the signed-in approver, never a typed name
+    acts = [e["action"] for e in world.audit.read(500)]
+    assert {"brief.answers", "brief.submit", "brief.approve"} <= set(acts)
+
+
+def test_bad_answers_and_stale_approvals_are_refused(world):
+    prepare(world, through="discovery")
+    for body in ({"answers": {"scope.mode": "everything"}}, {"answers": {"made.up": "x"}}, {"answers": {"scope.pipelines": ["NotAPipeline"]}}):
+        r = world.call("ann", "PUT", f"{B}/answers", json_body=body)
+        assert r.status_code == 422, body
+    assert world.call("ann", "POST", f"{B}/submit").status_code == 409  # required questions still open
+    v = _fill_brief(world, "ann")
+    world.call("ann", "POST", f"{B}/submit")
+    world.call("ann", "PUT", f"{B}/answers", json_body={"answers": {"scope.approach": "parallel" if v["questions"][0] else "phased"}})
+    r = world.call("abe", "POST", f"{B}/approve", json_body={"fingerprint": v["fingerprint"]})
+    assert r.status_code == 409  # the answers changed after submission: approve what was read, or nothing
+
+
+def test_the_brief_view_holds_no_paths_or_secrets(world):
+    prepare(world, through="discovery")
+    root = str(world.demo.store.projects_root)
+    for path in (B, f"{B}/markdown", f"{B}/questionnaire"):
+        text = world.call("vic", "GET", path).text
+        assert root not in text and not PATH_RE.search(text) and not SECRET_RE.search(text), path
+
+
+def test_conversion_follows_only_an_approved_current_brief(world):
+    prepare(world, through="semantic")
+    names = sorted(p["name"] for p in world.call("vic", "GET", f"{P}/inventory").json()["pipelines"]) if world.call("vic", "GET", f"{P}/inventory").status_code == 200 else []
+    v = _fill_brief(world, "ann")
+    pipes = next(q for q in v["questions"] if q["id"] == "scope.mode")["options"]
+    world.call("ann", "PUT", f"{B}/answers", json_body={"answers": {"scope.mode": "selected"}})
+    v = world.call("ann", "GET", B).json()
+    first = next(q for q in v["questions"] if q["id"] == "scope.pipelines")["options"][0]["value"]
+    world.call("ann", "PUT", f"{B}/answers", json_body={"answers": {"scope.pipelines": [first]}})
+    fp = world.call("ann", "POST", f"{B}/submit").json()["fingerprint"]
+    conv = run(world, "ann", "convert")
+    assert conv["state"] == "succeeded" and conv["result"].get("brief") is None  # submitted is not approved: nothing is followed
+    world.call("abe", "POST", f"{B}/approve", json_body={"fingerprint": fp})
+    conv = run(world, "ann", "convert")
+    assert conv["state"] == "succeeded" and conv["result"]["brief"] == 1
+    assert [p.source_pipeline for p in world.demo.store.load_conversion("demo-estate").pipelines] == [first]
+    assert world.call("vic", "GET", B).json()["state"] == "approved"  # carrying out the brief never takes its approval away
+    assert run(world, "ann", "convert")["result"]["brief"] == 1
+    assert pipes and (not names or first in names)
+
+
+def test_real_runs_are_refused_when_the_approved_brief_does_not_allow_them(world):
+    name = _deployed(world)
+    _fill_brief(world, "ann")
+    world.call("ann", "PUT", f"{B}/answers", json_body={"answers": {"validation.depth": "evidence"}})
+    fp = world.call("ann", "POST", f"{B}/submit").json()["fingerprint"]
+    world.call("abe", "POST", f"{B}/approve", json_body={"fingerprint": fp})
+    r = stage(world, "oscar", "verify", {"workspace_id": DEMO_WS, "run": True, "confirm": True, "pipelines": [name]})
+    assert r.status_code == 409 and "brief" in r.json()["error"]
+    world.call("ann", "PUT", f"{B}/answers", json_body={"answers": {"validation.depth": "run"}})
+    fp = world.call("ann", "POST", f"{B}/submit").json()["fingerprint"]
+    world.call("abe", "POST", f"{B}/approve", json_body={"fingerprint": fp})
+    assert stage(world, "oscar", "verify", {"workspace_id": DEMO_WS, "run": True, "confirm": True, "pipelines": [name]}).status_code == 202

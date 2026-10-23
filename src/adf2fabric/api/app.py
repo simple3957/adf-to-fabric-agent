@@ -33,6 +33,7 @@ from adf2fabric.agent.intake.models import AzureIntakeRequest
 from adf2fabric.agent.intake.zip_source import ZipIntakeRequest, ZipSourceIntake, inspect_zip
 from adf2fabric.api import schemas as S
 from adf2fabric.api import views
+from adf2fabric.agent.consultation import brief_record
 from adf2fabric.agent.deployment import record as deploy_record
 from adf2fabric.api.container import Container, Session, Settings
 from adf2fabric.api.jobs import JobConflict
@@ -793,6 +794,9 @@ def create_app(settings: Optional[Settings] = None, live: Optional[Container] = 
             if unknown:
                 raise HTTPException(422, f"Not converted pipelines: {', '.join(unknown[:5])}. Only converted, deployed pipelines can be run.")
             body = body.model_copy(update={"pipelines": list(unique.values())})
+            agreed = brief_record.approved_settings(ctx.c.store, slug, ctx.session.destination)
+            if agreed is not None and not agreed.get("allow_real_runs"):
+                raise HTTPException(409, "The approved consultation brief does not allow real runs (validation depth, or data restrictions). Change the brief to allow them.")
         key = _idem_key(ctx, request)
         replay = _idem_replay(key)
         if replay is not None:
@@ -855,6 +859,95 @@ def create_app(settings: Optional[Settings] = None, live: Optional[Container] = 
     from adf2fabric.agent.provisioning import service as prov
     from adf2fabric.agent.provisioning.executor import ApplyRefused
     from adf2fabric.project.provisioning import ProvisioningApproval, ProvisioningPlan, ProvisioningRun, TargetSpec
+
+    # ---- consultation brief: how the migration should happen, agreed after discovery ----------------------------------------
+    def _brief_project(ctx: Ctx, pid: str) -> str:
+        slug = ctx.project(pid)
+        if not ctx.c.store.has_adf_semantic_discovery(slug):
+            raise HTTPException(409, "Discovery has not run: the consultation asks only about what discovery found.")
+        return slug
+
+    def _brief_view(ctx: Ctx, slug: str) -> dict:
+        return brief_record.view(ctx.c.store, slug, ctx.session.destination)
+
+    @app.get("/projects/{pid}/brief")
+    def brief_view(pid: str, ctx: Ctx = Depends(), _: Principal = need(P.reports_view)):
+        return _brief_view(ctx, _brief_project(ctx, pid))
+
+    @app.put("/projects/{pid}/brief/answers")
+    def brief_answers(pid: str, body: S.BriefAnswersBody, ctx: Ctx = Depends(), _: Principal = need(P.plans_generate)):
+        slug = _brief_project(ctx, pid)
+        try:
+            n = brief_record.set_answers(ctx.c.store, slug, body.answers, ctx.principal.id, ctx.session.destination)
+        except brief_record.BriefError as exc:
+            raise HTTPException(422, str(exc)) from None
+        ctx.audit("brief.answers", "ok", resource="project", resource_id=slug, answers=n)
+        return _brief_view(ctx, slug)
+
+    @app.post("/projects/{pid}/brief/accept")
+    def brief_accept(pid: str, ctx: Ctx = Depends(), _: Principal = need(P.plans_generate)):
+        slug = _brief_project(ctx, pid)
+        n = brief_record.accept_recommendations(ctx.c.store, slug, ctx.principal.id, ctx.session.destination)
+        ctx.audit("brief.accept", "ok", resource="project", resource_id=slug, answers=n)
+        return {"accepted": n, **_brief_view(ctx, slug)}
+
+    @app.post("/projects/{pid}/brief/submit")
+    def brief_submit(pid: str, ctx: Ctx = Depends(), _: Principal = need(P.plans_generate)):
+        slug = _brief_project(ctx, pid)
+        try:
+            v = brief_record.submit(ctx.c.store, slug, ctx.principal.id, ctx.session.destination)
+        except brief_record.BriefError as exc:
+            raise HTTPException(409, str(exc)) from None
+        ctx.audit("brief.submit", "ok", resource="project", resource_id=slug, version=v["version"])
+        return _brief_view(ctx, slug)
+
+    @app.post("/projects/{pid}/brief/approve")
+    def brief_approve(pid: str, body: S.BriefApproveBody, ctx: Ctx = Depends(), _: Principal = need(P.provision_approve)):
+        slug = _brief_project(ctx, pid)
+        try:  # the approver is the signed-in person, never a name typed by the client
+            v = brief_record.approve(ctx.c.store, slug, body.fingerprint, ctx.principal.id, ctx.session.destination)
+        except brief_record.BriefError as exc:
+            raise HTTPException(409, str(exc)) from None
+        ctx.audit("brief.approve", "ok", resource="project", resource_id=slug, version=v["version"])
+        return _brief_view(ctx, slug)
+
+    @app.post("/projects/{pid}/brief/import")
+    def brief_import(pid: str, body: S.BriefImportBody, ctx: Ctx = Depends(), _: Principal = need(P.plans_generate)):
+        slug = _brief_project(ctx, pid)
+        try:
+            n = brief_record.import_answers(ctx.c.store, slug, body.questionnaire, ctx.principal.id, ctx.session.destination)
+        except brief_record.BriefError as exc:
+            raise HTTPException(422, str(exc)) from None
+        ctx.audit("brief.import", "ok", resource="project", resource_id=slug, answers=n)
+        return {"imported": n, **_brief_view(ctx, slug)}
+
+    @app.post("/projects/{pid}/brief/notes")
+    def brief_note(pid: str, body: S.BriefNoteBody, ctx: Ctx = Depends(), _: Principal = need(P.plans_generate)):
+        slug = _brief_project(ctx, pid)
+        try:
+            brief_record.add_note(ctx.c.store, slug, body.text, ctx.principal.id)
+        except brief_record.BriefError as exc:
+            raise HTTPException(422, str(exc)) from None
+        return {"notes": brief_record.load(ctx.c.store, slug)["notes"][-50:]}
+
+    @app.get("/projects/{pid}/brief/markdown")
+    def brief_markdown(pid: str, ctx: Ctx = Depends(), _: Principal = need(P.reports_view)):
+        slug = _brief_project(ctx, pid)
+        from adf2fabric.agent.consultation import brief as B
+
+        facts = B.read_facts(ctx.c.store, slug, ctx.session.destination)
+        v = _brief_view(ctx, slug)
+        rs = B.resolve(facts, brief_record.load(ctx.c.store, slug)["answers"])
+        cur = v["current_version"]
+        return {"markdown": B.brief_markdown(facts, rs, slug, cur["version"] if cur else None, v["state"])}
+
+    @app.get("/projects/{pid}/brief/questionnaire")
+    def brief_questionnaire(pid: str, ctx: Ctx = Depends(), _: Principal = need(P.reports_view)):
+        slug = _brief_project(ctx, pid)
+        from adf2fabric.agent.consultation import brief as B
+
+        facts = B.read_facts(ctx.c.store, slug, ctx.session.destination)
+        return B.questionnaire(facts, B.resolve(facts, brief_record.load(ctx.c.store, slug)["answers"]))
 
     @app.get("/projects/{pid}/provisioning")
     def provisioning_view(pid: str, ctx: Ctx = Depends(), _: Principal = need(P.reports_view)):

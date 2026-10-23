@@ -14,7 +14,7 @@ streamlit run ui/app.py                 # UI on http://localhost:8501 (add ?demo
 adf2fabric --help                       # CLI
 ```
 
-CLI commands (`src/adf2fabric/cli.py`): `intake`, `consultation`, `discovery`, `discovery-adls`, `discovery-adls-paths`, `discovery-sql`, `discovery-sql-structural`, `discovery-adf`, `discovery-adf-semantic`, `discovery-dependencies`, `storage-map`, `workloads-assess`, `workloads-generate`, `workloads-approve`, `workloads-deploy`, `workloads-record-run`, `provision-plan`, `provision-approve`, `provision-apply`, `provision-verify`, `validate`, `auth-user-create`, `auth-user-list`, `auth-user-update`, `auth-user-rotate`, `audit-verify`, `convert`, `reconstruct`, `deploy`, `deploy-notebook`, `git-commit`, `create-shortcut`, `fetch-databricks-notebooks`, `run`, `verify`, `handover`, `compute-deploy`, `assess-compute`. Each takes `--project <name>`; state lives under `projects/<name>/` (see `project/store.py`).
+CLI commands (`src/adf2fabric/cli.py`): `intake`, `consultation`, `brief`, `brief-answer`, `brief-accept`, `brief-import`, `brief-submit`, `brief-approve`, `discovery`, `discovery-adls`, `discovery-adls-paths`, `discovery-sql`, `discovery-sql-structural`, `discovery-adf`, `discovery-adf-semantic`, `discovery-dependencies`, `storage-map`, `workloads-assess`, `workloads-generate`, `workloads-approve`, `workloads-deploy`, `workloads-record-run`, `provision-plan`, `provision-approve`, `provision-apply`, `provision-verify`, `validate`, `auth-user-create`, `auth-user-list`, `auth-user-update`, `auth-user-rotate`, `audit-verify`, `convert`, `reconstruct`, `deploy`, `deploy-notebook`, `git-commit`, `create-shortcut`, `fetch-databricks-notebooks`, `run`, `verify`, `handover`, `compute-deploy`, `assess-compute`. Each takes `--project <name>`; state lives under `projects/<name>/` (see `project/store.py`).
 
 ## Layout (`src/adf2fabric/`)
 
@@ -22,7 +22,7 @@ CLI commands (`src/adf2fabric/cli.py`): `intake`, `consultation`, `discovery`, `
 |---|---|
 | `cli.py`, `config.py` | Commands; loads `config/config.yaml` (default provider, branch, `projects_root`) |
 | `agent/intake/` | Source intake (GitHub/Git, ZIP, Azure), source validation, manifest |
-| `agent/consultation/` | Readiness gate |
+| `agent/consultation/` | Readiness gate (`agent.py`), and the post-discovery migration consultation: grounded questions, recommendations, an approved brief that drives the run (`brief.py`, `brief_record.py`, [docs](docs/consultation.md)) |
 | `agent/discovery/` | Repository, ADF, semantic parser, ADLS, SQL discovery |
 | `agent/dependencies/` | Dependency inventory and migration order from the semantic record + source manifest; opt-in per-provider access checks ([docs](docs/dependency-inventory.md)) |
 | `agent/storage/` | Read-only storage map (ADLS Gen2 datasets to OneLake shortcuts and Lakehouse paths, unmappable ones listed for a decision) opt-in routing of literal ADLS paths in generated notebooks, and opt-in `convert --lakehouse` repointing of ADLS datasets (CSV/Parquet; Copy, Lookup, GetMetadata) to the Lakehouse, live-verified ([docs](docs/storage-map.md)) |
@@ -38,7 +38,7 @@ CLI commands (`src/adf2fabric/cli.py`): `intake`, `consultation`, `discovery`, `
 | `repository/` | Git providers, scanner, auth |
 | `api/` | FastAPI backend: routes, jobs, stages, demo mode; `api/security/` holds authn, roles, tenancy, request protection, audit ([docs](docs/security.md)) |
 | `project/` | Persisted models and on-disk store; compute plan |
-| `ui/` (repo root) | Streamlit UI, 8 guided steps ([docs](docs/ui.md)). No migration logic; it calls the API via `ui/api_client.py` |
+| `ui/` (repo root) | Streamlit UI, 9 guided steps ([docs](docs/ui.md)). No migration logic; it calls the API via `ui/api_client.py` |
 
 Per-agent operating instructions are in `skills/`. Per-stage references are in `docs/`.
 
@@ -52,6 +52,7 @@ Per-agent operating instructions are in `skills/`. Per-stage references are in `
 - `validate` never trusts the converter's success response: it re-reads source and generated files. Only a recorded real run can satisfy the runtime stage, and only `MIGRATION_VERIFIED` may be reported as full success; a clean static pass or a 200 from an API is never runtime correctness.
 - API security: every route declares its permission (`need(...)`) and the server enforces it; projects, jobs, uploads and sessions are scoped to the caller's organisation and another organisation's project is a 404; a client-chosen subscription, tenant, account or workspace must be in the caller's grants; Git URLs go through the SSRF guard. A new route needs a permission, an entry in the role table of `tests/test_api_security.py`, and (if it changes anything) an audit event. Do not call the app production-secure: see the limitations in `docs/security.md`.
 - UI/API contract ([docs/ui.md](docs/ui.md)): views are redacted server-side by `api/views.sanitize` (no paths, ids, tokens, traces); real changes need `confirm: true` after a dry run and a typed confirmation in the UI; submissions carry an `Idempotency-Key`; a completion claim comes only from the validation engine's overall status; production mode (`ADF2FABRIC_ENV=production`) refuses demo data. A new view or route follows the security rule above.
+- The consultation brief asks only about what discovery found and never answers for a person; a recommendation is not an answer until accepted. Only an approved brief whose answers (and facts) are unchanged is followed (`brief_record.approved_settings`); its configuration facts are stored with the brief so every viewer sees the same fingerprint.
 - Deploy defaults to dry run. It refuses unbound placeholders (notebook, dataflow, Spark job ids) unless `--allow-unbound`.
 - Triggers are created disabled and never duplicated.
 - `git-commit` (`agent/deployment/fabric_git.py`) is a dry run unless `--apply`; it commits Selectively (the migration's items only, unless `--all-changes`), never commits a conflict, refuses when the branch has changes the workspace lacks, and never connects a workspace to Git. Not yet run against a Git-connected workspace (none existed on 2026-10-22).

@@ -230,6 +230,14 @@ ROUTES = [  # (method, path, body, permissions required)
     ("POST", "/projects/demo-estate/stages/verify", {"workspace_id": WS}, {G.projects_view, G.plans_generate}),
     ("POST", "/projects/demo-estate/stages/verify", {"workspace_id": WS, "run": True, "confirm": True, "pipelines": ["PL"]},
      {G.projects_view, G.plans_generate, G.migration_execute}),
+    ("GET", "/projects/demo-estate/brief", None, {G.reports_view}), ("GET", "/projects/demo-estate/brief/markdown", None, {G.reports_view}),
+    ("GET", "/projects/demo-estate/brief/questionnaire", None, {G.reports_view}),
+    ("PUT", "/projects/demo-estate/brief/answers", {"answers": {"scope.approach": "phased"}}, {G.plans_generate}),
+    ("POST", "/projects/demo-estate/brief/accept", {}, {G.plans_generate}),
+    ("POST", "/projects/demo-estate/brief/submit", {}, {G.plans_generate}),
+    ("POST", "/projects/demo-estate/brief/approve", {"fingerprint": "0" * 16}, {G.provision_approve}),
+    ("POST", "/projects/demo-estate/brief/import", {"questionnaire": {}}, {G.plans_generate}),
+    ("POST", "/projects/demo-estate/brief/notes", {"text": "note"}, {G.plans_generate}),
     ("GET", "/admin/users", None, {G.users_manage}), ("GET", "/admin/audit", None, {G.users_manage}),
 ]
 ROLE_USERS = {"viewer": "vic", "analyst": "ann", "approver": "abe", "operator": "oscar", "admin": "root"}

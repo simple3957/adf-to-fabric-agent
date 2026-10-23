@@ -79,6 +79,43 @@ def conversion_summary(store: ProjectStore, pid: str, conv=None) -> dict[str, An
         stale=bool(project.repository and conv.source_commit_sha != project.repository.commit_sha))
 
 
+def _approved_brief(c: Container, session: Session, pid: str, log: Log) -> Optional[dict[str, Any]]:
+    """The approved consultation brief's settings (with its version), or None when there is no approved, current brief."""
+    from adf2fabric.agent.consultation import brief_record
+
+    v = brief_record.view(c.store, pid, session.destination)
+    if not v["settings"]:
+        if v["state"] != "draft" or v["versions"]:
+            log(f"The consultation brief is {v['state']}{' and changed since approval' if v['changed_since_approval'] else ''}: its settings are not used.")
+        return None
+    log(f"Following the approved consultation brief v{v['current_version']['version']}.")
+    return {**v["settings"], "version": v["current_version"]["version"]}
+
+
+def _write_storage_map(c: Container, pid: str, lakehouse: str) -> None:
+    import json as _json
+
+    from adf2fabric.agent.storage.mapping import build_storage_map
+
+    out = c.store.project_dir(pid) / "storage"
+    existing = out / "storage-map.json"
+    names = {}
+    if existing.exists():  # keep shortcut names a person chose (storage-map --shortcut)
+        try:
+            names = {(s["account"], s["container"]): s["shortcut"] for s in _json.loads(existing.read_text(encoding="utf-8")).get("shortcuts", [])}
+        except (ValueError, KeyError, OSError):
+            names = {}
+    from adf2fabric.agent.storage.mapping import StorageMapError
+
+    disc = c.store.load_adf_semantic_discovery(pid)
+    try:
+        m = build_storage_map(disc, lakehouse, names)
+    except StorageMapError:  # a chosen name no longer fits what discovery found: plan the default names
+        m = build_storage_map(disc, lakehouse)
+    out.mkdir(parents=True, exist_ok=True)
+    existing.write_text(_json.dumps(m.to_dict(), indent=2, default=str), encoding="utf-8")
+
+
 def _verify(c: Container, session: Session, pid: str, options: dict, log: Log) -> dict[str, Any]:
     """Compare Fabric runs with ADF. By default read-only (the latest finished runs); with ``run`` (authorised, confirmed and audited by the
     route) it STARTS a real run of each named pipeline and waits for it."""
@@ -183,10 +220,16 @@ def run_stage(c: Container, session: Session, pid: str, stage: str, log: Log, op
         return _ok(r)
     if stage == "convert":
         res = c.store.conversion_dir(pid) / "resolutions.json"
+        brief = _approved_brief(c, session, pid, log)
+        pipelines = options.get("pipelines") or (brief or {}).get("pipelines") or []
+        lakehouse = (brief or {}).get("lakehouse")
+        if lakehouse:  # repointing reads the storage map; the brief's choice brings it up to date first (read-only)
+            _write_storage_map(c, pid, lakehouse)
         r = ConversionAgent(c.store).run(ConversionRequest(
-            project_name=pid, pipelines=options.get("pipelines") or [], resolutions_path=str(res) if res.exists() else None))
+            project_name=pid, pipelines=pipelines, resolutions_path=str(res) if res.exists() else None, lakehouse=lakehouse,
+            apply_reconstruction=bool((brief or {}).get("apply_reconstruction"))))
         _ok(r)  # a failed conversion has no record: say why before reading it
-        return _ok(r, **conversion_summary(c.store, pid, r.conversion))
+        return _ok(r, **conversion_summary(c.store, pid, r.conversion), brief=(brief or {}).get("version"))
     if stage == "compute":
         from adf2fabric.agent.assessment.agent import ComputeAgent, ComputeRequest
 
