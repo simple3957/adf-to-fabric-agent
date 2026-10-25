@@ -9,7 +9,7 @@ import pytest
 
 from adf2fabric.agent.consultation import brief_record
 from adf2fabric.api.security import guards
-from tests.test_api_security import ALL, World
+from tests.test_api_security import ALL, World, make_zip
 
 
 @pytest.fixture()
@@ -35,7 +35,7 @@ def test_a_legacy_token_guess_stays_locked_but_a_real_user_is_not(tmp_path, monk
     assert w.http.get("/me", headers={"Authorization": f"Bearer {w.tokens['ann']}"}).status_code == 200  # a 160-bit user token cannot be guessed
 
 
-@pytest.mark.parametrize("host", ["127.0.0.1:8777@evil.example", "localhost@evil.example", "127.0.0.1:abc", "127.0.0.1/", "localhost:8501:1", "local host", "localhost\evil"])
+@pytest.mark.parametrize("host", ["127.0.0.1:8777@evil.example", "localhost@evil.example", "127.0.0.1:abc", "127.0.0.1/", "localhost:8501:1", "local host", "localhost\\evil"])
 def test_a_host_header_that_only_starts_like_a_local_host_is_refused(world, host):
     assert world.http.get("/health", headers={"Host": host}).status_code == 400
 
@@ -45,7 +45,7 @@ def test_local_host_headers_are_still_accepted(world, host):
     assert world.http.get("/health", headers={"Host": host}).status_code == 200
 
 
-@pytest.mark.parametrize("url", ["https://github.com/o/r\n--upload-pack=x", "https://github.com/o/r --upload-pack=touch", "https://github.com\@127.0.0.1/r.git",
+@pytest.mark.parametrize("url", ["https://github.com/o/r\n--upload-pack=x", "https://github.com/o/r --upload-pack=touch", "https://github.com\\@127.0.0.1/r.git",
                                  "https://github.com/o/r\x00"])
 def test_a_git_url_with_whitespace_or_control_characters_is_refused(url):
     with pytest.raises(guards.Rejected):
@@ -96,3 +96,92 @@ def test_concurrent_brief_notes_and_journey_confirmations_lose_nothing(world):
     with ThreadPoolExecutor(len(steps)) as ex:
         assert set(ex.map(confirm, steps)) == {200}
     assert world.call("ann", "GET", f"{P}/journey").json()["confirmed"] == steps
+
+
+def test_two_processes_changing_one_record_lose_nothing(tmp_path):
+    """Four separate Python processes each add 15 notes to one brief at once; every note must survive."""
+    import subprocess
+    import sys
+
+    from adf2fabric.project.store import ProjectStore
+
+    store = ProjectStore(tmp_path)
+    store.project_dir("p1").mkdir(parents=True, exist_ok=True)
+    code = ("import sys\nfrom pathlib import Path\nfrom adf2fabric.agent.consultation import brief_record as b\n"
+            "from adf2fabric.project.store import ProjectStore\ns = ProjectStore(Path(sys.argv[1]))\n"
+            "for i in range(15):\n    b.add_note(s, 'p1', f'{sys.argv[2]}-{i}', 'x')\n")
+    procs = [subprocess.Popen([sys.executable, "-W", "ignore", "-c", code, str(tmp_path), f"w{n}"]) for n in range(4)]
+    assert [p.wait(timeout=120) for p in procs] == [0, 0, 0, 0]
+    notes = brief_record.load(store, "p1")["notes"]
+    assert len(notes) == 60 and len({n["text"] for n in notes}) == 60
+
+
+def _hostile_zip(slip: bool = False) -> bytes:
+    import json as _json
+
+    def pipe(name, acts):
+        return _json.dumps({"name": name, "properties": {"activities": acts}})
+
+    script = "<script>alert(1)</script>"
+    img = '<img src=x onerror="alert(1)">'
+    files = {
+        "pipeline/PL_Script.json": pipe(f"PL_{script}", [{"name": img, "type": "Copy", "typeProperties": {
+            "source": {"type": "DelimitedTextSource"}, "sink": {"type": "DelimitedTextSink"}},
+            "inputs": [{"referenceName": "../../evil", "type": "DatasetReference"}],
+            "outputs": [{"referenceName": "DS_Out", "type": "DatasetReference"}]}]),
+        "pipeline/PL_Traversal.json": pipe("../../../escape", [{"name": "A", "type": "Wait", "typeProperties": {"waitTimeInSeconds": 1}}]),
+        "pipeline/PL_Big.json": pipe("PL_Big", [{"name": f"W{i}", "type": "Wait", "typeProperties": {"waitTimeInSeconds": 1}} for i in range(3000)]),
+        "dataset/DS_Out.json": _json.dumps({"name": "DS_Out", "properties": {"type": "DelimitedText", "linkedServiceName": {"referenceName": "LS_X", "type": "LinkedServiceReference"},
+                                                                                "typeProperties": {"location": {"type": "AzureBlobFSLocation", "fileSystem": "C\x00ont", "folderPath": "../../x"}}}}),
+        "linkedService/LS_X.json": _json.dumps({"name": "LS_X", "properties": {"type": "AzureBlobFS", "typeProperties": {"url": "https://acct.dfs.core.windows.net", "accountKey": "CANARY-SECRET-123"}}}),
+        "pipeline/not json.json": "{",
+    }
+    if slip:
+        files["../evil.json"] = "{}"
+    return make_zip(files)
+
+
+def test_a_hostile_source_cannot_break_out_crash_or_leak_through_the_stages(world, tmp_path):
+    from adf2fabric.api.stages import STAGES  # noqa: F401  (the list the API accepts)
+
+    up = world.call("ann", "PUT", "/uploads/zip", content=_hostile_zip(), headers={"Content-Type": "application/zip"})
+    assert up.status_code == 200, up.text
+    world.call("ann", "POST", "/mode", json_body={"mode": "live"})
+    job = world.call("ann", "POST", "/projects", json_body={"project_name": "hostile", "source": {"kind": "zip", "upload_id": up.json()["upload_id"]}}).json()
+    done = world.wait("ann", job, timeout=180)
+    assert done["state"] == "succeeded", done  # bad files are findings, not a crashed import
+    for stage in ("discovery", "semantic", "dependencies", "workloads", "reconstruct", "convert", "validate", "deploy_dry_run"):
+        r = world.call("ann", "POST", f"/projects/hostile/stages/{stage}")
+        assert r.status_code < 500, (stage, r.status_code, r.text[:200])
+        if r.status_code == 202:
+            j = world.wait("ann", r.json(), timeout=180)
+            assert j["state"] in ("succeeded", "failed"), stage
+    for sub in ("", "/inventory", "/waves", "/brief", "/provisioning", "/report", "/validation", "/connections", "/handover", "/conversion"):
+        r = world.call("ann", "GET", "/projects/hostile" + sub)
+        assert r.status_code < 500, (sub, r.status_code, r.text[:200])
+        assert "CANARY-SECRET-123" not in r.text and "Traceback" not in r.text, sub
+    assert not list(tmp_path.rglob("escape*")) and not list(tmp_path.rglob("evil*")) and not (tmp_path.parent / "evil.json").exists()
+    audit = "\n".join(str(e) for e in world.audit.read())
+    assert "CANARY-SECRET-123" not in audit
+
+
+def test_an_archive_with_an_entry_outside_its_folder_is_refused_whole(world, tmp_path):
+    up = world.call("ann", "PUT", "/uploads/zip", content=_hostile_zip(slip=True), headers={"Content-Type": "application/zip"}).json()
+    job = world.call("ann", "POST", "/projects", json_body={"project_name": "slip", "source": {"kind": "zip", "upload_id": up["upload_id"]}}).json()
+    done = world.wait("ann", job)
+    assert done["state"] == "failed" and "outside its folder" in done["error"]
+    assert world.call("ann", "GET", "/projects/slip").status_code == 404 and not list(tmp_path.rglob("evil*")) and not (tmp_path.parent / "evil.json").exists()
+
+
+@pytest.mark.parametrize("name", ["pipeline/<script>.json", 'pipeline/a"b.json', "pipeline/a|b.json", "pipeline/a?.json", "pipeline/trailing.json.", "pipeline/ctl\x01.json"])
+def test_a_file_name_the_os_cannot_create_is_refused_with_a_plain_reason(world, name):
+    up = world.call("ann", "PUT", "/uploads/zip", content=make_zip({name: "{}"}), headers={"Content-Type": "application/zip"}).json()
+    done = world.wait("ann", world.call("ann", "POST", "/projects", json_body={"project_name": "badname", "source": {"kind": "zip", "upload_id": up["upload_id"]}}).json())
+    assert done["state"] == "failed" and "cannot be created on Windows" in done["error"] and "OSError" not in done["error"]
+
+
+def test_absurdly_nested_json_is_refused_with_a_plain_reason_not_a_recursion_error(world):
+    deep = '{"name": "PL_Deep", "properties": {"activities": ' + "[" * 4000 + "]" * 4000 + "}}"
+    up = world.call("ann", "PUT", "/uploads/zip", content=make_zip({"pipeline/PL_Deep.json": deep}), headers={"Content-Type": "application/zip"}).json()
+    done = world.wait("ann", world.call("ann", "POST", "/projects", json_body={"project_name": "deep", "source": {"kind": "zip", "upload_id": up["upload_id"]}}).json())
+    assert done["state"] == "failed" and "levels deep" in done["error"] and "Recursion" not in done["error"]

@@ -723,7 +723,7 @@ def _generate(entry: WorkloadEntry, spec: _Spec, code: Code, tr: Optional[transf
     slug = _slug(entry.name)
     display = entry.name
     if used_names.get(display.lower(), entry.id) != entry.id:  # two workloads with one display name
-        display = f"{display}_{hashlib.sha1(entry.id.encode()).hexdigest()[:6]}"
+        display = f"{display}_{hashlib.sha1(entry.id.encode(), usedforsecurity=False).hexdigest()[:6]}"
         entry.unresolved.append(f"Two source workloads are named '{entry.name}'; this one is deployed as '{display}'.")
     used_names[display.lower()] = entry.id
     base = f"workloads/artifacts/{slug}"

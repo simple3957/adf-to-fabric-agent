@@ -212,7 +212,7 @@ def scan_target(conversion_dir: Path) -> TargetScan:
     cy = conversion_dir / "conversion.yaml"
     if cy.is_file():
         try:
-            doc = yaml.load(cy.read_text(encoding="utf-8"), Loader=getattr(yaml, "CSafeLoader", yaml.SafeLoader)) or {}
+            doc = yaml.load(cy.read_text(encoding="utf-8"), Loader=getattr(yaml, "CSafeLoader", yaml.SafeLoader)) or {}  # nosec B506: a safe loader
             for o in doc.get("pipelines", []) if isinstance(doc, dict) else []:
                 if isinstance(o, dict) and o.get("source_pipeline") and o.get("artifact_path"):
                     scan.name_map[str(o["source_pipeline"]).lower()] = str(o["artifact_path"])

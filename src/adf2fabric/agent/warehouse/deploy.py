@@ -119,7 +119,7 @@ def _insert_from_parquet(cur: Any, step: Step, entry: ManifestEntry, parquet_dir
         chunk = rows[i : i + per]
         values = ", ".join("(" + ", ".join("?" * len(cols)) + ")" for _ in chunk)
         params = [r[c] for r in chunk for c in cols]
-        cur.execute(f"INSERT INTO {_q(entry.target_schema)}.{_q(entry.target_name)} ({collist}) VALUES {values}", params)
+        cur.execute(f"INSERT INTO {_q(entry.target_schema)}.{_q(entry.target_name)} ({collist}) VALUES {values}", params)  # nosec B608: names go through _q(); values are bound parameters
     return len(rows)
 
 
@@ -143,7 +143,7 @@ def deploy(manifest: list[ManifestEntry], catalog: SourceCatalog, conn: Any, *, 
         if e.action == "create" and f"{e.target_schema}.{e.target_name}".lower() in existing:
             run.conflicts.append(f"{e.target_schema}.{e.target_name}")
             if conflict_policy == "if_empty" and e.kind == ObjectKind.table and not _rows(
-                    cur, f"SELECT COUNT_BIG(*) FROM {_q(e.target_schema)}.{_q(e.target_name)}")[0][0]:
+                    cur, f"SELECT COUNT_BIG(*) FROM {_q(e.target_schema)}.{_q(e.target_name)}")[0][0]:  # nosec B608: names go through _q()
                 e.action = "load_only"
                 e.warnings.append("Already in the target and empty: loaded (conflict policy 'if_empty').")
             elif conflict_policy in ("skip", "if_empty"):
@@ -180,7 +180,7 @@ def deploy(manifest: list[ManifestEntry], catalog: SourceCatalog, conn: Any, *, 
                 run.created.append(step.object_key)
             elif step.action == "load":
                 s, n = step.object_key.split(".", 1)
-                got = _rows(cur, f"SELECT COUNT_BIG(*) FROM {_q(s)}.{_q(n)}")[0][0]
+                got = _rows(cur, f"SELECT COUNT_BIG(*) FROM {_q(s)}.{_q(n)}")[0][0]  # nosec B608: names go through _q()
                 o = catalog.get(by_key[step.object_key.lower()].source_key)
                 step.detail += f"; {got} rows in target, {o.row_count} in source"
                 if got != o.row_count:

@@ -70,5 +70,5 @@ def inventory(conn: Any, row_counts: bool = True) -> dict[str, TargetObject]:
         for o in out.values():
             if o.kind == ObjectKind.table:
                 n = o.schema_name.replace("]", "]]"), o.name.replace("]", "]]")
-                o.row_count = _rows(cur, f"SELECT COUNT_BIG(*) AS n FROM [{n[0]}].[{n[1]}]")[0]["n"]
+                o.row_count = _rows(cur, f"SELECT COUNT_BIG(*) AS n FROM [{n[0]}].[{n[1]}]")[0]["n"]  # nosec B608: ] is doubled above
     return out

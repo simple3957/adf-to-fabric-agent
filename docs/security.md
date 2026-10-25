@@ -33,8 +33,11 @@ it (`azure:use`) acts through that session, restricted to the subscriptions, ten
   legacy token can be guessed, so it stays behind it. A damaged user store refuses everyone (503); it never lets anyone in.
 * The Host header must be a plain host (and numeric port) on the allow-list: `127.0.0.1:8765@evil.example` is refused.
 * A brief cannot be approved by the person who submitted it (four eyes; the single user of an unauthenticated local install is exempt).
-* Brief, journey and notes records are changed under a per-file lock with unique temp files, so concurrent requests do not lose each
-  other's changes (one API process per projects root; several processes writing one folder are not covered).
+* Brief, journey and notes records are changed under a per-file lock (a thread lock plus an OS file lock on a `.lock` sidecar) with unique
+  temp files, so concurrent requests, several API processes and a CLI run beside the API do not lose each other's changes. A network file
+  system that ignores OS locks is not covered.
+* A ZIP is refused whole, with a plain reason, for a file name the OS cannot create (`< > : " | ? *`, control characters, a trailing dot or
+  space), for JSON nested more than 100 levels deep, as well as for the earlier traversal, symlink, bomb and reserved-name cases.
 * Bearer tokens travel in the `Authorization` header only. There are **no cookies**, so classic CSRF cannot ride a credential.
 * Short-lived credentials: Azure tokens come from the Azure CLI per call and are cached in memory for their lifetime only; Databricks and
   Key Vault tokens are read from environment variables you name, used for one request, never stored.
@@ -144,10 +147,16 @@ The CLI commands (`provision-*`, `workloads-*`, `validate`) still rely on the op
 * **SSRF is checked at request time.** DNS can change before `git` fetches; use the allow-list where you can.
 * **Project files on disk are not encrypted** and rely on filesystem permissions. Source ADF JSON can contain secrets that its authors
   stored there (validation reports them without printing them).
-* **Dependencies are not scanned** here; run your usual supply-chain checks on `pip freeze`.
 * **No independent penetration test has been done.** A black-box probe of the running API (authn, authz, tenancy, SSRF, uploads, races, secret
-  leakage) and a UI probe were run by the developers; its findings are fixed and covered by `tests/test_security_probe.py`. bandit and pip-audit
-  were not available, so no static-analysis or CVE scan was done.
+  leakage), a UI probe and a hostile-source run through every stage were done by the developers; the findings are fixed and covered by
+  `tests/test_security_probe.py`.
+* **Static analysis (bandit, 2026-10-25):** no high or medium finding remains unexplained. The medium B608/B506 hits are reviewed and marked
+  `# nosec` with the reason (identifiers go through `_q()`, values are bound parameters, a safe YAML loader); the SHA-1 use is a display
+  suffix, not security (`usedforsecurity=False`). Low findings (try/except-pass, subprocess use of `git`) are not triaged one by one.
+* **Dependency scan (pip-audit, 2026-10-25):** the development environment had known vulnerabilities in transitive packages the project
+  does not pin: aiohttp, anyio, certifi, multidict, pillow (via streamlit) and werkzeug (via Flask). They were **not** upgraded here. Re-run
+  `pip-audit` on the exact versions you deploy and upgrade before calling a deployment production-secure.
+* **Not covered:** hostile content arriving through Git or a live ARM source is not depth-limited the way a ZIP is.
 
 ## Deployment checks (all must pass before calling a deployment production-secure)
 

@@ -58,7 +58,7 @@ _SAFE_LOADER = getattr(yaml, "CSafeLoader", yaml.SafeLoader)
 
 
 def _safe_load(stream):
-    return yaml.load(stream, Loader=_SAFE_LOADER)  # noqa: S506 - a safe loader, never the full one
+    return yaml.load(stream, Loader=_SAFE_LOADER)  # noqa: S506  # nosec B506: a safe loader, never the full one
 
 
 def slugify(name: str) -> str:

@@ -149,7 +149,7 @@ def rule_watermark_update(pc: PipelineCtx) -> None:
         numeric = bool(col_type and _NUMERIC.match(col_type))
         value = f"@{{activity('{new[0].name}').output.firstRow.{alias}}}"
         literal = value if numeric else f"'{value}'"
-        text = f"UPDATE {table} SET {col} = {literal}" + (f" WHERE {where}" if where else "")
+        text = f"UPDATE {table} SET {col} = {literal}" + (f" WHERE {where}" if where else "")  # nosec B608: a proposal a person reviews, built from the source's own statement; never executed here
         ls_ref = ctrl_ds.linked_service_ref.name if ctrl_ds and ctrl_ds.linked_service_ref else None
         assumptions = [
             f"the new watermark is the value returned by '{new[0].name}' (alias {alias})",
