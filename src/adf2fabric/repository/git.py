@@ -59,7 +59,7 @@ def ls_remote(url: str, branch: str) -> bool:
     Validates accessibility + authentication + branch existence in a single
     deterministic step without cloning. ``url`` may carry credentials.
     """
-    proc = _run(["ls-remote", "--heads", url, branch])
+    proc = _run(["ls-remote", "--heads", "--", url, branch])
     return bool(proc.stdout.strip())
 
 
@@ -68,7 +68,7 @@ def default_branch(url: str) -> str | None:
 
     ``url`` may carry credentials. A detached or empty remote has no symbolic ``HEAD``, so the answer is None.
     """
-    proc = _run(["ls-remote", "--symref", url, "HEAD"])
+    proc = _run(["ls-remote", "--symref", "--", url, "HEAD"])
     for line in proc.stdout.splitlines():
         if line.startswith("ref:"):
             ref = line[len("ref:"):].split("\t", 1)[0].strip()

@@ -28,8 +28,13 @@ it (`azure:use`) acts through that session, restricted to the subscriptions, ten
   Rotate with `auth-user-rotate`, disable with `auth-user-update --disable`.
 * The legacy single `ADF2FABRIC_API_TOKEN` still works and maps to one admin of the `default` organisation. Prefer named users; the shared
   token is not attributable to a person.
-* Failed sign-ins lock a client out after 8 attempts for 5 minutes (per client address hash) and are audited. A damaged user store refuses
-  everyone (503); it never lets anyone in.
+* Failed sign-ins lock a client's guesses out after 8 attempts for 5 minutes (per client address hash) and are audited. A valid per-user
+  token is never held back by that lockout (it cannot be guessed, and a proxy or office address must not lock out real users); the shared
+  legacy token can be guessed, so it stays behind it. A damaged user store refuses everyone (503); it never lets anyone in.
+* The Host header must be a plain host (and numeric port) on the allow-list: `127.0.0.1:8765@evil.example` is refused.
+* A brief cannot be approved by the person who submitted it (four eyes; the single user of an unauthenticated local install is exempt).
+* Brief, journey and notes records are changed under a per-file lock with unique temp files, so concurrent requests do not lose each
+  other's changes (one API process per projects root; several processes writing one folder are not covered).
 * Bearer tokens travel in the `Authorization` header only. There are **no cookies**, so classic CSRF cannot ride a credential.
 * Short-lived credentials: Azure tokens come from the Azure CLI per call and are cached in memory for their lifetime only; Databricks and
   Key Vault tokens are read from environment variables you name, used for one request, never stored.
@@ -140,7 +145,9 @@ The CLI commands (`provision-*`, `workloads-*`, `validate`) still rely on the op
 * **Project files on disk are not encrypted** and rely on filesystem permissions. Source ADF JSON can contain secrets that its authors
   stored there (validation reports them without printing them).
 * **Dependencies are not scanned** here; run your usual supply-chain checks on `pip freeze`.
-* **No penetration test has been done.**
+* **No independent penetration test has been done.** A black-box probe of the running API (authn, authz, tenancy, SSRF, uploads, races, secret
+  leakage) and a UI probe were run by the developers; its findings are fixed and covered by `tests/test_security_probe.py`. bandit and pip-audit
+  were not available, so no static-analysis or CVE scan was done.
 
 ## Deployment checks (all must pass before calling a deployment production-secure)
 

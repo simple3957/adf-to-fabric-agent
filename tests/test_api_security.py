@@ -132,8 +132,9 @@ def test_failed_sign_ins_lock_the_client_out_and_are_audited(tmp_path, monkeypat
     w = World(tmp_path, auth_fail_limit=3, auth_fail_window=60)
     for _ in range(3):
         assert w.http.get("/me", headers={"Authorization": "Bearer wrong"}).status_code == 401
-    locked = w.http.get("/me", headers={"Authorization": f"Bearer {w.tokens['vic']}"})
-    assert locked.status_code == 429 and int(locked.headers["retry-after"]) >= 1  # even the right token waits: this is a brute-force defence
+    guess = w.http.get("/me", headers={"Authorization": "Bearer wrong"})
+    assert guess.status_code == 429 and int(guess.headers["retry-after"]) >= 1  # the address's further guesses wait: this is the brute-force defence
+    assert w.http.get("/me", headers={"Authorization": f"Bearer {w.tokens['vic']}"}).status_code == 200  # a real user behind the same address is not locked out
     actions = [e["action"] for e in w.audit.read()]
     assert actions.count("auth.failure") == 3 and "auth.locked_out" in actions
 

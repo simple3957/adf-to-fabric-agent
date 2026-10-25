@@ -98,6 +98,8 @@ def check_public_https_url(url: object, allowed_hosts: Iterable[str] = (), resol
     """
     if not isinstance(url, str) or len(url) > 2048:
         raise Rejected("The repository URL is missing or too long.")
+    if any(c.isspace() or ord(c) < 32 or ord(c) == 127 or c == "\\" for c in url.strip()):  # urlsplit silently drops line breaks and tabs, so it would pass what git then receives
+        raise Rejected("The repository URL may not contain spaces, line breaks, control characters or backslashes.")
     u = urlsplit(url.strip())
     if u.scheme != "https":
         raise Rejected("Only https:// repository URLs are accepted.")

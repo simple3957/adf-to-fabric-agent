@@ -7,6 +7,7 @@ stops treating it as approved until it is submitted and approved again. Approval
 
 from __future__ import annotations
 
+import functools
 import hashlib
 import json
 from datetime import datetime, timezone
@@ -14,6 +15,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from adf2fabric.agent.consultation import brief as B
+from adf2fabric.project.locks import lock_for, write_atomic
 
 
 class BriefError(ValueError):
@@ -76,11 +78,16 @@ def workspace_mismatch(store: Any, pid: str, target_workspace: Optional[str]) ->
 
 
 def save(store: Any, pid: str, data: dict[str, Any]) -> None:
-    p = path(store, pid)
-    p.parent.mkdir(parents=True, exist_ok=True)
-    tmp = p.with_suffix(".tmp")
-    tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
-    tmp.replace(p)
+    write_atomic(path(store, pid), json.dumps(data, indent=2, ensure_ascii=False))
+
+
+def _locked(fn):
+    """Every change to the brief is load -> change -> save: one at a time per project, or concurrent requests lose each other's work."""
+    @functools.wraps(fn)
+    def run(store, pid, *a, **kw):
+        with lock_for(path(store, pid)):
+            return fn(store, pid, *a, **kw)
+    return run
 
 
 def _note(data: dict, text: str, kind: str = "system", by: str = "") -> None:
@@ -126,6 +133,7 @@ def approved_settings(store: Any, pid: str, destination: Optional[dict] = None) 
     return view(store, pid, destination)["settings"]
 
 
+@_locked
 def set_answers(store: Any, pid: str, answers: dict[str, Any], by: str = "", destination: Optional[dict] = None) -> int:
     data = load(store, pid)
     facts = B.read_facts(store, pid, _config(data, destination, capture=True))
@@ -150,6 +158,7 @@ def set_answers(store: Any, pid: str, answers: dict[str, Any], by: str = "", des
     return len(answers)
 
 
+@_locked
 def accept_recommendations(store: Any, pid: str, by: str = "", destination: Optional[dict] = None) -> int:
     data = load(store, pid)
     facts = B.read_facts(store, pid, _config(data, destination, capture=True))
@@ -162,6 +171,7 @@ def accept_recommendations(store: Any, pid: str, by: str = "", destination: Opti
     return len(taken)
 
 
+@_locked
 def submit(store: Any, pid: str, by: str = "", destination: Optional[dict] = None) -> dict[str, Any]:
     data = load(store, pid)
     _config(data, destination, capture=True)
@@ -184,6 +194,7 @@ def submit(store: Any, pid: str, by: str = "", destination: Optional[dict] = Non
     return version
 
 
+@_locked
 def approve(store: Any, pid: str, fingerprint: str, by: str, destination: Optional[dict] = None) -> dict[str, Any]:
     """Approve the submitted version, only if it is still what the answers say (the fingerprint the approver saw)."""
     if not by.strip():
@@ -194,12 +205,16 @@ def approve(store: Any, pid: str, fingerprint: str, by: str, destination: Option
     if fingerprint != v["fingerprint"]:
         raise BriefError("The answers changed after you read them: review the brief again before approving.")
     data = load(store, pid)
+    submitter = str(data["versions"][-1].get("submitted_by") or "")
+    if submitter and submitter == by.strip() and by.strip() != "local":  # four eyes; "local" is the single user of an unauthenticated install
+        raise BriefError("The person who submitted the brief cannot also approve it: another approver must.")
     data["versions"][-1].update(approved_at=_now(), approved_by=by.strip())
     _note(data, f"Brief v{data['versions'][-1]['version']} approved by {by.strip()}.", "system", by)
     save(store, pid, data)
     return data["versions"][-1]
 
 
+@_locked
 def import_answers(store: Any, pid: str, payload: Any, by: str = "", destination: Optional[dict] = None) -> int:
     """Answers from a filled questionnaire (``brief.questionnaire`` format, or a plain {id: value} map). Unknown or
     inapplicable questions are skipped; each value is checked against the question's own options."""
@@ -230,6 +245,7 @@ def import_answers(store: Any, pid: str, payload: Any, by: str = "", destination
     return taken
 
 
+@_locked
 def add_note(store: Any, pid: str, text: str, by: str = "") -> None:
     if not text.strip():
         raise BriefError("The note is empty.")
@@ -238,6 +254,7 @@ def add_note(store: Any, pid: str, text: str, by: str = "") -> None:
     save(store, pid, data)
 
 
+@_locked
 def reset(store: Any, pid: str, by: str = "") -> None:
     """Clear the answers (versions and notes are kept as history)."""
     data = load(store, pid)

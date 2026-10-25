@@ -54,6 +54,7 @@ from adf2fabric.connections.providers.zip_source import ZipRejected
 from adf2fabric.connections.redaction import redact
 from adf2fabric.connections.resolution import ConnectionChoice
 from adf2fabric.connections.service import SCOPE
+from adf2fabric.project.locks import lock_for, write_atomic
 from adf2fabric.project.store import ProjectNotFoundError, slugify
 
 SESSION_HEADER = "x-session-id"
@@ -168,29 +169,31 @@ def create_app(settings: Optional[Settings] = None, live: Optional[Container] = 
             request.state.principal = LOCAL
             return LOCAL
         client = _client(request)
-        wait = limiter.blocked(f"ip:{client}", "authfail", sec.auth_fail_limit, sec.auth_fail_window)
-        if wait is not None:
-            audit.event("auth.locked_out", "denied", request_id=_rid(request), client=client)
-            raise HTTPException(429, "Too many failed sign-ins. Try again later.", headers={"Retry-After": str(int(wait))})
         given = request.headers.get("authorization", "")
         token = given[7:].strip() if given.lower().startswith("bearer ") else ""
         principal: Optional[Principal] = None
         if token:
+            try:  # per-user tokens are random 160-bit values: a guess cannot succeed, so a valid one is never held back by the address lockout
+                principal = users.authenticate(token)
+            except UserError:  # a damaged user store locks everyone out; it never lets anyone in
+                audit.event("auth.unavailable", "failed", request_id=_rid(request))
+                raise HTTPException(503, "Authentication is temporarily unavailable.") from None
+        if principal is None:
+            # Everything that CAN be guessed is behind the lockout: the static legacy token (which may be weak), and every bad or missing token.
+            # Failures from one address lock out that address's guesses, never the real users who share it (a proxy, an office NAT).
+            wait = limiter.blocked(f"ip:{client}", "authfail", sec.auth_fail_limit, sec.auth_fail_window)
+            if wait is not None:
+                audit.event("auth.locked_out", "denied", request_id=_rid(request), client=client)
+                raise HTTPException(429, "Too many failed sign-ins. Try again later.", headers={"Retry-After": str(int(wait))})
             legacy = sec.legacy_token
-            if legacy and hmac.compare_digest(token, legacy):
+            if token and legacy and hmac.compare_digest(token, legacy):
                 principal = make_principal("legacy-token", sec.legacy_org, ["admin"],
                                            Grants(subscriptions=[WILDCARD], tenants=[WILDCARD], accounts=[WILDCARD], workspaces=[WILDCARD]), "legacy_token")
-            else:
-                try:
-                    principal = users.authenticate(token)
-                except UserError:  # a damaged user store locks everyone out; it never lets anyone in
-                    audit.event("auth.unavailable", "failed", request_id=_rid(request))
-                    raise HTTPException(503, "Authentication is temporarily unavailable.") from None
+                limiter.clear(f"ip:{client}", "authfail")
         if principal is None:
             limiter.record(f"ip:{client}", "authfail")
             audit.event("auth.failure", "denied", request_id=_rid(request), client=client, reason="missing" if not token else "invalid")
             raise HTTPException(401, "A valid bearer token is required.", headers={"WWW-Authenticate": "Bearer"})
-        limiter.clear(f"ip:{client}", "authfail")
         request.state.principal = principal
         return principal
 
@@ -395,9 +398,10 @@ def create_app(settings: Optional[Settings] = None, live: Optional[Container] = 
         elif src.kind == "git":
             if src.repository_url:
                 guards.check_public_https_url(src.repository_url, sec.allowed_git_hosts)
-        if src.revision and not re.fullmatch(r"[A-Za-z0-9._/@^~-]{1,200}", src.revision) or (src.revision or "").startswith("-"):
+        if src.revision and not re.fullmatch(r"[A-Za-z0-9._/@^~-]{1,200}", src.revision) or (src.revision or "").startswith("-") or ".." in (src.revision or ""):
             raise guards.Rejected("The revision may use letters, digits and . _ / @ ^ ~ - only, and may not start with '-'.")
-        if src.subdirectory and (".." in src.subdirectory.replace("\\", "/").split("/") or src.subdirectory.startswith(("/", "\\")) or ":" in src.subdirectory or len(src.subdirectory) > 200):
+        if src.subdirectory and (".." in src.subdirectory.replace("\\", "/").split("/") or src.subdirectory.startswith(("/", "\\")) or ":" in src.subdirectory or len(src.subdirectory) > 200
+                                 or any(ord(c) < 32 or ord(c) == 127 for c in src.subdirectory)):
             raise guards.Rejected("The subdirectory must be a relative path inside the source.")
         if src.upload_id:
             guards.valid_id(src.upload_id, "upload id")
@@ -899,11 +903,7 @@ def create_app(settings: Optional[Settings] = None, live: Optional[Container] = 
             return []
 
     def _journey_write(ctx: Ctx, slug: str, steps: list[str]) -> None:
-        f = _journey_file(ctx, slug)
-        f.parent.mkdir(parents=True, exist_ok=True)
-        tmp = f.with_suffix(".tmp")
-        tmp.write_text(json.dumps({"confirmed": [s for s in JOURNEY_STEPS if s in steps]}), encoding="utf-8")
-        tmp.replace(f)
+        write_atomic(_journey_file(ctx, slug), json.dumps({"confirmed": [s for s in JOURNEY_STEPS if s in steps]}))
 
     @app.get("/projects/{pid}/journey")
     def journey_get(pid: str, ctx: Ctx = Depends(), _: Principal = need(P.projects_view)):
@@ -915,15 +915,17 @@ def create_app(settings: Optional[Settings] = None, live: Optional[Container] = 
         bad = [s for s in body.steps if s not in JOURNEY_STEPS]
         if bad:
             raise HTTPException(422, f"Unknown step(s): {', '.join(bad[:3])}.")
-        merged = sorted(set(_journey_read(ctx, slug)) | set(body.steps))
-        _journey_write(ctx, slug, merged)
+        with lock_for(_journey_file(ctx, slug)):
+            merged = sorted(set(_journey_read(ctx, slug)) | set(body.steps))
+            _journey_write(ctx, slug, merged)
         ctx.audit("journey.confirm", "ok", resource="project", resource_id=slug, steps=",".join(body.steps))
         return {"confirmed": _journey_read(ctx, slug)}
 
     @app.post("/projects/{pid}/journey/reset")
     def journey_reset(pid: str, body: S.JourneyBody, ctx: Ctx = Depends(), _: Principal = need(P.plans_generate)):
         slug = ctx.project(pid)
-        _journey_write(ctx, slug, [s for s in _journey_read(ctx, slug) if s not in set(body.steps)])
+        with lock_for(_journey_file(ctx, slug)):
+            _journey_write(ctx, slug, [s for s in _journey_read(ctx, slug) if s not in set(body.steps)])
         ctx.audit("journey.reset", "ok", resource="project", resource_id=slug, steps=",".join(body.steps))
         return {"confirmed": _journey_read(ctx, slug)}
 

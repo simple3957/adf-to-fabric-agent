@@ -14,6 +14,7 @@ CSRF cannot ride them; the checks above also protect the local no-authentication
 
 from __future__ import annotations
 
+import re
 import uuid
 
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -48,10 +49,14 @@ class SecurityMiddleware(BaseHTTPMiddleware):
         self.hosts = {h.lower() for h in sec.allowed_hosts}
         self.origins = {o.lower().rstrip("/") for o in sec.allowed_origins}
 
+    _HOST = re.compile(r"^(?P<name>[a-z0-9]([a-z0-9.\-]*[a-z0-9])?|\[[0-9a-f:.]+\])(?::(?P<port>[0-9]{1,5}))?$")
+
     def _host_ok(self, host: str) -> bool:
-        host = host.lower()
-        bare = host.rsplit(":", 1)[0] if (host.count(":") == 1 or host.startswith("[") and "]:" in host) else host
-        return host in self.hosts or bare in self.hosts
+        m = self._HOST.match(host.strip().lower())  # userinfo ('@'), spaces, slashes, backslashes and non-numeric ports never match
+        if not m:
+            return False
+        name, port = m.group("name"), m.group("port")
+        return name in self.hosts or (f"{name}:{port}" in self.hosts if port else False)
 
     async def dispatch(self, request: Request, call_next):
         rid = uuid.uuid4().hex[:12]

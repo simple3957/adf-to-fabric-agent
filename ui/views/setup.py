@@ -152,7 +152,7 @@ def zip_source() -> None:
     if res:
         s = res["summary"]
         st.markdown(theme.badge("Looks like ADF" if res["ok"] else "Not a usable ADF export", "success" if res["ok"] else "error")
-                    + f" &nbsp; flavor: `{s['flavor']}` · " + ", ".join(f"{n} {k}" for k, n in s.get("counts", {}).items()),
+                    + f" &nbsp; flavor: <code>{theme.esc(s['flavor'])}</code> · " + ", ".join(f"{theme.esc(n)} {theme.esc(k)}" for k, n in s.get("counts", {}).items()),
                     unsafe_allow_html=True)
         if s.get("synapse_only"):
             st.warning("Synapse-only items (not converted): " + ", ".join(f"{k}: {n}" for k, n in s["synapse_only"].items()))
