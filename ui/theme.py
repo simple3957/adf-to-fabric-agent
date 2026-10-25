@@ -1,4 +1,4 @@
-"""ADF → Fabric Studio look: light surfaces, emerald → cyan accents, a vertical stepper.
+"""ADF → Fabric Studio look: light surfaces, a blue to violet accent (the palette of the Synapse accelerator UI), a vertical stepper.
 
 Colours are WCAG AA on their backgrounds: body text and muted text on white/near-white, white text on the accent gradient.
 
@@ -15,12 +15,12 @@ import streamlit as st
 CSS = """
 <style>
 :root {
-  --bg:#f5f7fa; --surface:#ffffff; --surface-2:#f1f4f8; --surface-3:#e6ebf1; --border:#e2e8f0; --border-strong:#cbd5e1;
-  --text:#0f172a; --muted:#475569; --faint:#64748b;
-  --em:#047857; --cy:#0e7490; --grad:linear-gradient(120deg,#047857 0%,#0e7490 100%); --em-soft:rgba(4,120,87,.09);
-  --ok:#15803d; --ok-soft:rgba(21,128,61,.10); --warn:#b45309; --warn-soft:rgba(180,83,9,.10);
-  --err:#b91c1c; --err-soft:rgba(185,28,28,.09); --info:#0369a1; --info-soft:rgba(3,105,161,.09); --neutral:#94a3b8;
-  --on-accent:#ffffff; --shadow:rgba(15,23,42,.08);
+  --bg:#f4f6fb; --surface:#ffffff; --surface-2:#f7f9fd; --surface-3:#eef2f9; --border:#e1e6f0; --border-strong:#cdd5e3;
+  --text:#172033; --muted:#556179; --faint:#7d879c;
+  --em:#2f6fec; --cy:#7c4ddb; --grad:linear-gradient(135deg,#2f6fec,#7c4ddb); --em-soft:rgba(47,111,236,.10);
+  --ok:#1f8a3a; --ok-soft:rgba(31,138,58,.10); --warn:#a86d00; --warn-soft:rgba(214,162,50,.16);
+  --err:#cf3b31; --err-soft:rgba(207,59,49,.09); --info:#1f6fd6; --info-soft:rgba(31,111,214,.10); --neutral:#94a3b8;
+  --on-accent:#ffffff; --shadow:rgba(23,32,51,.08);
   --head:'Segoe UI Variable Display', 'Segoe UI', system-ui, sans-serif;
 }
 html, body, .stApp, .stMarkdown, button, input, textarea, select { font-family: 'Segoe UI', system-ui, sans-serif; }
@@ -34,7 +34,7 @@ code { background: var(--surface-3); color: var(--em); }
 /* buttons */
 .stButton > button, .stFormSubmitButton > button, .stDownloadButton > button { border-radius: 999px; font-weight: 600; }
 .stButton > button[kind="primary"], .stFormSubmitButton > button[kind="primaryFormSubmit"] {
-  background: var(--grad); color: var(--on-accent); border: 0; box-shadow: 0 6px 16px rgba(4,120,87,.22); }
+  background: var(--grad); color: var(--on-accent); border: 0; box-shadow: 0 6px 16px rgba(47,111,236,.22); }
 .stButton > button[kind="primary"]:hover { filter: brightness(1.08); }
 .stButton > button[kind="primary"]:disabled { background: var(--surface-3); color: var(--faint); box-shadow: none; }
 .stButton > button[kind="secondary"] { background: var(--surface); border: 1px solid var(--border-strong); color: var(--text); }
@@ -64,13 +64,13 @@ code { background: var(--surface-3); color: var(--em); }
   font-family: var(--head); background: var(--surface-2); border:1px solid var(--border-strong); color: var(--muted); }
 .ma-num.done { background: var(--grad); border:0; color: var(--on-accent); }
 .ma-note { display:flex; gap:10px; align-items:flex-start; padding:12px 16px; border-radius:14px; background: var(--em-soft);
-  border:1px solid rgba(4,120,87,.25); font-size:14px; color: var(--text); }
+  border:1px solid rgba(47,111,236,.25); font-size:14px; color: var(--text); }
 .ma-placeholder { padding:30px; border:1px dashed var(--border-strong); border-radius:18px; color: var(--muted); text-align:center; }
 
 /* side cards */
 [class*="st-key-card-"] { position:relative; background: var(--surface); border:1px solid var(--border); border-radius:18px; padding: 20px 22px;
   box-shadow: 0 2px 8px var(--shadow); }
-[class*="st-key-card-ok-"] { border-color: rgba(4,120,87,.45); box-shadow: 0 0 0 1px rgba(4,120,87,.10), 0 8px 24px rgba(4,120,87,.08); }
+[class*="st-key-card-ok-"] { border-color: rgba(47,111,236,.45); box-shadow: 0 0 0 1px rgba(47,111,236,.10), 0 8px 24px rgba(47,111,236,.08); }
 .ma-side { display:flex; align-items:center; gap:12px; margin-bottom:6px; }
 .ma-mark { width:42px; height:42px; border-radius:12px; display:grid; place-items:center; font-weight:800; color:#fff; font-family: var(--head); }
 .ma-side h3 { margin:0; padding:0; font-size:17px; }
@@ -107,7 +107,7 @@ code { background: var(--surface-3); color: var(--em); }
 .ma-vrow > div { min-width:0; }
 [class*="st-key-vstep-"]::before { content:""; position:absolute; left:26px; top:46px; bottom:-14px; width:2px; background: var(--border-strong); }
 .st-key-vstep-last::before, [class*="st-key-vstep-"][class*="-last"]::before { display:none; }
-[class*="st-key-vstep-sel-"] { background: linear-gradient(90deg, rgba(4,120,87,.08), transparent); border-color: rgba(4,120,87,.30); }
+[class*="st-key-vstep-sel-"] { background: linear-gradient(90deg, rgba(47,111,236,.08), transparent); border-color: rgba(47,111,236,.30); }
 [class*="st-key-vstep-locked-"] { opacity:.55; }
 .ma-vdot { flex:none; width:34px; height:34px; border-radius:50%; display:grid; place-items:center;
   font-weight:800; font-size:14px; background: var(--surface-3); color: var(--muted); border:1px solid var(--border-strong); }
@@ -135,7 +135,7 @@ code { background: var(--surface-3); color: var(--em); }
 .ma-next .ic { font-size:20px; }
 .ma-next strong { font-size:15px; display:block; font-family: var(--head); }
 .ma-next .muted { color: var(--muted); font-size:13.5px; }
-.st-key-done { background: var(--surface); border:1px solid rgba(4,120,87,.45); border-radius:20px; padding: 18px 24px; margin-bottom: 14px; }
+.st-key-done { background: var(--surface); border:1px solid rgba(47,111,236,.45); border-radius:20px; padding: 18px 24px; margin-bottom: 14px; }
 
 /* streamlit widgets */
 [data-testid="stMetric"] { background: var(--surface); border:1px solid var(--border); border-radius:16px; padding: 14px 18px; }
@@ -143,6 +143,32 @@ code { background: var(--surface-3); color: var(--em); }
 [data-testid="stMetricValue"] { font-family: var(--head); }
 [data-testid="stExpander"] details { background: var(--surface); border-color: var(--border); border-radius: 14px; }
 [data-testid="stProgress"] > div > div > div > div { background: var(--grad); }
+
+/* waves, stat strip, option cards: the look of the Synapse accelerator's Waves and Plan panels */
+.ma-stats { display:grid; grid-template-columns:repeat(auto-fit,minmax(140px,1fr)); overflow:hidden; border-radius:14px; border:1px solid var(--border);
+  background: var(--surface-2); margin: 4px 0 14px; }
+.ma-stat { display:flex; flex-direction:column; gap:2px; min-width:0; padding:14px 18px; box-shadow: 1px 0 0 var(--border); }
+.ma-stat .k { font-size:11.5px; font-weight:700; letter-spacing:.07em; text-transform:uppercase; color: var(--faint); }
+.ma-stat .v { font-size:26px; font-weight:750; letter-spacing:-.02em; line-height:1.15; font-variant-numeric: tabular-nums; }
+.ma-stat .v.accent { color: var(--em); } .ma-stat .v.error { color: var(--err); } .ma-stat .v.ok { color: var(--ok); }
+.ma-stat .h { font-size:12.5px; color: var(--muted); }
+.ma-waves { list-style:none; margin:0; padding:0; display:flex; flex-direction:column; gap:8px; }
+.ma-wave-row { display:grid; grid-template-columns:34px minmax(0,1fr) minmax(120px,260px) 72px; gap:14px; align-items:center; padding:10px 14px;
+  border-radius:12px; border:1px solid var(--border); background: var(--surface-2); }
+.ma-wave-row:hover { border-color: var(--em); }
+.ma-wave-badge { width:30px; height:30px; border-radius:9px; display:grid; place-items:center; font-weight:700; color: var(--em); background: var(--em-soft); }
+.ma-wave-main { display:flex; flex-direction:column; min-width:0; }
+.ma-wave-main .f { font-size:13px; color: var(--faint); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.ma-wave-bar { height:8px; border-radius:999px; background: var(--surface-3); overflow:hidden; }
+.ma-wave-bar span { display:block; height:100%; border-radius:inherit; background: var(--grad); }
+.ma-wave-count { text-align:right; font-weight:700; font-variant-numeric: tabular-nums; }
+[class*="st-key-opt-"] { background: var(--surface-2); border:1px solid var(--border); border-radius:14px; padding:14px 16px; margin: 4px 0 14px; }
+.ma-opt-head { display:flex; align-items:center; gap:10px; margin-bottom:2px; }
+.ma-opt-head strong { font-family: var(--head); font-size:15.5px; }
+.ma-opt-head .src { margin-left:auto; font-size:12.5px; color: var(--faint); }
+.ma-opt-note { font-size:13px; color: var(--muted); margin: 0 0 6px; }
+.ma-need-list { margin:0; padding-left:18px; } .ma-need-list li { font-size:14px; }
+@media (max-width: 720px) { .ma-wave-row { grid-template-columns:30px minmax(0,1fr) 56px; } .ma-wave-bar { display:none; } }
 </style>
 """
 
@@ -178,3 +204,23 @@ def ring(done: int, total: int, title: str, sub: str) -> str:
 
 def html_block(markup: str) -> None:
     st.markdown(markup, unsafe_allow_html=True)
+
+
+def stats(items: list[tuple[str, object, str, str]]) -> str:
+    """A strip of figures like the Synapse accelerator's: (label, value, tone, hint). Tone is '', 'accent', 'ok' or 'error'."""
+    cells = "".join(f'<div class="ma-stat"><span class="k">{esc(k)}</span><span class="v {esc(tone)}">{esc(v)}</span>'
+                    + (f'<span class="h">{esc(hint)}</span>' if hint else "") + "</div>" for k, v, tone, hint in items)
+    return f'<div class="ma-stats" role="group">{cells}</div>'
+
+
+def wave_rows(waves: list[dict]) -> str:
+    """The waves as rows: a badge, what it is and holds, a bar sized to the largest wave, and the count."""
+    largest = max([1] + [w["count"] for w in waves])
+    rows = []
+    for w in waves:
+        kinds = " · ".join(f"{x['type'].replace('_', ' ')} {x['count']}" for x in w["types"][:4]) + (" · …" if len(w["types"]) > 4 else "")
+        rows.append(f'<li><div class="ma-wave-row"><span class="ma-wave-badge">{int(w["number"])}</span><span class="ma-wave-main">'
+                    f'<strong>Wave {int(w["number"])} · {esc(w["kind"])}</strong><span class="f">{esc(kinds)}</span></span>'
+                    f'<span class="ma-wave-bar" aria-hidden="true"><span style="width:{round(100 * w["count"] / largest)}%"></span></span>'
+                    f'<span class="ma-wave-count">{int(w["count"]):,}</span></div></li>')
+    return f'<ol class="ma-waves" aria-label="Migration waves">{"".join(rows)}</ol>'

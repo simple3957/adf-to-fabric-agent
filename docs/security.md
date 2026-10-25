@@ -104,7 +104,7 @@ These are exposed over HTTP, each with its own permission (the role table in `te
 
 | Route | Permission |
 |---|---|
-| `GET .../inventory`, `compatibility`, `validation`, `report`, `provisioning` | `reports:view` |
+| `GET .../inventory`, `waves`, `compatibility`, `validation`, `report`, `provisioning` | `reports:view` |
 | `POST .../provisioning/plan` (read-only) | `plans:generate` + `azure:use` |
 | `POST .../provisioning/approve` | `provision:approve` (not held by analysts or operators) |
 | `POST .../provisioning/apply` | `migration:execute`; `apply: true` also needs `confirm: true` and a finished dry run of the same, approved, unchanged plan |

@@ -757,6 +757,10 @@ def create_app(settings: Optional[Settings] = None, live: Optional[Container] = 
         ctx.require(STAGE_PERMISSION[stage])  # each stage needs ITS permission: planning does not imply executing
         if len(body.pipelines) > 500 or any(len(x) > 200 for x in body.pipelines):
             raise guards.Rejected("Too many pipeline names, or a name is too long.")
+        if body.lakehouse and not re.match(r"^[A-Za-z0-9_.\-]{1,256}$", body.lakehouse):
+            raise HTTPException(422, "A lakehouse name uses letters, digits, _ . - only (no spaces or commas).")
+        if (body.lakehouse is not None or body.apply_reconstruction is not None) and stage != "convert":
+            raise HTTPException(422, "lakehouse and apply_reconstruction apply to the convert stage only.")
         if stage == "verify":  # ADF run history is read with the project's own factory: that subscription must be one this caller may use
             from adf2fabric.agent.deployment.verify import Factory
 
@@ -851,6 +855,13 @@ def create_app(settings: Optional[Settings] = None, live: Optional[Container] = 
         if not ctx.c.store.has_adf_semantic_discovery(slug):
             raise HTTPException(409, "Discovery has not run for this project yet.")
         return views.inventory(ctx.c.store, slug, _roots())
+
+    @app.get("/projects/{pid}/waves")
+    def waves_view(pid: str, ctx: Ctx = Depends(), _: Principal = need(P.reports_view)):
+        slug = ctx.project(pid)
+        if not ctx.c.store.has_adf_semantic_discovery(slug):
+            raise HTTPException(409, "Discovery has not run: the waves are built from what was discovered.")
+        return views.waves(ctx.c.store, slug, _roots())
 
     @app.get("/projects/{pid}/compatibility")
     def compatibility_view(pid: str, ctx: Ctx = Depends(), _: Principal = need(P.reports_view)):

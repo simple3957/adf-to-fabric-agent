@@ -1,11 +1,11 @@
-# ADF → Fabric Studio theme: light surfaces with emerald / cyan accents.
+# ADF → Fabric Studio theme: light surfaces with a blue to violet accent (the palette of the Synapse accelerator UI).
 [theme]
 base = "light"
-primaryColor = "#047857"
-backgroundColor = "#f5f7fa"
-secondaryBackgroundColor = "#f1f4f8"
-textColor = "#0f172a"
-borderColor = "#e2e8f0"
+primaryColor = "#2f6fec"
+backgroundColor = "#f4f6fb"
+secondaryBackgroundColor = "#f7f9fd"
+textColor = "#172033"
+borderColor = "#e1e6f0"
 font = "sans-serif"
 baseRadius = "10px"
 

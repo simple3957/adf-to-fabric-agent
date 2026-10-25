@@ -141,7 +141,7 @@ with right:
         elif selected == "convert":
             panels.convert(api, pid, conversion)
         elif selected == "validate":
-            panels_ext.validate(api, pid, validation)
+            panels_ext.validate(api, pid, validation, dest)
         elif selected == "deploy":
             panels.deploy(api, pid, dest, conversion, deployed)
         else:

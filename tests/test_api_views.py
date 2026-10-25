@@ -716,3 +716,71 @@ def test_a_brief_that_holds_back_every_pipeline_never_becomes_convert_everything
     assert not world.demo.store.has_conversion("demo-estate")  # nothing was converted
     j = run(world, "ann", "convert", {"pipelines": [next(p["name"] for p in world.call("vic", "GET", f"{P}/inventory").json()["pipelines"])]})
     assert j["state"] == "succeeded"  # an explicit choice by the person still works
+
+
+# =====================================================================================================================
+# 10. waves and execution order
+# =====================================================================================================================
+
+
+def test_waves_need_discovery_then_the_dependencies_and_stay_inside_the_organisation(world):
+    store = world.demo.store
+    store.save(store.load("demo-estate").model_copy(update={"id": "empty-estate"}))
+    assert world.call("vic", "GET", "/projects/empty-estate/waves").status_code == 409
+    prepare(world, through="semantic")
+    v = world.call("vic", "GET", f"{P}/waves").json()
+    assert v["available"] is False and "Resolve dependencies" in v["needs"]  # asked for, not guessed
+    run(world, "ann", "dependencies")
+    assert world.call("vic", "GET", f"{P}/waves").status_code == 200
+    assert world.call("bob", "GET", f"{P}/waves").status_code == 404 and world.call(None, "GET", f"{P}/waves").status_code == 401
+
+
+def test_the_order_puts_every_pipeline_after_the_ones_it_calls_and_needs_mirror_needed_by(world):
+    prepare(world, through="semantic")
+    run(world, "ann", "dependencies")
+    v = world.call("vic", "GET", f"{P}/waves").json()
+    assert v["stats"]["waves"] == len(v["waves"]) and v["stats"]["objects"] == len(v["nodes"])
+    assert [w["number"] for w in v["waves"]] == sorted(w["number"] for w in v["waves"])
+    pos = {o["pipeline"]: o["position"] for o in v["order"]}
+    assert sorted(pos.values()) == list(range(1, len(pos) + 1))
+    for o in v["order"]:
+        assert all(pos[c] < o["position"] for c in o["calls"] if c in pos), o  # children first
+    by_name = {(n["type"], n["name"]): n for n in v["nodes"]}
+    for n in v["nodes"]:
+        for other in n["needs"]:  # what A needs lists A among what the other is needed by
+            peers = [m for m in v["nodes"] if m["name"] == other and n["name"] in m["needed_by"]]
+            assert peers, (n["name"], other)
+    assert all(t["count"] >= 1 for w in v["waves"] for t in w["types"]) and sum(w["count"] for w in v["waves"]) >= len(v["order"])
+
+
+def test_the_waves_view_holds_no_paths_secrets_or_ids(world):
+    prepare(world, through="semantic")
+    run(world, "ann", "dependencies")
+    text = world.call("vic", "GET", f"{P}/waves").text
+    assert str(world.demo.store.projects_root) not in text and not PATH_RE.search(text) and not SECRET_RE.search(text) and DEMO_WS not in text
+
+
+def test_convert_takes_a_persons_choices_over_the_briefs_and_checks_them(world):
+    prepare(world, through="semantic")
+    assert stage(world, "ann", "convert", {"lakehouse": "Dana Lee, lead"}).status_code == 422  # a name, not a sentence
+    assert stage(world, "ann", "convert", {"lakehouse": "LH_X../x"}).status_code in (202, 422)
+    assert stage(world, "ann", "deploy_dry_run", {"lakehouse": "LH_X"}).status_code == 422  # convert-only choices
+    assert stage(world, "ann", "validate", {"apply_reconstruction": True}).status_code == 422
+    j = run(world, "ann", "convert", {"lakehouse": "LH_Chosen"})
+    assert j["state"] == "succeeded" and j["result"]["lakehouse"] == "LH_Chosen"
+    j = run(world, "ann", "convert", {"lakehouse": ""})  # "keep connections" is a choice too
+    assert j["result"]["lakehouse"] is None
+    assert run(world, "ann", "convert", {"apply_reconstruction": False})["state"] == "succeeded"
+
+
+def test_an_explicit_choice_beats_the_approved_brief_and_none_follows_it(world, monkeypatch):
+    prepare(world, through="semantic")
+    seen = []
+    real = __import__("adf2fabric.api.stages", fromlist=["x"])
+    monkeypatch.setattr(real, "_approved_brief", lambda c, s, pid, log: {"pipelines": None, "version": 7, "lakehouse": "LH_Brief", "apply_reconstruction": False})
+    orig = real._write_storage_map
+    monkeypatch.setattr(real, "_write_storage_map", lambda c, pid, lh: (seen.append(lh), orig(c, pid, lh))[1])
+    assert run(world, "ann", "convert")["result"]["lakehouse"] == "LH_Brief"  # nothing chosen: the brief's value
+    assert run(world, "ann", "convert", {"lakehouse": "LH_Mine"})["result"]["lakehouse"] == "LH_Mine"  # chosen: the person's
+    assert run(world, "ann", "convert", {"lakehouse": ""})["result"]["lakehouse"] is None  # "none" is chosen too
+    assert seen == ["LH_Brief", "LH_Mine"]

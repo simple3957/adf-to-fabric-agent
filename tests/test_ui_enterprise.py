@@ -323,3 +323,95 @@ def test_saving_a_topic_never_accepts_recommendations_nobody_chose(worked, open_
     assert after["scope.approach"]["source"] == "person" and after["scope.approach"]["value"] == "phased"
     still = {qid for qid in recs_before if qid != "scope.approach" and after[qid]["source"] == "recommendation"}
     assert still == recs_before - {"scope.approach"}  # every other recommendation is still only a recommendation
+
+
+def test_waves_and_execution_order_are_shown_like_the_synapse_accelerators_panel(worked, open_steps):
+    at = _step(worked, "review")
+    shown = " ".join(str(m.value) for m in at.markdown)
+    assert "ma-stats" in shown and "ma-waves" in shown  # the summary strip and the wave rows
+    for label in ("Objects", "Dependencies", "Waves", "Connected"):
+        assert label in shown
+    assert any(t.label.startswith("Waves & order") for t in at.tabs)
+    assert any(t.label.startswith("Execution order") for t in at.tabs) and any(t.label == "Explorer" for t in at.tabs)
+    assert not GUID.search(_everything_shown(at))
+    order = next(d for d in at.dataframe if "Pipeline" in d.value.columns and "Calls first" in d.value.columns)
+    assert list(order.value["#"]) == sorted(order.value["#"]) and "Called by" in order.value.columns
+
+
+def test_waves_before_the_dependencies_are_resolved_say_so_and_offer_to_resolve(demo, open_steps):
+    d, api = demo
+    api.set_mode("demo")
+    for stage in ("discovery", "semantic"):
+        assert api.wait_job(api.run_stage(PID, stage), interval=0.05)["state"] == "succeeded"
+    at = _step(api, "review")
+    assert at.button(key="waves-resolve") is not None and "Waves are not built yet" in _everything_shown(at)
+
+
+def test_every_step_with_choices_shows_an_options_card_with_where_its_defaults_come_from(worked, open_steps):
+    for step, title in (("convert", "Conversion options"), ("validate", "Validation options"), ("deploy", "Deployment options")):
+        at = _step(worked, step)
+        shown = " ".join(str(m.value) for m in at.markdown)
+        assert title in shown and "Tool defaults" in shown, step  # no approved brief yet: the tool's own defaults, said so
+
+
+def test_the_convert_card_sends_what_was_chosen_and_refuses_a_bad_lakehouse_name(worked, monkeypatch, open_steps):
+    sent = []
+    real = worked.run_stage
+
+    def spy(pid, stage, **kw):
+        sent.append((stage, kw))
+        return real(pid, stage, **kw)
+
+    monkeypatch.setattr(worked, "run_stage", spy)
+    at = _step(worked, "convert")
+    assert at.radio(key=next(r.key for r in at.radio if (r.key or "").startswith("conv-store-"))).value == "connections"
+    store_key = next(r.key for r in at.radio if (r.key or "").startswith("conv-store-"))
+    at.radio(key=store_key).set_value("lakehouse").run()
+    lake_key = next(t.key for t in at.text_input if (t.key or "").startswith("conv-lake-"))
+    at.text_input(key=lake_key).set_value("Dana Lee, lead").run()
+    assert at.button(key="conv-go").disabled and any("letters, digits" in str(e.value) for e in at.error)  # a sentence is not a lakehouse
+    at.text_input(key=lake_key).set_value("LH_Chosen").run()
+    assert not at.button(key="conv-go").disabled
+    at.button(key="conv-go").click().run()
+    assert not at.exception, at.exception
+    stage, kw = sent[-1]
+    assert stage == "convert" and kw["lakehouse"] == "LH_Chosen" and kw["apply_reconstruction"] is False
+
+
+def test_keeping_connections_is_sent_as_a_choice_so_it_beats_a_briefs_lakehouse(worked, monkeypatch, open_steps):
+    sent = []
+    real = worked.run_stage
+    monkeypatch.setattr(worked, "run_stage", lambda pid, stage, **kw: (sent.append(kw), real(pid, stage, **kw))[1])
+    at = _step(worked, "convert")
+    at.button(key="conv-go").click().run()
+    assert sent[-1]["lakehouse"] == ""  # "" = keep the connections; absent would mean "follow the brief"
+
+
+def test_the_validate_card_offers_the_real_stages_and_needs_a_workspace_for_two_of_them(demo, open_steps):
+    d, api = demo
+    api.set_mode("demo")
+    for stage in ("discovery", "semantic", "dependencies", "convert"):
+        api.wait_job(api.run_stage(PID, stage), interval=0.05)
+    at = _step(api, "validate")  # no workspace chosen in this session
+    key = next(m.key for m in at.multiselect if (m.key or "").startswith("val-stages-"))
+    from panels_ext import VALIDATION_STAGES
+
+    assert set(at.multiselect(key=key).options) == set(VALIDATION_STAGES.values()) and at.multiselect(key=key).value == ["static"]
+    assert not at.button(key="val-run").disabled
+    at.multiselect(key=key).select(VALIDATION_STAGES["deployment"]).run()
+    assert at.button(key="val-run").disabled and any("choose it on the Connections page" in str(w.value) for w in at.warning)
+
+
+def test_the_defaults_of_the_cards_come_from_the_approved_brief_and_the_person_can_change_them(worked, open_steps):
+    from tests.test_ui import approve_brief
+
+    approve_brief(worked, PID)
+    at = _step(worked, "validate")
+    assert any("Defaults from the approved brief v1" in str(m.value) for m in at.markdown)
+    key = next(m.key for m in at.multiselect if (m.key or "").startswith("val-stages-"))
+    assert at.multiselect(key=key).value  # the brief's stages, not empty
+    first = at.multiselect(key=key).value[0]
+    from panels_ext import VALIDATION_STAGES
+
+    at.multiselect(key=key).unselect(VALIDATION_STAGES[first]).run()
+    assert not at.exception, at.exception

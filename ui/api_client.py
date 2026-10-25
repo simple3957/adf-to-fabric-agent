@@ -212,14 +212,21 @@ class ApiClient:
     # ---- stages + jobs -------------------------------------------------------------------------------------------------
     def run_stage(self, pid: str, stage: str, *, pipelines: Iterable[str] = (), workspace_id: Optional[str] = None,
                   with_children: bool = False, allow_unbound: bool = False, confirm: bool = False, validate_stages: Iterable[str] = (),
-                  run: bool = False, idempotency_key: Optional[str] = None) -> dict:
-        return self._post(f"/projects/{pid}/stages/{stage}",
-                          {"pipelines": list(pipelines), "workspace_id": workspace_id, "with_children": with_children,
-                           "allow_unbound": allow_unbound, "confirm": confirm, "validate_stages": list(validate_stages), "run": run}, idempotency_key)
+                  run: bool = False, run_timeout: Optional[int] = None, lakehouse: Optional[str] = None, apply_reconstruction: Optional[bool] = None,
+                  idempotency_key: Optional[str] = None) -> dict:
+        body = {"pipelines": list(pipelines), "workspace_id": workspace_id, "with_children": with_children,
+                "allow_unbound": allow_unbound, "confirm": confirm, "validate_stages": list(validate_stages), "run": run}
+        for k, v in (("run_timeout", run_timeout), ("lakehouse", lakehouse), ("apply_reconstruction", apply_reconstruction)):
+            if v is not None:  # left out = follow the approved brief
+                body[k] = v
+        return self._post(f"/projects/{pid}/stages/{stage}", body, idempotency_key)
 
     # ---- views built and redacted on the server ------------------------------------------------------------------------
     def inventory(self, pid: str) -> dict:
         return self._get(f"/projects/{pid}/inventory")
+
+    def waves(self, pid: str) -> dict:
+        return self._get(f"/projects/{pid}/waves")
 
     def compatibility(self, pid: str) -> dict:
         return self._get(f"/projects/{pid}/compatibility")

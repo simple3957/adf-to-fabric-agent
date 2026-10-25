@@ -183,6 +183,81 @@ def _dependencies(store: ProjectStore, pid: str) -> dict[str, Any]:
             "access_checks": "run" if inv.checks_requested else "not run: nothing external was contacted"}
 
 
+def waves(store: ProjectStore, pid: str, roots: tuple[Path, ...] = ()) -> dict[str, Any]:
+    """The dependency waves and the order the pipelines are deployed in, with what each object needs and what needs it.
+
+    Built from the dependency inventory only: names, types, counts and the order. Nothing here carries a definition, a path or a secret."""
+    inv = _try(lambda: store.load_dependency_inventory(pid)) if store.has_dependency_inventory(pid) else None
+    if inv is None:
+        return {"available": False, "needs": "Run 'Resolve dependencies' on the Review step: the waves and the order are built from the references it resolves."}
+    states = pipeline_states(store, pid)
+    kind_of = {w.number: w.kind for w in inv.waves}
+    wave_of: dict[str, int] = {}
+    for w in inv.waves:
+        for item in w.items:  # most items are 'type:name'; the pipeline waves list plain pipeline names
+            wave_of[(item if ":" in item and w.kind != "pipelines" else f"pipeline:{item}").lower()] = w.number
+    order = {o.pipeline.lower(): o for o in inv.pipeline_order}
+
+    def top_level(consumer: str) -> Optional[str]:
+        """A consumer such as 'activity:PL/Copy' or 'dataset:DS_X' as the object it belongs to ('pipeline:pl' / 'dataset:ds_x')."""
+        kind, _, rest = consumer.partition(":")
+        if kind == "activity":
+            return f"pipeline:{rest.split('/', 1)[0].lower()}"
+        return f"{kind}:{rest.lower()}" if kind in ("pipeline", "dataset", "linked_service", "databricks_notebook") else None
+
+    nodes: dict[str, dict[str, Any]] = {}
+    for d in inv.dependencies:
+        if d.type.value in ("variable", "pipeline_parameter", "activity_output"):
+            continue  # inside one pipeline: not something that is ordered or migrated on its own
+        key = d.id.lower()
+        short = d.name.rsplit("/", 1)[-1] if d.type.value == "databricks_notebook" else d.name
+        nodes[key] = {"id": key, "name": short, "type": d.type.value, "wave": wave_of.get(key, 0), "needs": set(), "needed_by": set(),
+                      "category": getattr(d.migration.category, "value", d.migration.category) if d.migration else "", "blocks": bool(d.migration and d.migration.blocks),
+                      "state": (states.get(d.name) or {}).get("state") if d.type.value == "pipeline" else None}
+    for d in inv.dependencies:
+        user = nodes.get(d.id.lower())
+        if user is None:
+            continue
+        for c in d.consumers:
+            holder = top_level(c)
+            if holder and holder in nodes and holder != d.id.lower():
+                nodes[holder]["needs"].add(d.id.lower())  # the consumer needs this dependency
+                user["needed_by"].add(holder)
+    for key, o in order.items():  # pipeline-to-pipeline calls come from the order, which also breaks ties
+        me = nodes.get(f"pipeline:{key}")
+        for callee in o.calls:
+            other = nodes.get(f"pipeline:{callee.lower()}")
+            if me and other:
+                me["needs"].add(other["id"]); other["needed_by"].add(me["id"])
+    names = {k: v["name"] for k, v in nodes.items()}
+    out_nodes = [{"id": n["id"], "name": n["name"], "type": n["type"], "wave": n["wave"], "category": n["category"], "blocks": n["blocks"], "state": n["state"],
+                  "needs": sorted(names[x] for x in n["needs"]), "needed_by": sorted(names[x] for x in n["needed_by"])} for n in nodes.values()]
+    out_nodes.sort(key=lambda n: (n["wave"], n["type"], n["name"].lower()))
+    wave_rows = []
+    for w in inv.waves:
+        counts: dict[str, int] = {}
+        for item in w.items:
+            kind = "pipeline" if w.kind == "pipelines" else item.split(":", 1)[0]
+            counts[kind] = counts.get(kind, 0) + 1
+        # rows, not a dict keyed by type: sanitize() drops any key that looks like a path (e.g. 'storage_path')
+        types = [{"type": k, "count": n} for k, n in sorted(counts.items(), key=lambda kv: -kv[1])]
+        wave_rows.append({"number": w.number, "name": w.name, "kind": w.kind, "note": w.note, "count": len(w.items), "types": types,
+                          "items": [nodes[(i if ":" in i and w.kind != "pipelines" else f"pipeline:{i}").lower()]["name"]
+                    if (i if ":" in i and w.kind != "pipelines" else f"pipeline:{i}").lower() in nodes else i.split(":", 1)[-1] for i in w.items][:200]})
+    edges = sum(len(n["needs"]) for n in nodes.values())
+    return sanitize({
+        "available": True,
+        "stats": {"objects": len(out_nodes), "dependencies": edges, "waves": len(inv.waves), "with_dependencies": sum(1 for n in nodes.values() if n["needs"] or n["needed_by"]),
+                  "cycles": len(inv.cycles), "blocking": inv.summary.blocking},
+        "waves": wave_rows,
+        "order": [{"position": o.position, "pipeline": o.pipeline, "wave": o.wave, "calls": list(o.calls), "called_by": list(o.called_by), "ready": o.ready,
+                   "blocked_by": list(o.blocked_by), "in_cycle": o.in_cycle, "state": (states.get(o.pipeline) or {}).get("state")} for o in inv.pipeline_order],
+        "nodes": out_nodes[:600], "truncated": max(0, len(out_nodes) - 600),
+        "types": sorted({n["type"] for n in out_nodes}),
+        "note": "Nothing is created before what it needs. Pipelines are deployed in this order, children before the pipelines that call them.",
+    }, roots)
+
+
 def _compute(store: ProjectStore, pid: str) -> dict[str, Any]:
     from adf2fabric.agent.provisioning.requirements import estimates, load_compute_plan
 

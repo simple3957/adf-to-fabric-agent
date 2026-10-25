@@ -10,6 +10,7 @@ import streamlit as st
 
 import theme
 from api_client import ApiClient
+import options
 from components import STATE_LABELS, call, can, empty_state, intent, run_job, short_source, state_badge, status_badge, test_report, typed_confirm
 
 
@@ -279,10 +280,32 @@ def connect(api: ApiClient, pid: str, cards: list[dict] | None, workspace_id: st
 def convert(api: ApiClient, pid: str, result: dict | None) -> None:
     st.caption("'Converted' is not the same as 'ready to run': a pipeline is ready only when all its connections are bound. "
                "Apply connections in the Connect step first.")
-    raw = st.text_input("Only these pipelines (comma-separated, empty = all)", key="conv-pipes")
-    if st.button("Convert again" if result else "Convert", type="primary", key="conv-go"):
-        pipes = [p.strip() for p in raw.split(",") if p.strip()]
-        job = run_job(lambda: api.run_stage(pid, "convert", pipelines=pipes, idempotency_key=intent("convert-step")), "Stage: convert", intent_name="convert-step")
+    brief = options.agreed(api, pid)
+    known = [p["name"] for p in (call(api.inventory, pid) or {}).get("pipelines", [])]
+    ver = brief["version"] if brief else 0
+    with options.card("convert", "Conversion options", "What this run converts and how. A choice here is for this run only.", options.source_label(brief)):
+        options.seed(f"conv-pipes-{pid}-{ver}", [p for p in (brief or {}).get("pipelines") or [] if p in known])
+        pipes = st.multiselect("Pipelines to convert (empty = all)", known, key=f"conv-pipes-{pid}-{ver}",
+                               help="A pipeline that calls another needs that one converted too, or already deployed.")
+        options.seed(f"conv-store-{pid}-{ver}", "lakehouse" if (brief or {}).get("lakehouse") else "connections")
+        route = st.radio("Storage", ["connections", "lakehouse"], key=f"conv-store-{pid}-{ver}", horizontal=True,
+                         format_func=lambda v: {"connections": "Keep Fabric connections to the original storage",
+                                                "lakehouse": "Repoint to a lakehouse through OneLake shortcuts"}[v],
+                         help="Repointing reads and writes a lakehouse for CSV and Parquet datasets (Copy, Lookup, GetMetadata). Others stay on their connection, "
+                              "each with the reason. Run the storage map first so the shortcuts are planned.")
+        lake, problem = "", ""
+        if route == "lakehouse":
+            options.seed(f"conv-lake-{pid}-{ver}", (brief or {}).get("lakehouse") or "")
+            lake = st.text_input("Lakehouse name", key=f"conv-lake-{pid}-{ver}", placeholder="e.g. LH_Migration").strip()
+            problem = options.lakehouse_problem(lake)
+            if problem:
+                st.error(problem)
+        options.seed(f"conv-recon-{pid}-{ver}", bool((brief or {}).get("apply_reconstruction")))
+        recon = st.checkbox("Apply the safe reconstruction proposals for incomplete pipelines (every inferred element is marked)",
+                            key=f"conv-recon-{pid}-{ver}", help="Off: incomplete pipelines stay blocked until the source is fixed.")
+    if st.button("Convert again" if result else "Convert", type="primary", key="conv-go", disabled=bool(problem)):
+        job = run_job(lambda: api.run_stage(pid, "convert", pipelines=pipes, lakehouse=lake if route == "lakehouse" else "", apply_reconstruction=recon,
+                                            idempotency_key=intent("convert-step")), "Stage: convert", intent_name="convert-step")
         if job and job["state"] == "succeeded":
             st.session_state.setdefault("conversion", {})[pid] = job["result"]
             st.rerun()
@@ -316,10 +339,17 @@ def deploy(api: ApiClient, pid: str, dest: dict, conversion: dict | None, result
         st.warning("Deploying uses the Azure CLI sign-in. Switch the destination to Azure CLI on the **Connections** page.")
     st.markdown(f"Target: the Fabric workspace you connected (…{dest['workspace_id'][-6:]})")
     known = [p["name"] for p in (conversion or {}).get("pipelines", [])]
-    pipes = st.multiselect("Pipelines (empty = all converted)", known, key="dep-pipes")
-    children = st.checkbox("Include child pipelines they call", value=True, key="dep-children")
-    unbound = st.checkbox("Allow unbound connections (not recommended)", value=False, key="dep-unbound",
-                          help="Deploys pipelines whose connections aren't set yet. They won't run until fixed.")
+    brief = options.agreed(api, pid)
+    ver = brief["version"] if brief else 0
+    with options.card("deploy", "Deployment options", "What is published, and how. Deploying always starts with a dry run of exactly these pipelines.",
+                      options.source_label(brief)):
+        scoped = [p for p in ((brief or {}).get("pipelines") or []) if p in known]
+        options.seed(f"dep-pipes-{pid}-{ver}", scoped if (brief or {}).get("pipelines") is not None else [])
+        pipes = st.multiselect("Pipelines (empty = all converted)", known, key=f"dep-pipes-{pid}-{ver}")
+        children = st.checkbox("Include child pipelines they call", value=True, key="dep-children",
+                               help="A caller is refused unless every child is selected or already in the workspace.")
+        unbound = st.checkbox("Allow unbound connections (not recommended)", value=False, key="dep-unbound",
+                              help="Deploys pipelines whose connections aren't set yet. They won't run until fixed.")
     a, b = st.columns(2)
     stage = None
     a.markdown(theme.badge("Dry run: changes nothing", "info"), unsafe_allow_html=True)

@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import streamlit as st
 
+import options
+import panels_waves
 import theme
 from api_client import ApiClient
 from components import call, can, empty_state, intent, run_job, state_legend, typed_confirm
@@ -54,7 +56,7 @@ def review(api: ApiClient, pid: str, inv: dict | None) -> None:
 
     st.markdown("##### What each state means")
     state_legend(inv.get("states") or {})
-    t_pipes, t_acts, t_deps, t_compute, t_compat = st.tabs(["Pipelines", "Activities", "Dependencies", "Compute", "Compatibility"])
+    t_pipes, t_acts, t_waves, t_deps, t_compute, t_compat = st.tabs(["Pipelines", "Activities", "Waves & order", "Dependencies", "Compute", "Compatibility"])
     with t_pipes:
         _table([{"Pipeline": p["name"], "State": f"{state_chip_text(p['state'])}", "Activities": p["activities"], "Calls": ", ".join(p["calls"]),
                  "Why": "; ".join(p["reasons"])} for p in inv["pipelines"]], "No pipelines.")
@@ -63,6 +65,8 @@ def review(api: ApiClient, pid: str, inv: dict | None) -> None:
         conf = inv.get("confidence") or {}
         st.caption("Understanding: " + ", ".join(f"{n} {k}" for k, n in sorted(conf.items())) +
                    ". 'medium' and 'low' mean something was dynamic or missing; 'unsupported' means the type is not known.")
+    with t_waves:
+        panels_waves.waves_panel(api, pid)
     with t_deps:
         _dependencies(api, pid, inv["dependencies"])
     with t_compute:
@@ -268,11 +272,29 @@ def _approval_and_apply(api: ApiClient, pid: str, prov: dict) -> None:
 
 
 # ---- 6. validate ----------------------------------------------------------------------------------------------------------
-def validate(api: ApiClient, pid: str, val: dict | None) -> None:
-    st.markdown(theme.badge("Static validation re-reads the files; it does not run anything", "info"), unsafe_allow_html=True)
-    if st.button("Run validation", key="val-run", type="primary", disabled=not can("plans:generate"),
+VALIDATION_STAGES = {
+    "static": "Static: re-read the source and the generated files, independently of the converter",
+    "api": "API: check the workspace answers and the pipelines can be read back",
+    "deployment": "Deployment: compare what is in the workspace with what was generated",
+    "runtime": "Run evidence: compare recorded Fabric runs with the ADF runs (starts nothing)",
+}
+
+
+def validate(api: ApiClient, pid: str, val: dict | None, dest: dict | None = None) -> None:
+    has_ws = bool((dest or {}).get("workspace_id"))
+    brief = options.agreed(api, pid)
+    ver = brief["version"] if brief else 0
+    with options.card("validate", "Validation options", "Which checks run. Only a recorded real run that matches ADF makes a pipeline runtime-validated.",
+                      options.source_label(brief)):
+        options.seed(f"val-stages-{pid}-{ver}", [s for s in (brief or {}).get("validate_stages") or ["static"] if s in VALIDATION_STAGES])
+        stages = st.multiselect("Checks to run", list(VALIDATION_STAGES), key=f"val-stages-{pid}-{ver}", format_func=lambda s: VALIDATION_STAGES[s])
+        needs_ws = [s for s in stages if s in ("api", "deployment")]
+        if needs_ws and not has_ws:
+            st.warning("The API and deployment checks read the Fabric workspace: choose it on the Connections page first.")
+    st.markdown(theme.badge("Nothing here starts a run or changes Fabric", "info"), unsafe_allow_html=True)
+    if st.button("Run validation", key="val-run", type="primary", disabled=not (can("plans:generate") and stages and not (needs_ws and not has_ws)),
                  help="Re-reads the source and the generated files and compares them, independently of the converter."):
-        if (job := run_job(lambda: api.run_stage(pid, "validate", validate_stages=["static"], idempotency_key=intent("validate")), "Validating", intent_name="validate")) \
+        if (job := run_job(lambda: api.run_stage(pid, "validate", validate_stages=stages, idempotency_key=intent("validate")), "Validating", intent_name="validate")) \
                 and job["state"] == "succeeded":
             st.rerun()
     if not val or not val.get("available"):
@@ -336,11 +358,13 @@ def _run_and_compare(api: ApiClient, pid: str, rep: dict, ws: bool) -> None:
             st.caption("Deploy pipelines first: only deployed pipelines can be run.")
             return
         chosen = st.multiselect("Pipelines to run (up to 20)", deployed, key="run-pipes", max_selections=20)
+        wait = st.select_slider("Wait for each run up to", [5, 10, 20, 30, 50], value=30, key="run-wait", format_func=lambda m: f"{m} min",
+                                help="A run that takes longer keeps running in Fabric; it is simply not compared. Kept within one sign-in's lifetime.")
         sure = typed_confirm("Start real runs of the selected pipelines in Fabric", "RUN", "run-confirm", disabled=not chosen)
         allowed = can("migration:execute")
         if st.button("Run and compare", key="run-go", type="primary", disabled=not (ws and chosen and sure and allowed),
                      help=None if allowed else "Your role cannot start runs (needs migration:execute)."):
-            if (job := run_job(lambda: api.run_stage(pid, "verify", pipelines=chosen, run=True, confirm=True, idempotency_key=intent("run-verify")),
+            if (job := run_job(lambda: api.run_stage(pid, "verify", pipelines=chosen, run=True, confirm=True, run_timeout=wait * 60, idempotency_key=intent("run-verify")),
                                "Running in Fabric and comparing", intent_name="run-verify")) and job["state"] == "succeeded":
                 st.rerun()
         st.caption("A pipeline becomes runtime-validated only when its run completes and matches the ADF baseline.")

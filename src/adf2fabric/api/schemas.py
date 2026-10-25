@@ -78,6 +78,8 @@ class StageBody(_In):
     allow_unbound: bool = False
     confirm: bool = False  # required by stages that change the target (deploy_apply)
     validate_stages: list[str] = Field(default_factory=list, max_length=4)  # validate stage: static | api | deployment | runtime
+    lakehouse: Optional[str] = Field(default=None, max_length=256)  # convert: repoint ADLS datasets to this lakehouse; "" = keep connections; None = follow the brief
+    apply_reconstruction: Optional[bool] = None  # convert: apply the safe reconstruction proposals; None = follow the brief
     run: bool = False  # verify stage: START a real Fabric run of each named pipeline, then compare (needs migration:execute + confirm)
     run_timeout: int = Field(default=1800, ge=60, le=3000)  # seconds to wait for each started run; kept within one Fabric token's lifetime
 
