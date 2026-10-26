@@ -362,7 +362,10 @@ def verify_all(make_client: Callable[[], FabricClient], workspace: str, names: l
                                called_by=called.get(name), ids=ids)
 
     if start or workers <= 1 or len(names) <= 1:
-        return [one(n) for n in names]
+        # A pipeline another one calls is judged by the runs its caller starts, so callers go first; results keep the order asked for.
+        order = [n for n in names if not called.get(n)] + [n for n in names if called.get(n)] if start else list(names)
+        done = {n: one(n) for n in order}
+        return [done[n] for n in names]
     with ThreadPoolExecutor(max_workers=min(workers, len(names))) as pool:
         return list(pool.map(one, names))
 
