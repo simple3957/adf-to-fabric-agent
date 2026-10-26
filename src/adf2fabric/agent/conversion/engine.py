@@ -170,7 +170,13 @@ class ConversionEngine:
 
         rule = rule_for(a.type)
         cx = ActivityBuilder(a, pc, kids)
-        if rule is None:
+        if any(w.code == "max_depth_exceeded" for w in a.warnings):
+            # Discovery stopped reading below this activity: converting it would silently leave its nested activities out.
+            from adf2fabric.agent.conversion.handlers._common import block
+            cx.disposition = "redesign"
+            block(cx, "nesting_too_deep", "its nested activities were not read: they sit deeper than the discovery depth limit, "
+                  "so converting it would silently drop them.", "Flatten the nesting by moving the inner activities into a child pipeline.")
+        elif rule is None:
             self._unregistered(cx)
         else:
             cx.disposition = rule.runtime_disposition

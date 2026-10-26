@@ -165,6 +165,21 @@ def _missing_artifacts(d: AdfSemanticDiscovery) -> list[PreflightFinding]:
     return out
 
 
+def _unaccounted_activities(d: AdfSemanticDiscovery) -> list[PreflightFinding]:
+    """Pipelines where the independent raw scan found activities the parser did not (``AdfPipeline.inventory``)."""
+    out = []
+    for p in d.pipelines:
+        inv = getattr(p, "inventory", None)
+        if inv is not None and not inv.matched:
+            out.append(PreflightFinding(
+                code="source_activities_unaccounted", severity="error", subject=p.name, pipelines=[p.name],
+                message=f"Pipeline '{p.name}': an independent scan found {inv.source_activity_count} activities in the source but "
+                        f"{inv.parsed_activity_count} were read, so what was converted is not the whole pipeline.",
+                fix="Do not rely on this pipeline. Check the activity nesting depth and the JSON of the listed activities in the "
+                    "source, simplify them (a child pipeline per deep branch), then run discovery and convert again."))
+    return out
+
+
 def scan(d: AdfSemanticDiscovery, contents: dict[str, dict]) -> list[PreflightFinding]:
     """Findings for the converted ``contents`` (pipeline name -> pipeline-content JSON) and the semantic record."""
-    return [*_missing_artifacts(d), *_reserved_aliases(contents), *_parameters_without_value(d), *_wait_only(d)]
+    return [*_missing_artifacts(d), *_unaccounted_activities(d), *_reserved_aliases(contents), *_parameters_without_value(d), *_wait_only(d)]

@@ -70,3 +70,17 @@ results:
   unsupported `linkedService()` expressions.
 - `SqlPoolStoredProcedure` and other Synapse-only activity types fall under "no rule".
 - **Azure Synapse Link** (replaced by Fabric Mirroring) is configured outside any ADF export, so it cannot be detected. ADF **change data capture** resources are detected and reported, but no Fabric Copy job is generated.
+
+## Activities nested deeper than discovery reads
+
+Discovery reads activity nesting (If, Switch, ForEach, Until) to 30 levels. A real ADF pipeline never gets near that (ADF itself restricts
+which containers may nest), but a generated or hostile source can. Below the limit the children are not parsed, so:
+
+- the container activity is **blocked** (`nesting_too_deep`, a `Fail` placeholder keeps the graph) and reports the alternative: move the inner
+  activities into a child pipeline;
+- the pipeline is never `converted`, and the error finding `source_activities_unaccounted` says how many activities the independent scan found
+  against how many were read.
+
+Very deeply nested expressions (hundreds of nested calls) are `expression_unparsed` (manual), not a crash. Raw JSON nested more than 100 levels is
+refused at ZIP intake. Covered by `tests/test_deep_nesting.py`. Not covered: the same depth through a Git or live-ARM source (no JSON depth
+limit there), and the Streamlit views of such a pipeline.
