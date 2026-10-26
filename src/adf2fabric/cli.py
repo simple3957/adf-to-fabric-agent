@@ -1377,6 +1377,8 @@ def storage_map_cmd(project_name: str, lakehouse: Optional[str], workspace_id: O
         click.echo(f"  {sc.lakehouse_path:<40} <- {sc.account_url}{sc.subpath}  ({sc.datasets} dataset(s))")
     for d in m.to_decide[:15]:
         click.secho(f"  DECIDE {d['dataset']}: {d['reason']}", fg="yellow")
+        for alt in d.get("alternatives", [])[:2]:
+            click.echo(f"      option: {alt}")
     click.echo(f"  report: {out / 'storage-map.md'}")
 
 

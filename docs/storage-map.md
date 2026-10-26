@@ -49,6 +49,29 @@ connection, with a `storage_not_repointed` note saying why: formats other than D
 container, an account without a literal ADLS Gen2 URL, a container without a shortcut, storeSettings that hold a path
 (`wildcardFolderPath`, `fileListPath`, `partitionRootPath`, ...), and every Delete activity (proving it live would delete files).
 
+## Datasets on other stores (cloud buckets, SFTP/FTP, file shares)
+
+Only ADLS Gen2 is turned into a shortcut here (live-verified). A file dataset on any other store is still **captured** (the storage map lists it as
+"need a decision", and the dependency inventory records it as an external `storage_path` dependency) and now says what Fabric offers for it.
+From Microsoft's pages, read 2026-10-26 ([shortcuts](https://learn.microsoft.com/fabric/onelake/onelake-shortcuts),
+[on-premises shortcuts](https://learn.microsoft.com/fabric/onelake/create-on-premises-shortcut),
+[connector overview](https://learn.microsoft.com/fabric/data-factory/connector-overview),
+[Folder connector](https://learn.microsoft.com/fabric/data-factory/connector-folder-overview)):
+
+| Store | OneLake shortcut | Copy activity | Notes |
+|---|---|---|---|
+| ADLS Gen2 | yes (created by this tool) | read/write | |
+| Azure Blob Storage | yes | read/write | this tool does not create Blob shortcuts yet |
+| Amazon S3, S3 compatible, Google Cloud Storage | yes; an on-premises data gateway reaches firewalled or on-premises endpoints | read/write | shortcut caching can cut egress cost |
+| Azure Files | no | read/write | land the files with Copy, or move to ADLS Gen2/Blob |
+| SFTP | no | read/write | gateway for a private server |
+| FTP, HDFS, HTTP, Oracle Cloud Storage | no | **read only** | Fabric Copy cannot write to them |
+| File server / network share | no | read/write via the Folder connector | needs an on-premises data gateway, Windows authentication |
+| ADLS Gen1 | no | no connector | retired: move to Gen2 first |
+
+The table is `agent/storage/stores.py`; each row also carries ranked alternatives, shown per dataset in `storage-map.md` and the CLI. Advice only:
+nothing is created for these stores. Datasets that are not files at all (SQL, REST, Cosmos, ...) are counted, not mapped.
+
 ## Not done yet
 
 * Formats other than CSV and Parquet, Lakehouse Tables (Delta) as a target, and Delete are not repointed.

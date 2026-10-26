@@ -479,6 +479,7 @@ def _external_dependencies(d: AdfSemanticDiscovery, g: _Graph) -> None:
             if vault:
                 dep.attributes.update({"vault_url": f"https://{vault}", "access.provider": "key_vault", "access.target": vault})
                 dep.attributes["access.secret"] = kv.secret_name
+    _other_file_stores(d, g)
     # references the semantic record already resolved to an external resource
     for er in d.external_references:
         who = er.source_artifact
@@ -505,6 +506,28 @@ def _external_dependencies(d: AdfSemanticDiscovery, g: _Graph) -> None:
             if host:
                 dep = g.ref(T.rest_endpoint, host, kind, who, "baseUrl", resolution=R.external, attributes={"host": host})
                 dep.attributes.update({"access.provider": "network", "access.target": host, "access.port": "443"})
+
+
+def _other_file_stores(d: AdfSemanticDiscovery, g: _Graph) -> None:
+    """File datasets on a store that is not ADLS Gen2 (Blob, S3, GCS, SFTP, a file share, ...): an external dependency the inventory
+    used to leave out, so the migration order and the access checks never saw them."""
+    from adf2fabric.agent.storage import stores
+
+    for ds in d.datasets:
+        loc = (ds.type_properties or {}).get("location")
+        store = stores.for_location(loc.get("type")) if isinstance(loc, dict) else None
+        if store is None or store.kind == "adls_gen2":
+            continue
+        ident, dynamic = ds.linked_service_ref.name if ds.linked_service_ref else ds.name, False
+        for key in ("bucketName", "container"):
+            v = loc.get(key)
+            if isinstance(v, dict) and v.get("type") == "Expression" or (isinstance(v, str) and (v.startswith("@") or "@{" in v)):
+                dynamic = True
+            elif isinstance(v, str) and v:
+                ident = v
+                break
+        g.ref(T.storage_path, f"{store.label}/{ident}", "dataset", ds.name, "path", resolution=R.dynamic if dynamic else R.external,
+              attributes={"store": store.kind, "shortcut": store.shortcut, "copy": store.copy})
 
 
 def _vault_of(ls: AdfLinkedService) -> Optional[str]:
@@ -671,6 +694,11 @@ def _implication(dep: Dependency, d: AdfSemanticDiscovery, g: _Graph, runtimes: 
         dep.migration = _impl(C.manual if dep.resolution is not R.dynamic else C.manual,
                               "A database object outside ADF; it must exist where the Fabric connection points.",
                               ["Confirm it exists in the target database (or the Warehouse its data moves to)."])
+    elif t is T.storage_path and dep.attributes.get("store"):
+        from adf2fabric.agent.storage import stores
+
+        st = stores.STORES[dep.attributes["store"]]
+        dep.migration = _impl(C.manual, st.summary(), [*st.alternatives, *([st.gateway] if st.gateway else [])])
     elif t is T.storage_path:
         dep.migration = _impl(C.manual, "Storage outside ADF; the identity that runs in Fabric needs access.", [
             "Grant that identity read/write on the container, or expose it through a OneLake shortcut."])

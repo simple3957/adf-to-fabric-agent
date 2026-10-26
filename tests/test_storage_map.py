@@ -111,7 +111,7 @@ def test_the_report_names_what_the_user_must_decide_and_claims_nothing_is_done()
     m = build_storage_map(disc([ds("A", adls("c1", "f")), ds("D3", {"type": "AzureBlobStorageLocation", "container": "c"})], pipelines=[NS(name="P1", activities=[act("Copy", ["D3"])])]), "lh_main")
     md = render_markdown(m, "WS")
     assert "For you to deal with" in md and "| D3 | P1 |" in md and "create-shortcut --workspace-id WS --lakehouse lh_main" in md
-    assert "No data is moved" in md and "not verified until the shortcut exists" in md and "not yet rewritten" in md
+    assert "No data is moved" in md and "not verified until the shortcut exists" in md and "convert --lakehouse" in md
     assert "--connection-id <connection-id for acctone>" in md  # the connection id is never invented
     none = render_markdown(build_storage_map(disc([])), "WS")
     assert "None." in none and "<lakehouse>" not in none.split("## For you")[0].replace("pass --lakehouse", "")

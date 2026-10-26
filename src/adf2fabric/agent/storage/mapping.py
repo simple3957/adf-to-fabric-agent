@@ -18,24 +18,12 @@ import re
 from dataclasses import asdict, dataclass, field
 from typing import Any, Iterable, Optional
 
+from adf2fabric.agent.storage import stores
 from adf2fabric.project.discovery import AdfActivity, AdfDataset, AdfLinkedService, AdfSemanticDiscovery
 
 _ADLS_URL = re.compile(r"^https://([a-z0-9]{3,24})\.dfs\.core\.windows\.net/?$", re.I)
 _SHORTCUT_NAME = re.compile(r"^[A-Za-z0-9 _.\-]{1,128}$")
-_FILE_LOCATIONS = {"AzureBlobFSLocation": "adls_gen2", "AzureBlobStorageLocation": "blob", "AmazonS3Location": "s3", "AzureDataLakeStoreLocation": "adls_gen1",
-                   "GoogleCloudStorageLocation": "gcs", "SftpLocation": "sftp", "FtpServerLocation": "ftp", "FileServerLocation": "file_server",
-                   "HttpServerLocation": "http", "AzureFileStorageLocation": "azure_files"}
-_NOT_MAPPED_WHY = {
-    "blob": "Azure Blob Storage: a shortcut for it is not built or verified here. Use an ADLS Gen2 account (hierarchical namespace) or decide how to copy it.",
-    "adls_gen1": "ADLS Gen1 is retired; the data must move to Gen2 first.",
-    "s3": "Amazon S3 needs an S3 shortcut and connection; not built here.",
-    "gcs": "Google Cloud Storage needs its own shortcut and connection; not built here.",
-    "sftp": "SFTP has no shortcut. Land the files with a copy step first.",
-    "ftp": "FTP has no shortcut. Land the files with a copy step first.",
-    "file_server": "A file server has no shortcut (it is on-premises or a share). Land the files with a copy step first.",
-    "http": "An HTTP location has no shortcut.",
-    "azure_files": "Azure Files has no shortcut. Land the files with a copy step first.",
-}
+_FILE_LOCATIONS = stores.LOCATIONS
 
 
 @dataclass
@@ -60,6 +48,7 @@ class DatasetMap:
     dynamic: list[str] = field(default_factory=list)  # which of container/folder/file are expressions
     reason: str = ""
     action: str = ""
+    alternatives: list[str] = field(default_factory=list)  # what Fabric offers for this store, best first (agent/storage/stores.py)
     used_by: list[Use] = field(default_factory=list)
 
 
@@ -144,8 +133,12 @@ def _map_dataset(ds: AdfDataset, ls: Optional[AdfLinkedService], used: list[Use]
     kind = _FILE_LOCATIONS.get(str(loc.get("type")), "other")
     base = dict(dataset=ds.name, format=ds.type or "?", linked_service=ds.linked_service_ref.name if ds.linked_service_ref else None, store=kind, used_by=used)
     if kind != "adls_gen2":
-        why = _NOT_MAPPED_WHY.get(kind, f"Location type '{loc.get('type')}' is not recognised, so it is not mapped.")
-        return DatasetMap(**base, status="needs_decision", reason=why, action="Decide where this data lives in Fabric, then map it by hand.")
+        st = stores.STORES.get(kind)
+        if st is None:
+            return DatasetMap(**base, status="needs_decision", reason=f"Location type '{loc.get('type')}' is not a file store this tool knows, so it is not mapped.",
+                              action="Decide where this data lives in Fabric, then map it by hand.")
+        return DatasetMap(**base, status="needs_decision", reason=f"{st.summary()} This tool maps only ADLS Gen2 to a shortcut.",
+                          action="Choose one of the alternatives, then map it by hand.", alternatives=[*st.alternatives, *([st.gateway] if st.gateway else [])])
     container, c_dyn = _text(loc.get("fileSystem"))
     if container and not c_dyn:
         container = container.strip().lower()  # Azure container names are lowercase and case-insensitive: 'Raw' and 'raw' are one container
@@ -224,7 +217,7 @@ def build_storage_map(disc: AdfSemanticDiscovery, lakehouse: Optional[str] = Non
     unknown = sorted(f"{a}/{c}" for a, c in names if (a, c) not in groups)
     if unknown:
         raise StorageMapError(f"No mapped dataset uses {', '.join(unknown)}; check the account/container names.")
-    to_decide = [{"dataset": r.dataset, "used_by": sorted({u.pipeline for u in r.used_by}), "reason": r.reason, "action": r.action}
+    to_decide = [{"dataset": r.dataset, "used_by": sorted({u.pipeline for u in r.used_by}), "reason": r.reason, "action": r.action, "alternatives": r.alternatives}
                  for r in rows if r.status == "needs_decision"]
     summary = {"file_datasets": len(rows), "mapped": sum(r.status == "mapped" for r in rows), "mapped_dynamic": sum(r.status == "mapped_dynamic" for r in rows),
                "needs_decision": len(to_decide), "shortcuts": len(shortcuts), "not_file_datasets": not_file}
@@ -257,10 +250,15 @@ def render_markdown(m: StorageMap, workspace_hint: str = "<workspace-id>") -> st
     else:
         out += ["| Dataset | Used by | Why it is not mapped | What to do |", "|---|---|---|---|"]
         out += [f"| {d['dataset']} | {', '.join(d['used_by']) or '-'} | {d['reason']} | {d['action']} |" for d in m.to_decide]
+        out += ["", "### Alternatives, per dataset (from Microsoft's documentation, read " + stores.VERIFIED_ON + ")", ""]
+        for d in m.to_decide:
+            if d.get("alternatives"):
+                out += [f"**{d['dataset']}**", ""] + [f"* {x}" for x in d["alternatives"]] + [""]
+        out += ["Sources: " + "; ".join(f"<{u}>" for u in stores.SOURCES), ""]
     out += ["", "## Every dataset", "", "| Dataset | Status | Storage | Lakehouse path | Note |", "|---|---|---|---|---|"]
     for r in m.datasets:
         out.append(f"| {r.dataset} | {r.status} | {r.store} | {('`' + r.lakehouse_path + '`') if r.lakehouse_path else '-'} | {r.reason} |")
     out += ["", "## What is not done by this map", "",
-            "* Pipelines are not yet rewritten to read the Lakehouse: that needs the Fabric Lakehouse dataset shape, which is not verified in this project.",
+            "* Pipelines read the Lakehouse only when you ask: `convert --lakehouse <name>` repoints ADLS Gen2 CSV and Parquet datasets (live-verified).",
             "* Data is never copied or deleted. Loading files into Lakehouse Tables (Delta) is a separate decision.", ""]
     return "\n".join(out)
