@@ -250,6 +250,9 @@ def _dataset_columns(props: dict) -> list[AdfColumn]:
                 out.append(
                     AdfColumn(name=col["name"], type=ctype if isinstance(ctype, str) else None)
                 )
+    elif "schema" not in props and isinstance(props.get("structure"), list):
+        # The older 'structure' property: its type names (Int32, ...) are ADF's own and are not mapped, so only the names are kept.
+        out = [AdfColumn(name=c["name"]) for c in props["structure"] if isinstance(c, dict) and isinstance(c.get("name"), str)]
     return out
 
 

@@ -582,6 +582,9 @@ def _legacy_refs(act: AdfActivity, node: dict, tp: dict) -> None:
     act.dataset_refs = sorted(set(datasets))
     ls = _ref_name(node.get("linkedServiceName"))
     act.linked_service_refs = [ls] if ls else []
+    ls_node = node.get("linkedServiceName")
+    ls_args = ls_node.get("parameters") if isinstance(ls_node, dict) else None
+    act.linked_service_arguments = _Sanitizer().clean(ls_args) if isinstance(ls_args, dict) else {}
     pl = _ref_name(tp.get("pipeline"))
     act.pipeline_refs = [pl] if pl else []
     source = tp.get("source") if isinstance(tp.get("source"), dict) else {}

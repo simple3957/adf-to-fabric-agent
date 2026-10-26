@@ -698,6 +698,7 @@ class AdfActivity(_Strict):
     depends_on: list[AdfDependency] = Field(default_factory=list)
     dataset_refs: list[str] = Field(default_factory=list)
     linked_service_refs: list[str] = Field(default_factory=list)
+    linked_service_arguments: dict[str, Any] = Field(default_factory=dict)  # what linkedServiceName.parameters passes (secret-masked)
     pipeline_refs: list[str] = Field(default_factory=list)
     source_type: Optional[str] = None
     sink_type: Optional[str] = None

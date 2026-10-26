@@ -127,6 +127,44 @@ def _wait_only(d: AdfSemanticDiscovery) -> list[PreflightFinding]:
     return out
 
 
+def _missing_artifacts(d: AdfSemanticDiscovery) -> list[PreflightFinding]:
+    """Linked services and datasets that pipelines name but the source does not contain (a partial ZIP or Git folder).
+
+    Without a dataset the activity cannot be converted (blocked); without a linked service it converts as manual, because the
+    connection cannot be described. Both are listed with who needs them and every way to get them.
+    """
+    from adf2fabric.project.discovery import AdfArtifactKind as K
+
+    wanted = {K.linked_service: "linked service", K.dataset: "dataset"}
+    missing: dict[K, list[str]] = {k: sorted({r.name for r in d.unresolved_references if r.kind == k}) for k in wanted}
+    users: dict[tuple[K, str], set[str]] = {}
+    for rel in d.relationships:
+        if not rel.resolved and rel.target_kind in wanted:
+            users.setdefault((rel.target_kind, rel.target_name), set()).add(rel.source_name)
+    out = []
+    for kind, names in missing.items():
+        if not names:
+            continue
+        what = wanted[kind]
+        shown = ", ".join(f"'{n}'" for n in names[:8]) + (f" and {len(names) - 8} more" if len(names) > 8 else "")
+        needed_by = sorted({u for n in names for u in users.get((kind, n), ())})
+        if kind == K.dataset:
+            sev, effect = "error", "every Copy, Lookup or GetMetadata that uses one is blocked: Fabric inlines datasets and there is nothing to inline"
+            fix = ("Add the dataset folder to the source: take the full Git collaboration branch (not a subfolder), a ZIP that includes "
+                   "'dataset/', or re-run intake from the live factory (`adf2fabric intake --factory ...`).")
+        else:
+            sev, effect = "warning", "activities that use one convert as manual: the connector type, endpoint and authentication cannot be described"
+            fix = ("Best: add them to the source: a ZIP or Git folder that includes 'linkedService/', the factory's ARMTemplateForFactory.json "
+                   "export, or `adf2fabric intake --factory ... --artifact-kind linkedservice` against the live factory. Otherwise create each "
+                   "Fabric connection by hand and bind it with 'connection:<name>' in --resolutions; the activities then convert with a "
+                   "difference noting that the connector type was not checked. Stored procedure and Script activities stay blocked "
+                   "either way: the store type decides whether Fabric supports them, so only the linked service itself resolves them.")
+        out.append(PreflightFinding(
+            code="missing_datasets" if kind == K.dataset else "missing_linked_services", severity=sev, subject=", ".join(names[:8]), pipelines=needed_by,
+            message=f"{len(names)} {what}(s) are named by the pipelines but are not in the source: {shown}. Result: {effect}.", fix=fix))
+    return out
+
+
 def scan(d: AdfSemanticDiscovery, contents: dict[str, dict]) -> list[PreflightFinding]:
     """Findings for the converted ``contents`` (pipeline name -> pipeline-content JSON) and the semantic record."""
-    return [*_reserved_aliases(contents), *_parameters_without_value(d), *_wait_only(d)]
+    return [*_missing_artifacts(d), *_reserved_aliases(contents), *_parameters_without_value(d), *_wait_only(d)]

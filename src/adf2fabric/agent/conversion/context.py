@@ -122,6 +122,11 @@ class Resolutions:
 # --- project / pipeline context ---------------------------------------------------------------------
 
 
+def literal_arguments(args: dict) -> Optional[dict]:
+    """The arguments as text, or None when any of them is computed at run time (an expression)."""
+    return {k: str(v) for k, v in args.items()} if all(isinstance(v, (str, int, float)) and not isinstance(v, bool) for v in args.values()) else None
+
+
 @dataclass
 class ProjectContext:
     datasets: dict[str, AdfDataset]
@@ -139,6 +144,19 @@ class ProjectContext:
     # Opt-in Lakehouse repointing: (account, container) -> shortcut name under Files, from the storage map; the lakehouse's name.
     storage_routes: dict[tuple[str, str], str] = field(default_factory=dict)
     route_lakehouse: Optional[str] = None
+    _ls_sets: dict[str, set] = field(default_factory=dict)  # linked service (lower) -> distinct literal argument sets in use
+
+    def ls_argument_sets(self, ls_name: str) -> set:
+        """Every distinct set of literal arguments datasets and activities pass to this linked service (no arguments = the empty set)."""
+        low = ls_name.lower()
+        if low not in self._ls_sets:
+            from adf2fabric.agent.discovery.adf_semantic.inventory import walk
+
+            found = [d.linked_service_arguments for d in self.datasets.values() if d.linked_service_ref is not None and d.linked_service_ref.name.lower() == low]
+            for p in self.pipelines.values():
+                found += [a.linked_service_arguments for a in walk(p.activities) if a.linked_service_refs[:1] and a.linked_service_refs[0].lower() == low]
+            self._ls_sets[low] = {tuple(sorted(lit.items())) for lit in map(literal_arguments, found) if lit is not None}
+        return self._ls_sets[low]
 
     # -- bindings ------------------------------------------------------------------------------------
     def _prereq(self, kind: str, name: str, detail: str, token: str, bound: bool, needed_by: str) -> Prerequisite:
@@ -151,9 +169,18 @@ class ProjectContext:
             p.needed_by.append(needed_by)
         return p
 
-    def connection_ref(self, ls_name: str, needed_by: str, detail_extra: str = "") -> str:
-        """The connection id for an ADF linked service (a real GUID when resolved, else a token)."""
+    def _supplied_connection(self, ls_name: str) -> Optional[str]:
+        """The Fabric connection a person bound to this linked service: a LinkedServiceToConnectionId entry, or (what the template
+        used to write for a linked service missing from the source) an ItemToId 'connection:<name>' one."""
+        key = ls_name.lower()
+        return self.resolutions.connections.get(key) or self.resolutions.items.get(f"connection:{key}")
+
+    def connection_ref(self, ls_name: str, needed_by: str, detail_extra: str = "", key: Optional[str] = None) -> str:
+        """The connection id for an ADF linked service (a real GUID when resolved, else a token).
+
+        ``key`` is the binding name when one linked service needs several connections (``LS?Param=value``); it defaults to the name."""
         ls = self.linked_services.get(ls_name.lower())
+        bind = key or ls_name
         parts = [f"ADF linked service type {ls.type}" if ls and ls.type else "ADF linked service"]
         if ls:
             if ls.endpoint:
@@ -164,9 +191,9 @@ class ProjectContext:
                 parts.append("secrets come from Azure Key Vault (recreate the credential in the Fabric connection)")
         if detail_extra:
             parts.append(detail_extra)
-        guid = self.resolutions.connections.get(ls_name.lower())
-        token = f"<connection:{ls_name}>"
-        self._prereq("connection", ls_name, "; ".join(parts), token, guid is not None, needed_by)
+        guid = self._supplied_connection(bind)
+        token = f"<connection:{bind}>"
+        self._prereq("connection", bind, "; ".join(parts), token, guid is not None, needed_by)
         why = gateway_need(ls.integration_runtime, ls.integration_runtime_kind) if ls else None
         if why:
             self._prereq("gateway", ls.integration_runtime, f"Linked service '{ls_name}': {why}",
@@ -331,9 +358,40 @@ class ActivityBuilder:
         if p is not None and not any(q.kind == kind and q.name == name for q in self.prerequisites):
             self.prerequisites.append(p)
 
-    def connection(self, ls_name: str, detail: str = "") -> str:
-        ref = self.pc.project.connection_ref(ls_name, self.act.name, detail)
-        self._bind("connection", ls_name)
+    def _arguments_key(self, ls: str, args: dict, subject: str) -> Optional[str]:
+        """The binding name when ``subject`` passes arguments to a parameterised linked service, else None.
+
+        An ADF linked service can take parameters (database, server, URL) and each dataset or activity passes its own; a Fabric
+        connection is fixed. Different literal values therefore need different connections, bound as ``LS?Param=value``. A value
+        computed at run time cannot be bound at all, and is said so. Never silently one connection for all of them."""
+        mine = literal_arguments(args)
+        if mine is None:
+            self.issue("linked_service_argument_dynamic",
+                       f"{subject} passes {', '.join(sorted(args))} to linked service '{ls}', and the value is computed at run time. "
+                       "A Fabric connection is fixed (one database, server or URL), so one connection cannot follow it.",
+                       impact=Impact.manual, action="Create one Fabric connection per value it can take, or split the pipeline by value.")
+            return None
+        shown = ", ".join(f"{k}={v}" for k, v in sorted(mine.items()))
+        sets = self.pc.project.ls_argument_sets(ls)
+        if len(sets) > 1:
+            self.issue("linked_service_arguments_split",
+                       f"Linked service '{ls}' receives different arguments from different datasets or activities ({len(sets)} sets); "
+                       f"{subject} passes {shown}. Each set needs its own Fabric connection.", impact=Impact.difference,
+                       action=f"Create a connection for {shown} and bind it as '{ls}?...' in --resolutions (the generated template lists each one).")
+            return f"{ls}?" + "&".join(f"{k}={v}" for k, v in sorted(mine.items()))
+        self.issue("linked_service_arguments_fixed",
+                   f"{subject} passes {shown} to linked service '{ls}'; the Fabric connection is fixed to these values.",
+                   impact=Impact.difference, action=f"Create the connection for {shown}.")
+        return None
+
+    def connection(self, ls_name: str, detail: str = "", key: Optional[str] = None, args: Optional[dict] = None,
+                   subject: Optional[str] = None) -> str:
+        if key is None and args is None and self.act.linked_service_refs[:1] and self.act.linked_service_refs[0].lower() == ls_name.lower():
+            args, subject = self.act.linked_service_arguments, f"{self.act.type} activity '{self.act.name}'"  # the activity's own linkedServiceName
+        if key is None and args:
+            key = self._arguments_key(ls_name, args, subject or f"activity '{self.act.name}'")
+        ref = self.pc.project.connection_ref(ls_name, self.act.name, detail, key)
+        self._bind("connection", key or ls_name)
         ls = self.pc.project.linked_services.get(ls_name.lower())
         if ls and gateway_need(ls.integration_runtime, ls.integration_runtime_kind):
             self._bind("gateway", ls.integration_runtime)
@@ -346,10 +404,19 @@ class ActivityBuilder:
                 if not any(i.code == code and i.message == msg for i in self.issues):  # one per activity, not per dataset
                     self.issue(code, msg, impact=e.impact, action=e.alternatives[0] if e.alternatives else "")
         if ls is None:
-            self.issue("linked_service_not_found",
-                       f"Linked service '{ls_name}' was not found among the discovered artifacts; the connection "
-                       "cannot be described.", impact=Impact.manual,
-                       action="Re-run discovery on the full factory, or create the Fabric connection by hand.")
+            if self.pc.project._supplied_connection(ls_name):
+                # A person bound a real Fabric connection: the activity is complete, but nothing checks that the connection's
+                # connector matches the dataset (the linked service that would say so is not in the source).
+                self.issue("linked_service_not_found",
+                           f"Linked service '{ls_name}' is not in the source; the Fabric connection a person supplied is used "
+                           "as given and its connector type is not checked against the source.", impact=Impact.difference,
+                           action="Confirm in Fabric that the connection's connector and database match this dataset.")
+            else:
+                self.issue("linked_service_not_found",
+                           f"Linked service '{ls_name}' was not found among the discovered artifacts; the connection "
+                           "cannot be described.", impact=Impact.manual,
+                           action="Re-run discovery on the full factory, or create the Fabric connection by hand and bind it "
+                                  f"with 'connection:{ls_name}' in --resolutions.")
         return ref
 
     def free_connection(self, key: str, detail: str) -> str:

@@ -27,6 +27,13 @@ def _sql_target(cx: ActivityBuilder, allowed: frozenset, what: str) -> Optional[
         return None
     ls_ir = cx.pc.project.linked_services.get(ls.lower())
     ltype = ls_ir.type if ls_ir else None
+    if ls_ir is None:  # the store type decides whether Fabric supports this activity, so a bound connection cannot stand in for the definition
+        cx.blocker(f"{what}_linked_service_not_in_source",
+                   f"Linked service '{ls}' is not in the source, so its store type is unknown and cannot be checked against the stores "
+                   f"Fabric supports for this activity.",
+                   "Add the linked service to the source (its linkedService/ file, the ARM template export, or intake from the live factory).")
+        _block(cx, f"{what}_linked_service_not_in_source", "its linked service is not in the source, so its store type is unknown.")
+        return None
     if (ltype or "").lower() not in allowed:
         verdict, why = connectors.verdict(ltype)
         cx.blocker(f"{what}_store_unsupported",

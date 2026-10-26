@@ -58,6 +58,9 @@ def check_connector(cx: ActivityBuilder, ls_name: str, *, what: str) -> str:
 # location {type: LakehouseLocation, folderPath, fileName}, storeSettings LakehouseReadSettings / LakehouseWriteSettings.
 # Microsoft's connector page documents only the portal fields, so nothing beyond what ran is emitted.
 LAKEHOUSE_FORMATS = ("DelimitedText", "Parquet")
+# Dataset types whose converted form has been RUN in Fabric and matched ADF (Azure Synapse tables; ADLS Gen2 CSV and Parquet; the Lakehouse
+# Files repointing above). Every other type is converted from its ADF shape and says so.
+LIVE_VERIFIED_DATASET_TYPES = frozenset({"AzureSqlDWTable", "DelimitedText", "Parquet"})
 _LAKEHOUSE_STORE = {"AzureBlobFSReadSettings": "LakehouseReadSettings", "AzureBlobFSWriteSettings": "LakehouseWriteSettings"}
 # storeSettings keys the Lakehouse connector documents with the same meaning (none of them is a path relative to the container)
 _LAKEHOUSE_STORE_KEYS = {"type", "recursive", "wildcardFileName", "modifiedDatetimeStart", "modifiedDatetimeEnd",
@@ -181,6 +184,10 @@ def dataset_settings(cx: ActivityBuilder, io: Optional[AdfIO], source_path: str,
         cx.blocker("dataset_type_missing", f"Dataset '{ds.name}' declares no type.")
         return None
 
+    if ds.type not in LIVE_VERIFIED_DATASET_TYPES:
+        cx.info("dataset_type_not_live_verified",
+                f"Dataset '{ds.name}' ({ds.type}) is carried with its ADF type and properties; this type has not been run in Fabric by this tool.",
+                "Run the converted pipeline once in a test workspace and compare it with ADF (`verify`).")
     args = {k.lower(): cx.tree(v, f"{source_path}.parameters.{k}", f"{target_path}.parameters.{k}")
             for k, v in io.parameters.items()}
     defaults = {p.name.lower(): p.default_raw for p in ds.parameters if p.has_default}
@@ -220,7 +227,7 @@ def dataset_settings(cx: ActivityBuilder, io: Optional[AdfIO], source_path: str,
     if ds.linked_service_ref is not None:
         ls = ds.linked_service_ref.name
         check_connector(cx, ls, what=f"dataset '{ds.name}'")
-        settings["externalReferences"] = {"connection": cx.connection(ls)}
+        settings["externalReferences"] = {"connection": cx.connection(ls, args=ds.linked_service_arguments, subject=f"Dataset '{ds.name}'")}
         cx.mapping(f"dataset:{ds.name}.linkedServiceName", f"{target_path}.externalReferences.connection",
                    "linked_service_to_connection", f"linked service '{ls}' -> Fabric connection")
     else:

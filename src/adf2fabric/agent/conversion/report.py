@@ -185,7 +185,7 @@ def render_resolutions_template(c: ProjectConversion, linked_services: set[str])
     for q in c.connections:
         if q.kind != "connection" or q.bound:
             continue
-        if q.name.lower() in linked_services:
+        if q.name.lower() in linked_services or q.detail.startswith("ADF linked service"):  # also one the source lacks
             entries.append({"type": "LinkedServiceToConnectionId", "key": q.name, "value": "<Fabric connection GUID>"})
         else:
             entries.append({"type": "ItemToId", "key": f"connection:{q.name}", "value": "<Fabric connection GUID>"})
