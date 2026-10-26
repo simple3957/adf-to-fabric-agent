@@ -19,7 +19,7 @@ import re
 from datetime import datetime, timezone
 from pathlib import Path
 from adf2fabric.agent.conversion import compatibility as compat
-from adf2fabric.agent.conversion import preflight
+from adf2fabric.agent.conversion import dataset_ledger, preflight
 from adf2fabric.agent.conversion.compute_plan import ComputeSources, build_compute_plan, load_sources
 from adf2fabric.agent.conversion.connectors import coverage as connector_coverage
 from adf2fabric.agent.conversion.context import ProjectContext, Resolutions
@@ -252,6 +252,7 @@ class ConversionAgent:
             schema_notes=notes, detail=detail, provenance=dict(_PROVENANCE),
             compatibility=compat.scan(d, {p.source_pipeline for p in pipelines}),
             preflight=preflight.scan(d, contents or {}),
+            dataset_ledger=dataset_ledger.build(d, pipelines),
             connector_coverage=connector_coverage(d.linked_services),
             compute_plan=build_compute_plan(d, {p.source_pipeline.lower() for p in pipelines}, compute_sources))
         if self.store.has_conversion(pid):

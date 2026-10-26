@@ -228,7 +228,7 @@ class PipelineConversion(_Strict):
 class PreflightFinding(_Strict):
     """A problem in the authored source that conversion cannot fix (``agent/conversion/preflight.py``)."""
 
-    code: str  # reserved_sql_alias | linked_service_parameter_without_value | wait_only_pipeline | missing_linked_services | missing_datasets
+    code: str  # reserved_sql_alias | linked_service_parameter_without_value | wait_only_pipeline | missing_linked_services | missing_datasets | source_activities_unaccounted
     severity: str  # error: the Fabric run will fail | warning: the ADF run fails, Fabric is not affected | info: worth knowing
     subject: str  # the activity, linked service or pipeline it is about
     pipelines: list[str] = Field(default_factory=list)
@@ -267,6 +267,16 @@ class ConversionOutcome(str, Enum):
     failed = "failed"
 
 
+class DatasetLedgerEntry(_Strict):
+    """What became of one ADF dataset. Fabric has no dataset item: its settings are copied into each activity that uses it."""
+
+    name: str
+    type: Optional[str] = None
+    treatment: str  # inlined | repointed_to_lakehouse | not_converted | used_by_data_flow | not_used
+    used_by: list[str] = Field(default_factory=list)  # 'Pipeline/Activity' it was inlined into
+    note: str = ""
+
+
 class ProjectConversion(_Strict):
     schema_version: str = CONVERSION_SCHEMA_VERSION
     project_id: str
@@ -282,6 +292,7 @@ class ProjectConversion(_Strict):
     connections: list[Prerequisite] = Field(default_factory=list)  # aggregated, deduplicated
     workspace_items: list[Prerequisite] = Field(default_factory=list)
     schema_notes: list[str] = Field(default_factory=list)  # inferred (not documented) schema parts
+    dataset_ledger: list[DatasetLedgerEntry] = Field(default_factory=list)  # every source dataset and what became of it
     reconstruction_applied: list[str] = Field(default_factory=list)  # proposal ids that entered this output
     reconstruction_open: list[str] = Field(default_factory=list)  # blocker ids still unresolved
     compatibility: list[CompatibilityFinding] = Field(default_factory=list)  # retired/deprecated/preview components

@@ -107,6 +107,16 @@ def render_report(c: ProjectConversion) -> str:
         if p.prerequisites:
             out += ["", "### Prerequisites for this pipeline", ""] + _prereq_lines(p.prerequisites)
 
+    if c.dataset_ledger:
+        counts: dict[str, int] = {}
+        for e in c.dataset_ledger:
+            counts[e.treatment] = counts.get(e.treatment, 0) + 1
+        out += ["", "## Datasets (Fabric has no dataset item: each one's settings are copied into the activities that use it)", "",
+                f"{len(c.dataset_ledger)} source dataset(s): " + ", ".join(f"{n} {k.replace('_', ' ')}" for k, n in sorted(counts.items())) + ".", "",
+                "| Dataset | Type | What became of it | Used by |", "| --- | --- | --- | --- |"]
+        for e in c.dataset_ledger:
+            used = ", ".join(f"`{u}`" for u in e.used_by[:3]) + (f" +{len(e.used_by) - 3}" if len(e.used_by) > 3 else "")
+            out.append(f"| `{e.name}` | {e.type or '-'} | {e.treatment.replace('_', ' ')}: {_cell(e.note)} | {used or '-'} |")
     if c.preflight:
         out += ["", "## Source checks (problems in the authored source that conversion cannot fix)", "",
                 "| Severity | Subject | Used in | Finding | Fix |", "| --- | --- | --- | --- | --- |"]
