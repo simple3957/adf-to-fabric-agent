@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 from collections import Counter
 from dataclasses import dataclass, field
@@ -322,7 +323,9 @@ QUESTIONS: list[Question] = [
                                 O("connections", "Keep Fabric connections to the original storage")],
              when=lambda f, a: f.file_datasets > 0,
              recommend=lambda f, a: R("lakehouse", f"{plural(f.file_datasets, 'file dataset')} on storage; shortcuts keep the data in place and governed in OneLake.")
-             if f.shortcuts_planned else R("connections", "No shortcut can be planned from what discovery found.")),
+             if f.shortcuts_planned and (not simple() or f.lakehouse_bound)
+             else R("connections", "Simple mode keeps the original connections until a lakehouse exists and is bound; repoint here once it does." if f.shortcuts_planned
+                    else "No shortcut can be planned from what discovery found.")),
     Question("storage.lakehouse", "storage", "Which lakehouse holds the shortcuts?",
              "A lakehouse name is never invented. Bind its id in the resolutions (ItemToId lakehouse:<name>) or create it on the Plan step.",
              "text", True, "run", "The lakehouse conversion repoints to.", placeholder="e.g. LH_Migration", check=_item_name,
@@ -516,6 +519,17 @@ def _blank(v: Any) -> bool:
     return v is None or (isinstance(v, str) and not v.strip())
 
 
+def simple() -> bool:
+    """Simple mode (the default): only the questions that change what the run does are asked, each already answered with its recommendation, and
+    saving them is the whole step: no submit, no second person to approve. ``ADF2FABRIC_CONSULT=full`` restores the full consultation."""
+    return os.environ.get("ADF2FABRIC_CONSULT", "simple").strip().lower() != "full"
+
+
+# What simple mode asks: the questions the run reads (see Settings), minus two that have a safe default and are not worth a question
+# (``target.git``: committing to the workspace's Git is off unless wanted; ``security.sensitive``: a data-owner approval gate). The rest only record or gate.
+ESSENTIAL = frozenset(q.id for q in QUESTIONS if q.effect == "run") - {"target.git", "security.sensitive"}
+
+
 def resolve(facts: Facts, given: Answers) -> list[Resolved]:
     """Each question with the answer the brief uses: the configuration's, else the person's, else the recommendation.
 
@@ -523,7 +537,7 @@ def resolve(facts: Facts, given: Answers) -> list[Resolved]:
     effective: Answers = {}
     out: list[Resolved] = []
     for q in QUESTIONS:
-        applies = q.when(facts, effective) if q.when else True
+        applies = (q.when(facts, effective) if q.when else True) and (q.id in ESSENTIAL or not simple())
         config = q.resolve(facts) if applies and q.resolve else None
         rec = config or (q.recommend(facts, effective) if applies and q.recommend else None)
         mine = given.get(q.id)

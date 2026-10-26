@@ -706,3 +706,49 @@ def test_live_read_only_validation_of_a_real_workspace():
     r = engine.validate(ProjectStore(Path("projects")), pid, stages={"static", "api", "deployment"}, fab=fab, workspace=ws)
     assert not r.full_success_claimed  # no runtime evidence was supplied
     assert {s.stage: s.status for s in r.stages}[Stage.api] in (R.PASS, R.FAIL, R.BLOCKED)
+
+
+# =====================================================================================================================
+# a dataset repointed to the lakehouse (convert --lakehouse) carries the lakehouse as its connection, not an externalReferences.connection
+# =====================================================================================================================
+
+
+def _repoint_sink(artifact):
+    def edit(data):
+        copy = next(a for a in acts(data) if a.name == "Copy_Customer").raw
+        ds = copy["typeProperties"]["sink"]["datasetSettings"]
+        ds.pop("externalReferences", None)
+        ds["linkedService"] = {"name": "lh_main", "properties": {"annotations": [], "type": "Lakehouse",
+                                                                  "typeProperties": {"workspaceId": WS, "artifactId": artifact, "rootFolder": "Files"}}}
+    return edit
+
+
+def test_a_dataset_repointed_to_a_bound_lakehouse_is_not_a_missing_connection(project):
+    store, pid = project
+    edit_target(store, pid, "PL_Main", _repoint_sink("33333333-3333-3333-3333-333333333333"))
+    r = run(store, pid)
+    assert results(r, "connections_secrets.linked_service", "linked_service:LS_LAKE") == {R.PASS}  # it used to FAIL: 'no connection reference'
+    assert not [c for c in r.checks if c.id == "connections_secrets.linked_service" and c.result is R.FAIL]
+
+
+def test_a_dataset_repointed_to_an_unbound_lakehouse_blocks_rather_than_fails(project):
+    store, pid = project
+    edit_target(store, pid, "PL_Main", _repoint_sink("<item:lakehouse:lh_main>"))
+    r = run(store, pid)
+    assert results(r, "connections_secrets.linked_service", "linked_service:LS_LAKE") == {R.BLOCKED}
+    assert results(r, "reference_integrity.target_unbound") == {R.BLOCKED}
+
+
+def test_an_activity_whose_every_dataset_is_repointed_says_it_reads_through_the_lakehouse(project):
+    store, pid = project
+
+    def both(data):
+        copy = next(a for a in acts(data) if a.name == "Copy_Customer").raw
+        for side in ("source", "sink"):
+            ds = copy["typeProperties"][side]["datasetSettings"]
+            ds.pop("externalReferences", None)
+            ds["linkedService"] = {"name": "lh_main", "properties": {"type": "Lakehouse", "typeProperties": {"workspaceId": WS, "artifactId": "33333333-3333-3333-3333-333333333333"}}}
+    edit_target(store, pid, "PL_Main", both)
+    r = run(store, pid)
+    rows = check(r, "connections_secrets.linked_service", "linked_service:LS_LAKE")
+    assert {c.result for c in rows} == {R.PASS} and "lakehouse shortcut" in " ".join(c.summary for c in rows)

@@ -33,6 +33,9 @@ def consult(api: ApiClient, pid: str, brief: dict | None) -> None:
     if not brief:
         empty_state("Nothing to ask yet", "Run discovery first: the consultation asks only about what discovery found.")
         return
+    if brief.get("mode") == "simple":
+        _simple(api, pid, brief)
+        return
     c = brief["counts"]
     head = f"Brief v{brief['current_version']['version']} {brief['state']}" if brief["current_version"] else "Draft brief"
     st.markdown(theme.badge(head, STATE_TONE.get(brief["state"], "neutral")), unsafe_allow_html=True)
@@ -72,6 +75,38 @@ def consult(api: ApiClient, pid: str, brief: dict | None) -> None:
     _exchange(api, pid, brief)
 
 
+def _simple(api: ApiClient, pid: str, brief: dict) -> None:
+    """Only what changes the run, already filled in; one button saves it. No submit, no second person: the saved settings are what the run follows."""
+    editable = can("plans:generate")
+    saved = brief["state"] == "approved"
+    st.markdown(theme.badge("Settings saved" if saved else "Nothing saved yet", "success" if saved else "neutral"), unsafe_allow_html=True)
+    st.caption("Each setting below is already chosen from what discovery found, with the reason. Change what you need and save. "
+               "If you save nothing, the run uses its normal defaults.")
+    if brief.get("workspace_changed"):
+        st.warning("The Fabric workspace chosen now is not the one these settings were saved for. Save them again to use them with this workspace.")
+    for x in brief["conflicts"]:
+        st.error(x)
+    with st.form("consult-simple", border=False):
+        chosen: dict[str, object] = {}
+        for q in brief["questions"]:
+            st.markdown(f"**{theme.esc(q['text'])}**")
+            rec = q.get("recommendation")
+            if q["source"] == "config":
+                st.info(f"{_plain(q['label'])} (read from the configuration)")
+                continue
+            if rec:
+                st.caption(f"💡 {_plain(rec['label'])}: {rec['reason']}")
+            if q.get("problem"):
+                st.error(f"The saved answer is no longer valid and is ignored: {q['problem']}")
+            chosen[q["id"]] = _widget(q, f"consult-q-{q['id']}", preselect=True)
+        save = st.form_submit_button("Save settings", type="primary", disabled=not editable)
+    if save:
+        values = {qid: v for qid, v in chosen.items() if v not in (None, "", [])}
+        if call(api.brief_answers, pid, values) is not None:
+            st.rerun()
+    _settings(brief)
+
+
 def _actions(api: ApiClient, pid: str, brief: dict) -> None:
     c = brief["counts"]
     a, b, d = st.columns(3)
@@ -101,10 +136,12 @@ def _actions(api: ApiClient, pid: str, brief: dict) -> None:
         d.download_button("Download brief (Markdown)", md.encode("utf-8"), file_name=f"{pid}-migration-brief.md", mime="text/markdown", key="consult-md")
 
 
-def _widget(q: dict, key: str):
+def _widget(q: dict, key: str, preselect: bool = False):
     opts = [o["value"] for o in q["options"]]
     labels = {o["value"]: o["label"] + (f" — {o['description']}" if o.get("description") else "") for o in q["options"]}
-    current = q["value"] if q["source"] == "person" else None  # a recommendation is shown, never pre-selected: saving a form must not accept what nobody chose
+    # The full consultation never pre-selects a recommendation (saving a form must not accept what nobody chose); the simple one does, because
+    # its whole point is that the recommended settings are the starting point.
+    current = q["value"] if (q["source"] == "person" or (preselect and q["source"] in ("recommendation", "person"))) else None
     if q["kind"] == "text":
         return st.text_input(q["text"], value=current or "", key=key, placeholder=q.get("placeholder") or "", label_visibility="collapsed")
     if q["kind"] == "multi":
@@ -146,7 +183,9 @@ def _topic_form(api: ApiClient, pid: str, topic: str, items: list[dict], editabl
 
 def _settings(brief: dict) -> None:
     s = brief.get("settings") or brief.get("draft_settings") or {}
-    title = "What the run follows (approved)" if brief.get("settings") else "What the run would follow once approved"
+    simple = brief.get("mode") == "simple"
+    title = ("What the run follows" if simple else "What the run follows (approved)") if brief.get("settings") else (
+        "What the run would follow once you save" if simple else "What the run would follow once approved")
     with st.expander(title, expanded=bool(brief.get("settings"))):
         rows = [
             ("Pipelines", "All" if s.get("pipelines") is None else f"{len(s['pipelines'])}: " + ", ".join(s["pipelines"][:8]) + (" …" if len(s["pipelines"]) > 8 else "")),

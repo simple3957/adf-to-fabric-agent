@@ -513,7 +513,13 @@ def connections_and_secrets(inp: Inputs, c: Collector) -> None:
                 states.append(f"{pname}/{aname}: not converted")
                 continue
             vals = _connection_values(ta.raw)
-            if not vals:
+            lake = [v for v in vals if _lakehouse_artifact_value(v, ta.raw)]
+            loose = [v for v in lake if _TOKEN.match(v)]
+            if loose:  # a repointed dataset whose lakehouse is not bound is a placeholder, whatever other connections the activity holds
+                states.append(f"{pname}/{aname}: unbound ({', '.join(loose)})")
+            elif vals and len(lake) == len(vals):
+                states.append(f"{pname}/{aname}: repointed to the lakehouse")
+            elif not vals:
                 states.append(f"{pname}/{aname}: no connection reference in the generated activity" if ta.type.lower() in CONNECTION_ACTIVITIES else f"{pname}/{aname}: n/a")
             elif all(_TOKEN.match(v) for v in vals):
                 states.append(f"{pname}/{aname}: unbound ({', '.join(vals)})")
@@ -521,7 +527,13 @@ def connections_and_secrets(inp: Inputs, c: Collector) -> None:
                 states.append(f"{pname}/{aname}: bound")
         unbound = [x for x in states if "unbound" in x or "not converted" in x]
         absent = [x for x in states if "no connection reference" in x]
-        if absent:
+        repointed = [x for x in states if "repointed to the lakehouse" in x]
+        if repointed and not absent and not unbound and len(repointed) == len(states):
+            c.add("connections_secrets.linked_service", K.connections_secrets, R.PASS,
+                  f"Every generated activity that used linked service '{lsf.name}' now reads its storage through a lakehouse shortcut.", component=comp,
+                  evidence=repointed + ["This is the opt-in repointing (convert --lakehouse): the lakehouse is bound by id and the storage connection is the shortcut's."])
+            c.comp(comp, "linked_service", S.transformed, note="replaced by a OneLake shortcut read through the lakehouse")
+        elif absent:
             c.add("connections_secrets.linked_service", K.connections_secrets, R.FAIL, f"Linked service '{lsf.name}' is used, but a generated activity has no connection.",
                   component=comp, evidence=absent, remediation="Re-run conversion; the activity must reference a Fabric connection.")
             c.comp(comp, "linked_service", S.missing, note="no connection in the generated activity")
@@ -573,18 +585,46 @@ def _ds_ls(data: dict) -> Optional[str]:
     return ref.get("referenceName") if isinstance(ref, dict) else None
 
 
+def _lakehouse_artifact_value(value: str, raw: Any) -> bool:
+    """True when ``value`` is the lakehouse item id of a repointed inline dataset in ``raw`` (not a connection id)."""
+    stack = [raw]
+    while stack:
+        cur = stack.pop()
+        if isinstance(cur, dict):
+            if _lakehouse_artifact(cur.get("linkedService")) == value:
+                return True
+            stack.extend(cur.values())
+        elif isinstance(cur, list):
+            stack.extend(cur)
+    return False
+
+
 def _connection_values(node: Any) -> list[str]:
+    """Every connection a generated activity names: ``externalReferences.connection``, and for a dataset repointed to the Lakehouse (convert
+    --lakehouse) the lakehouse item id of its inline ``linkedService``, which is that dataset's connection."""
     out: list[str] = []
-    if isinstance(node, dict):
-        ext = node.get("externalReferences")
-        if isinstance(ext, dict) and isinstance(ext.get("connection"), str):
-            out.append(ext["connection"])
-        for v in node.values():
-            out += _connection_values(v)
-    elif isinstance(node, list):
-        for v in node:
-            out += _connection_values(v)
+    stack = [node]
+    while stack:  # iterative: a deeply nested pipeline cannot raise RecursionError
+        cur = stack.pop()
+        if isinstance(cur, dict):
+            ext = cur.get("externalReferences")
+            if isinstance(ext, dict) and isinstance(ext.get("connection"), str):
+                out.append(ext["connection"])
+            art = _lakehouse_artifact(cur.get("linkedService"))
+            if art:
+                out.append(art)
+            stack.extend(cur.values())
+        elif isinstance(cur, list):
+            stack.extend(cur)
     return out
+
+
+def _lakehouse_artifact(linked: Any) -> Optional[str]:
+    props = linked.get("properties") if isinstance(linked, dict) else None
+    if isinstance(props, dict) and props.get("type") == "Lakehouse" and isinstance(props.get("typeProperties"), dict):
+        art = props["typeProperties"].get("artifactId")
+        return art if isinstance(art, str) and art else None
+    return None
 
 
 # =====================================================================================================================

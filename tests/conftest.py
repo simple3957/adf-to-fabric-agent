@@ -12,6 +12,13 @@ from pathlib import Path
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def _full_consultation_unless_a_test_says_otherwise(monkeypatch):
+    """The product defaults to the simple consultation; the existing tests cover the full one (submit, a second approver). Tests of the simple
+    mode set ADF2FABRIC_CONSULT=simple themselves."""
+    monkeypatch.setenv("ADF2FABRIC_CONSULT", "full")
+
+
 def _git(args: list[str], cwd: Path) -> None:
     subprocess.run(["git", *args], cwd=str(cwd), check=True, capture_output=True, text=True)
 

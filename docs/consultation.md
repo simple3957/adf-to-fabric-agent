@@ -1,5 +1,25 @@
 # Consultation capability
 
+## Simple mode (the default)
+
+The consultation is **simple by default**: only the questions that change what the run does are asked (scope, storage and lakehouse name, notebooks,
+unsupported activities, reconstruction, schedules, validation depth: at most ten, usually four to six, depending on what discovery found), each
+already answered with its recommendation and the reason. The 29 questions that only record a fact or gate a person (owner, rollback, downtime,
+credentials, network, audit evidence, ...) are not asked, and **nobody has to approve anything**: **Save settings** is the whole step. It makes the
+run follow those settings under the signed-in person's name; changing one saves a new version. Saving nothing leaves the run on its normal defaults,
+and the Next button stays open. A conflict or an open required question keeps it a draft and the screen says why.
+
+Simple mode never repoints storage to a lakehouse nobody chose: it recommends keeping the original connections until a lakehouse exists and is bound
+(`ItemToId lakehouse:<name>`), and it never invents a lakehouse name. Choosing the lakehouse route yourself needs the name, and until that lakehouse is bound
+the converted pipelines hold `<item:lakehouse:NAME>` placeholders and validation says BLOCKED (not FAILED).
+
+Not asked, so using their defaults: `target.git` (commit to the workspace's Git: off) and `security.sensitive` (no data-owner approval gate).
+Provisioning approval, the Spark workload approval and the typed confirmation before a real change are separate safeguards and are unchanged.
+
+`ADF2FABRIC_CONSULT=full` restores the full consultation exactly as described below: every question, submit, and approval by a second approver.
+The API reports which mode it is in (`mode` in the brief view).
+
+
 The Consultation Agent is the second lifecycle stage, after
 [Intake](intake.md) and before Discovery. It is a **deterministic readiness
 gate**: it establishes and *actually validates* the access needed to begin

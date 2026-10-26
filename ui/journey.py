@@ -149,6 +149,12 @@ def consult_facts(brief: Optional[dict]) -> StepFacts:
     if not brief:
         return StepFacts(waiting="Run discovery first: the consultation asks only about what discovery found.", metric="-")
     c = brief["counts"]
+    if brief.get("mode") == "simple":  # nothing to approve: complete once nothing conflicts, saved or not (unsaved means the run's normal defaults)
+        if c["conflicts"]:
+            return StepFacts(waiting="Resolve the conflicting settings.", metric=f"{c['conflicts']} conflict(s)", attention=f"{c['conflicts']} conflict(s)")
+        if brief["state"] == "approved":
+            return StepFacts(complete=True, metric="Settings saved", outcome="Settings saved; the run follows them.")
+        return StepFacts(complete=True, metric="Nothing saved", outcome="Nothing saved: the run uses its normal defaults. Save settings on this step to change them.")
     metric = f"{c['answered']}/{c['applicable']} answered"
     if brief["state"] == "approved":
         v = brief["current_version"]

@@ -81,6 +81,18 @@ def save(store: Any, pid: str, data: dict[str, Any]) -> None:
     write_atomic(path(store, pid), json.dumps(data, indent=2, ensure_ascii=False))
 
 
+def _auto_approve(store: Any, pid: str, by: str, destination: Optional[dict]) -> None:
+    """Simple mode: saving the settings is the whole step. They become the version the run follows, under the signed-in person's name.
+    Open required questions or conflicts leave it a draft, and the screen says why."""
+    if not B.simple():
+        return
+    try:
+        submit(store, pid, by, destination)
+        approve(store, pid, view(store, pid, destination)["fingerprint"], by.strip() or "local", destination)
+    except BriefError:
+        pass
+
+
 def _locked(fn):
     """Every change to the brief is load -> change -> save: one at a time per project, or concurrent requests lose each other's work."""
     @functools.wraps(fn)
@@ -105,6 +117,7 @@ def view(store: Any, pid: str, destination: Optional[dict] = None) -> dict[str, 
     current = latest if latest and latest.get("fingerprint") == fp else None
     state = "draft" if not current else "approved" if current.get("approved_at") else "submitted"
     return {
+        "mode": "simple" if B.simple() else "full",
         "facts": facts.to_dict(),
         "topics": [{"id": t, "title": title, "summary": s} for t, title, s in B.TOPICS],
         "questions": [{
@@ -155,6 +168,7 @@ def set_answers(store: Any, pid: str, answers: dict[str, Any], by: str = "", des
             raise BriefError(str(exc)) from None
     _note(data, f"{len(answers)} answer(s) changed." if answers else "Workspace recorded again.", "person", by)
     save(store, pid, data)
+    _auto_approve(store, pid, by, destination)
     return len(answers)
 
 
@@ -168,6 +182,7 @@ def accept_recommendations(store: Any, pid: str, by: str = "", destination: Opti
     if taken:
         _note(data, f"Accepted {len(taken)} recommended answer(s).", "person", by)
     save(store, pid, data)  # also keeps the configuration just recorded
+    _auto_approve(store, pid, by, destination)
     return len(taken)
 
 
@@ -206,7 +221,7 @@ def approve(store: Any, pid: str, fingerprint: str, by: str, destination: Option
         raise BriefError("The answers changed after you read them: review the brief again before approving.")
     data = load(store, pid)
     submitter = str(data["versions"][-1].get("submitted_by") or "")
-    if submitter and submitter == by.strip() and by.strip() != "local":  # four eyes; "local" is the single user of an unauthenticated install
+    if not B.simple() and submitter and submitter == by.strip() and by.strip() != "local":  # four eyes; "local" is the single user of an unauthenticated install
         raise BriefError("The person who submitted the brief cannot also approve it: another approver must.")
     data["versions"][-1].update(approved_at=_now(), approved_by=by.strip())
     _note(data, f"Brief v{data['versions'][-1]['version']} approved by {by.strip()}.", "system", by)
@@ -242,6 +257,7 @@ def import_answers(store: Any, pid: str, payload: Any, by: str = "", destination
     if taken:
         _note(data, f"Imported {taken} answer(s) from a questionnaire.", "person", by)
         save(store, pid, data)
+        _auto_approve(store, pid, by, destination)
     return taken
 
 
