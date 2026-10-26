@@ -111,19 +111,27 @@ def _kids(a: dict) -> Iterator[tuple[str, list]]:
 
 
 def walk_activities(activities: Any, parent: Optional[str] = None) -> Iterator[ActView]:
-    for a in activities if isinstance(activities, list) else []:
-        if not isinstance(a, dict):
-            continue
-        name = str(a.get("name", ""))
-        deps: dict[str, tuple[str, ...]] = {}
-        for d in a.get("dependsOn", []) if isinstance(a.get("dependsOn"), list) else []:
-            if isinstance(d, dict) and isinstance(d.get("activity"), str):
-                conds = d.get("dependencyConditions")
-                deps[d["activity"].lower()] = tuple(sorted(str(c) for c in conds)) if isinstance(conds, list) else ()
-        yield ActView(name, str(a.get("type", "")), parent, deps, a.get("typeProperties") if isinstance(a.get("typeProperties"), dict) else {},
-                      a.get("policy") if isinstance(a.get("policy"), dict) else {}, a)
-        for _, kids in _kids(a):
-            yield from walk_activities(kids, name)
+    """Pre-order, a container before its children. Iterative: a pipeline nested to any depth cannot raise RecursionError."""
+    stack: list[tuple[list, Optional[str]]] = [(activities if isinstance(activities, list) else [], parent)]
+    while stack:
+        items, par = stack.pop()
+        for i, a in enumerate(items):
+            if not isinstance(a, dict):
+                continue
+            name = str(a.get("name", ""))
+            deps: dict[str, tuple[str, ...]] = {}
+            for d in a.get("dependsOn", []) if isinstance(a.get("dependsOn"), list) else []:
+                if isinstance(d, dict) and isinstance(d.get("activity"), str):
+                    conds = d.get("dependencyConditions")
+                    deps[d["activity"].lower()] = tuple(sorted(str(c) for c in conds)) if isinstance(conds, list) else ()
+            yield ActView(name, str(a.get("type", "")), par, deps, a.get("typeProperties") if isinstance(a.get("typeProperties"), dict) else {},
+                          a.get("policy") if isinstance(a.get("policy"), dict) else {}, a)
+            kids = [k for _, k in _kids(a)]
+            if kids:
+                stack.append((items[i + 1:], par))
+                for k in reversed(kids):
+                    stack.append((k, name))
+                break
 
 
 def pipeline_activities(content: dict) -> list[ActView]:

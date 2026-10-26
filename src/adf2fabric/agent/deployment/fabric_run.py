@@ -34,6 +34,9 @@ class ActivityRun:
     error: str = ""
     output: dict = field(default_factory=dict)  # the activity's output as the service reports it (run-and-compare reads it)
     iteration: str = ""  # iterationHash: tells the items of a ForEach apart (retries of one item share it)
+    started: str = ""
+    ended: str = ""
+    duration_ms: Optional[int] = None
 
 
 @dataclass
@@ -85,7 +88,9 @@ def _query_activities(client: FabricClient, workspace: str, job_id: str, started
         out.append(ActivityRun(name=str(a.get("activityName", "")), type=str(a.get("activityType", "")),
                                status=str(a.get("status", "")), error=str(err.get("message", ""))[:300],
                                output=a.get("output") if isinstance(a.get("output"), dict) else {},
-                               iteration=str(a.get("iterationHash") or "")))
+                               iteration=str(a.get("iterationHash") or ""), started=str(a.get("activityRunStart") or ""),
+                               ended=str(a.get("activityRunEnd") or ""),
+                               duration_ms=a.get("durationInMs") if isinstance(a.get("durationInMs"), int) else None))
     return sorted(out, key=lambda r: r.name.lower())
 
 

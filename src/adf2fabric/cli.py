@@ -2121,6 +2121,43 @@ def verify_cmd(project_name: str, workspace_id: str, pipelines: tuple[str, ...],
         sys.exit(1)
 
 
+@cli.command(name="pipeline-report")
+@click.option("--project", "project_name", required=True, help="Project name (`convert` must have run).")
+@click.option("--workspace-id", required=True, help="Fabric workspace id (GUID) that holds the deployed pipelines.")
+@click.option("--workers", type=int, default=8, show_default=True, help="Pipelines read from Fabric in parallel.")
+@azure_auth_options()
+@_audited("pipeline-report")
+def pipeline_report_cmd(project_name: str, workspace_id: str, workers: int, auth: str, **auth_env: str | None) -> None:
+    """What each pipeline consists of in ADF and in Fabric (activities, nesting, dependencies, calls, datasets, connections), whether the
+    two match, and how the latest Fabric run behaved. Read-only: nothing is started or changed."""
+    from adf2fabric.agent.deployment.fabric_deploy import FABRIC_SCOPE, DeployError, FabricClient
+    from adf2fabric.agent.structure import report as structure_report
+    from adf2fabric.connectivity._azure import CredentialUnavailable, build_credential
+
+    config = load_config()
+    store = ProjectStore(projects_root(config))
+    pid = slugify(project_name)
+    if not store.has_conversion(pid):
+        click.secho(f"Pipeline report failed: project '{pid}' has no conversion. Run `adf2fabric convert` first.", fg="red", err=True)
+        sys.exit(1)
+    try:
+        credential, _ = build_credential(credential_from(auth, **auth_env))
+        fabric_token = credential.get_token(FABRIC_SCOPE).token
+        data = structure_report.collect(store, pid, workspace_id, lambda: FabricClient(fabric_token), workers=workers, log=lambda m: click.echo(f"  {m}"))
+    except (DeployError, CredentialUnavailable) as exc:
+        click.secho(f"Pipeline report failed: {getattr(exc, 'detail', None) or exc}", fg="red", err=True)
+        sys.exit(1)
+    out = store.project_dir(pid) / "pipeline-report"
+    out.mkdir(parents=True, exist_ok=True)
+    (out / "pipeline-report.md").write_text(structure_report.render(data), encoding="utf-8")
+    (out / "pipeline-report.json").write_text(structure_report.to_json(data), encoding="utf-8")
+    p = data["progress"]
+    click.echo(f"PIPELINE REPORT  {p['pipelines']} pipeline(s), {p['deployed']} deployed")
+    click.echo(f"  structure equal to ADF: {p['structure_equivalent']}   differs: {p['structure_differs']}")
+    click.echo(f"  latest Fabric run completed: {p['last_run_completed']} of {p['ran']}   matches ADF baseline: {p['matches_baseline']}")
+    click.echo(f"  report: {out / 'pipeline-report.md'}")
+
+
 @cli.command(name="handover")
 @click.option("--project", "project_name", required=True, help="Project name (`convert` must have run).")
 def handover_cmd(project_name: str) -> None:
