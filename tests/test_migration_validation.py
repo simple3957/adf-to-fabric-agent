@@ -455,6 +455,7 @@ class FakeFabric:
         self.status = 200
         self.schedules: dict[str, list] = {}
         self.connections = {CONN: {"id": CONN, "displayName": "c"}}
+        self.extra_items: list[dict] = []  # non-pipeline workspace items (a lakehouse, ...)
 
     def _resolved(self, name):
         text = json.dumps(self.pipes[name]).replace("<workspace-id>", WS).replace("<item:pipeline:PL_Child>", self.ids.get("PL_Child", ""))
@@ -468,7 +469,7 @@ class FakeFabric:
         if path.endswith("/dataPipelines"):
             return Resp(200, {"value": [{"id": self.ids[n], "displayName": n} for n in self.pipes]})
         if path.endswith("/items") and method == "GET":
-            return Resp(200, {"value": [{"id": v, "displayName": k, "type": "DataPipeline"} for k, v in self.ids.items()]})
+            return Resp(200, {"value": [{"id": v, "displayName": k, "type": "DataPipeline"} for k, v in self.ids.items()] + self.extra_items})
         if path.startswith("connections") and method == "GET" and path == "connections":
             return Resp(200, {"value": list(self.connections.values())})
         if path.startswith("connections/"):
@@ -737,6 +738,22 @@ def test_a_dataset_repointed_to_an_unbound_lakehouse_blocks_rather_than_fails(pr
     r = run(store, pid)
     assert results(r, "connections_secrets.linked_service", "linked_service:LS_LAKE") == {R.BLOCKED}
     assert results(r, "reference_integrity.target_unbound") == {R.BLOCKED}
+
+
+def test_a_repointed_dataset_s_lakehouse_is_checked_as_a_workspace_item_not_a_connection(project):
+    store, pid = project
+    lake = "33333333-3333-3333-3333-333333333333"
+    edit_target(store, pid, "PL_Main", _repoint_sink(lake))
+    fake = FakeFabric(store, pid)
+    fake.extra_items = [{"id": lake, "displayName": "lh_main", "type": "Lakehouse"}]
+    r = api(store, pid, fake, stages=("static", "api"))
+    assert results(r, "deployment.connections_exist") == {R.PASS}  # it used to FAIL: the lakehouse is not in the connection list
+    assert results(r, "deployment.items_exist") == {R.PASS}
+    fake.extra_items = []  # the lakehouse is gone: an item is missing, not a connection
+    r = api(store, pid, fake, stages=("static", "api"))
+    assert results(r, "deployment.connections_exist") == {R.PASS}
+    missing = check(r, "deployment.items_exist")[0]
+    assert missing.result is R.FAIL and any(lake in e for e in missing.evidence)
 
 
 def test_an_activity_whose_every_dataset_is_repointed_says_it_reads_through_the_lakehouse(project):

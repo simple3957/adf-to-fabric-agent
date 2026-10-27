@@ -24,7 +24,7 @@ from adf2fabric.agent.deployment import verify as verify_mod
 from adf2fabric.agent.provisioning.transport import FabricGateway, ProvisionError
 from adf2fabric.agent.validation import views
 from adf2fabric.agent.validation.diffing import diff
-from adf2fabric.agent.validation.static import Collector, Inputs, _TOKEN, _connection_values
+from adf2fabric.agent.validation.static import Collector, Inputs, _TOKEN, _connection_values, _lakehouse_artifacts
 from adf2fabric.project.validation import Category as K, ComponentStatus as S, Result as R, Stage
 
 _GUID_LEN = 36
@@ -86,9 +86,10 @@ def _api_references(inp: Inputs, c: Collector, items: dict, conns: dict, fab: Fa
     ids_item: dict[str, list[str]] = {}
     for tp in inp.tgt.pipelines:
         for a in views.pipeline_activities(tp.content or {}):
+            lakehouses = {v.lower() for v in _lakehouse_artifacts(a.raw)}
             for v in _connection_values(a.raw):
-                if _gid(v):
-                    ids_conn.setdefault(v.lower(), []).append(f"{tp.name}/{a.name}")
+                if _gid(v):  # a repointed dataset's "connection" is its lakehouse, a workspace item, not a Fabric connection
+                    (ids_item if v.lower() in lakehouses else ids_conn).setdefault(v.lower(), []).append(f"{tp.name}/{a.name}")
             for key in ("notebookId", "sparkJobDefinitionId", "pipelineId", "dataflowId"):
                 v = a.type_properties.get(key)
                 if isinstance(v, str) and _gid(v):
@@ -111,7 +112,7 @@ def _api_references(inp: Inputs, c: Collector, items: dict, conns: dict, fab: Fa
               stage=Stage.api, evidence=kinds, required=False)
     missing_items = [f"item {i} used by {', '.join(u[:3])}" for i, u in ids_item.items() if i not in items]
     c.add("deployment.items_exist", K.deployment, R.FAIL if missing_items else (R.PASS if ids_item else R.NOT_RUN),
-          (f"{len(missing_items)} notebook / job / pipeline id(s) the generated pipelines run do not exist." if missing_items else
+          (f"{len(missing_items)} notebook / job / pipeline / lakehouse id(s) the generated pipelines use do not exist." if missing_items else
            f"All {len(ids_item)} referenced item id(s) exist." if ids_item else "No generated activity references a Fabric item id."),
           stage=Stage.api, evidence=missing_items, remediation="Deploy the item (workloads-deploy / deploy) and convert again with --resolutions." if missing_items else "",
           required=bool(ids_item))

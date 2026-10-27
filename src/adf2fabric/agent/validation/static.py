@@ -620,6 +620,22 @@ def _connection_values(node: Any) -> list[str]:
     return out
 
 
+def _lakehouse_artifacts(node: Any) -> list[str]:
+    """The lakehouse item ids of the datasets a generated activity repoints to the Lakehouse (a subset of ``_connection_values``)."""
+    out: list[str] = []
+    stack = [node]
+    while stack:
+        cur = stack.pop()
+        if isinstance(cur, dict):
+            art = _lakehouse_artifact(cur.get("linkedService"))
+            if art:
+                out.append(art)
+            stack.extend(cur.values())
+        elif isinstance(cur, list):
+            stack.extend(cur)
+    return out
+
+
 def _lakehouse_artifact(linked: Any) -> Optional[str]:
     props = linked.get("properties") if isinstance(linked, dict) else None
     if isinstance(props, dict) and props.get("type") == "Lakehouse" and isinstance(props.get("typeProperties"), dict):
