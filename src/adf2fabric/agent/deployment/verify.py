@@ -26,7 +26,7 @@ from typing import Any, Callable, Optional
 from urllib.parse import urlsplit
 
 from adf2fabric.agent.deployment.fabric_deploy import DeployError, FabricClient
-from adf2fabric.agent.deployment.fabric_run import ActivityRun, RunResult, latest_run, recent_runs, run_pipeline
+from adf2fabric.agent.deployment.fabric_run import ActivityRun, RunResult, latest_run, recent_runs, run_pipeline, runs_started_by
 from adf2fabric.cloud import ARM_ENDPOINT
 
 ADF_API_VERSION = "2018-06-01"
@@ -386,8 +386,13 @@ def _verify_batch(client: FabricClient, workspace: str, pipeline: str, called_by
             adf_error = f"ADF history not read: {exc}"
     # Fabric records every run as Manual: a single ADF run started by hand means compare single runs
     by_hand = adf_runs is not None and len(adf_runs) == 1 and         (adf_runs[0].get("invokedBy") or {}).get("invokedByType") != "PipelineActivity"
+    started_by: Optional[str] = None
     try:
-        runs = recent_runs(client, workspace, pipeline, window_minutes=0 if by_hand else 10, ids=ids)
+        exact = None if by_hand else runs_started_by(client, workspace, pipeline, called_by, ids)
+        if exact is not None:
+            started_by, runs = exact
+        else:  # no parent run names it (e.g. an older Fabric version): runs that started close together
+            runs = recent_runs(client, workspace, pipeline, window_minutes=0 if by_hand else 10, ids=ids)
     except DeployError as exc:
         return Verification(pipeline, "not_run", detail=f"Could not read it in Fabric: {getattr(exc, 'detail', None) or exc}")
     except Exception as exc:  # noqa: BLE001
@@ -403,6 +408,7 @@ def _verify_batch(client: FabricClient, workspace: str, pipeline: str, called_by
         v.detail = short_failure(bad.failure or f"a run ended {bad.status}")
         return v
     batch = ("its latest run (the ADF baseline was started by hand)" if by_hand else
+             f"the {len(runs)} run(s) that the latest run of {started_by} started" if started_by else
              f"a batch of {len(runs)} run(s) started together (it is called by {parents})")
     base: Optional[dict[str, dict]] = None
     v.detail = adf_error
@@ -433,7 +439,11 @@ def short_failure(text: str) -> str:
 
 
 def callers(conversion_dir: Path, pipelines: list) -> dict[str, list[str]]:
-    """Pipeline -> the converted pipelines that invoke it, from the converted JSON (``pipelines`` = PipelineConversion)."""
+    """Pipeline -> the converted pipelines that invoke it (``pipelines`` = PipelineConversion).
+
+    A child bound in ``--resolutions`` is written as its item id, not as ``<item:pipeline:X>``, so the converted JSON alone
+    misses it and the child would be compared run for run with a different item. The ``pipeline:X`` prerequisite that
+    conversion records for every invoked pipeline, bound or not, is read as well."""
     from adf2fabric.agent.deployment.fabric_deploy import child_refs
 
     out: dict[str, list[str]] = {}
@@ -444,7 +454,13 @@ def callers(conversion_dir: Path, pipelines: list) -> dict[str, list[str]]:
             content = json.loads((conversion_dir / p.artifact_path).read_text(encoding="utf-8"))
         except (OSError, ValueError):
             continue
-        for child in child_refs(content):
+        children = child_refs(content)
+        for q in getattr(p, "prerequisites", None) or []:
+            if q.kind == "workspace_item" and q.name.lower().startswith("pipeline:"):
+                child = q.name.split(":", 1)[1]
+                if child.lower() not in {c.lower() for c in children}:
+                    children.append(child)
+        for child in children:
             out.setdefault(child, []).append(p.source_pipeline)
     return out
 

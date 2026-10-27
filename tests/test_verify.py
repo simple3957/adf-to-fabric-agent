@@ -289,22 +289,63 @@ class BatchAdf(FakeAdf):
 
 
 def test_a_child_batch_matches_whatever_order_its_items_ran_in(monkeypatch):
+    monkeypatch.setattr(V, "runs_started_by", lambda *a, **k: None)  # no parent run names it: start times
     monkeypatch.setattr(V, "recent_runs", lambda *a, **k: _child_runs(10, 4, 5))
     v = V.verify_pipeline(None, "ws", "C", start=True, adf=BatchAdf(4, 5, 10), called_by=["Parent"])
     assert v.verdict == "matches" and "batch of 3" in v.detail and "Parent" in v.detail
 
 
 def test_a_child_batch_with_a_missing_item_differs_on_runs_and_rows(monkeypatch):
+    monkeypatch.setattr(V, "runs_started_by", lambda *a, **k: None)  # no parent run names it: start times
     monkeypatch.setattr(V, "recent_runs", lambda *a, **k: _child_runs(10, 4))
     v = V.verify_pipeline(None, "ws", "C", start=False, adf=BatchAdf(4, 5, 10), called_by=["Parent"])
     assert v.verdict == "differs" and {d["fact"] for d in v.differences} == {"runs", "rowsCopied"}
 
 
 def test_a_child_is_never_started_on_its_own(monkeypatch):
+    monkeypatch.setattr(V, "runs_started_by", lambda *a, **k: None)  # no parent run names it: start times
     monkeypatch.setattr(V, "recent_runs", lambda *a, **k: [])
     started = []
     v = V.verify_pipeline(None, "ws", "C", start=True, called_by=["Parent"], runner=lambda *a, **k: started.append(1))
     assert v.verdict == "not_run" and "Parent" in v.detail and not started
+
+
+def test_a_child_batch_is_the_runs_its_parents_latest_run_started(monkeypatch):
+    seen = []
+    monkeypatch.setattr(V, "runs_started_by", lambda c, w, n, parents, ids: (seen.append(parents), ("Parent", _child_runs(10, 4, 5)))[1])
+    monkeypatch.setattr(V, "recent_runs", lambda *a, **k: pytest.fail("start times are only a fallback"))
+    v = V.verify_pipeline(None, "ws", "C", start=False, adf=BatchAdf(4, 5, 10), called_by=["Parent"])
+    assert v.verdict == "matches" and "3 run(s) that the latest run of Parent started" in v.detail and seen == [["Parent"]]
+
+
+def _invoke(job_id, item="child-id", status="Succeeded", iteration="", job_status="Completed"):
+    return ActivityRun(name="Run_Child", type="InvokePipeline", status=status, iteration=iteration,
+                       output={"id": job_id, "itemId": item, "status": job_status, "startTimeUtc": f"2026-10-27T05:42:2{job_id[-1]}Z"})
+
+
+def test_runs_started_by_takes_the_child_jobs_named_in_the_parents_invoke_outputs(monkeypatch):
+    """Live case 2026-10-27: a child started by hand without parameters (Null fileName, Failed) two minutes before the
+    parent's run was taken into the start-time batch. The parent's InvokePipeline outputs name exactly its three runs."""
+    from adf2fabric.agent.deployment import fabric_run as FR
+
+    g = lambda n: f"00000000-0000-0000-0000-00000000000{n}"  # noqa: E731
+    parent_runs = {"parent": RunResult("Parent", "parent-id", job_id="p", status="Completed", started="2026-10-27T05:41:58",
+                                       activities=[_invoke(g(1)), _invoke(g(2)), _invoke(g(3)),
+                                                   _invoke(g(4), status="Failed", iteration="x", job_status="Failed"),
+                                                   _invoke(g(5), iteration="x"),  # a retry that recovered: its failed attempt is left out
+                                                   _invoke(g(6), item="other-id"), _invoke("not-a-guid")]),
+                   "old": RunResult("Old", "old-id", job_id="o", status="Completed", started="2026-10-20T00:00:00",
+                                    activities=[_invoke(g(7))])}
+    monkeypatch.setattr(FR, "latest_run", lambda c, w, name, ids=None: parent_runs.get(name.lower()))
+    monkeypatch.setattr(FR, "_query_activities", lambda c, w, job, started: [act("Copy", rowsCopied=1)])
+    ids = {"child": "child-id", "parent": "parent-id", "old": "old-id"}
+    parent, runs = FR.runs_started_by(None, "ws", "Child", ["Old", "Parent", "Unknown"], ids)
+    assert parent == "Parent" and sorted(r.job_id for r in runs) == [g(1), g(2), g(3), g(5)]
+    assert all(r.ok and r.item_id == "child-id" for r in runs)
+    monkeypatch.setattr(FR, "latest_run", lambda *a, **k: None)
+    assert FR.runs_started_by(None, "ws", "Child", ["Parent"], ids) is None  # no parent run: the caller falls back
+    with pytest.raises(DeployError):
+        FR.runs_started_by(None, "ws", "Missing", ["Parent"], ids)
 
 
 def test_callers_are_read_from_the_converted_json(tmp_path):
@@ -315,6 +356,25 @@ def test_callers_are_read_from_the_converted_json(tmp_path):
     (tmp_path / "a.json").write_text(json.dumps({"x": "<item:pipeline:Child>"}), encoding="utf-8")
     (tmp_path / "b.json").write_text("{}", encoding="utf-8")
     assert V.callers(tmp_path, [P("Parent", "a.json"), P("Child", "b.json"), P("Gone", None)]) == {"Child": ["Parent"]}
+
+
+def test_a_child_bound_to_an_item_id_is_still_known_as_called(tmp_path):
+    """--resolutions binds the child, so the JSON holds its id, not the placeholder: the prerequisite still names it.
+    Without this the child (run once per file by its parent) was compared one run with one run, of different files."""
+    from adf2fabric.project.conversion import Prerequisite
+
+    class P:
+        def __init__(self, name, path, prereqs=()):
+            self.source_pipeline, self.artifact_path, self.prerequisites = name, path, list(prereqs)
+
+    (tmp_path / "a.json").write_text(json.dumps({"pipelineId": "ef6e47da-0000-0000-0000-000000000000"}), encoding="utf-8")
+    (tmp_path / "b.json").write_text(json.dumps({"x": "<item:pipeline:Child>"}), encoding="utf-8")
+    (tmp_path / "c.json").write_text("{}", encoding="utf-8")
+    bound = Prerequisite(kind="workspace_item", name="pipeline:Child", detail="", bound=True, needed_by=["Run_Child"])
+    same = Prerequisite(kind="workspace_item", name="pipeline:child", detail="", bound=False, needed_by=["Run_Child"])
+    other = Prerequisite(kind="workspace_item", name="workspace", detail="", bound=True, needed_by=["Run_Child"])
+    got = V.callers(tmp_path, [P("Parent", "a.json", [bound, other]), P("Other", "b.json", [same]), P("Child", "c.json")])
+    assert got == {"Child": ["Parent", "Other"]}  # counted once per caller, placeholder and prerequisite alike
 
 
 def test_a_called_pipeline_last_run_by_hand_in_adf_is_compared_run_for_run(monkeypatch):

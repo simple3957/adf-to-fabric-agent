@@ -16,7 +16,7 @@ from typing import Any, Callable, Optional
 import yaml
 
 from adf2fabric.agent.deployment.fabric_deploy import FABRIC_API, DeployError, FabricClient, _operation_url
-from adf2fabric.agent.deployment.fabric_run import RunResult, recent_runs
+from adf2fabric.agent.deployment.fabric_run import RunResult, recent_runs, runs_started_by
 from adf2fabric.agent.deployment.verify import metrics as activity_metrics
 from adf2fabric.agent.deployment.verify import summarize
 from adf2fabric.agent.structure import confidence as conf
@@ -97,7 +97,10 @@ def collect(store: Any, pid: str, workspace: str, make_client: Callable[[], Fabr
     conv = store.load_conversion(pid) if store.has_conversion(pid) else None
     names = sorted({p.source_pipeline for p in conv.pipelines}) if conv else sorted(f.name for f in scan.of("pipeline") if f.data)
     adf = {f.name.lower(): adf_structure(f.data) for f in scan.of("pipeline") if f.data}
-    callees = {c.lower() for s in adf.values() for c in s.called}  # run once per item by their callers: judged as a batch
+    callers: dict[str, list[str]] = {}  # run once per item by their callers: judged as a batch
+    for f in scan.of("pipeline"):
+        for c in (adf[f.name.lower()].called if f.data else []):
+            callers.setdefault(c.lower(), []).append(f.name)
     expected = _expected_types(conv)
     first = make_client()
     ids = first.list_pipelines(workspace)
@@ -117,7 +120,9 @@ def collect(store: Any, pid: str, workspace: str, make_client: Callable[[], Fabr
         except DeployError as exc:
             entry["fabric_error"] = str(exc)
         try:
-            entry["run"] = _timing(recent_runs(client, workspace, name, window_minutes=10 if low in callees else 0, ids=ids))
+            exact = runs_started_by(client, workspace, name, callers[low], ids) if low in callers else None
+            runs = exact[1] if exact else recent_runs(client, workspace, name, window_minutes=10 if low in callers else 0, ids=ids)
+            entry["run"] = _timing(runs)
         except DeployError as exc:
             entry["run_error"] = str(exc)
         if entry.get("adf") is not None and entry.get("fabric") is not None:

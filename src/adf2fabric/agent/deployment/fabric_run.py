@@ -100,6 +100,44 @@ def latest_run(client: FabricClient, workspace: str, name: str, ids: Optional[di
     return runs[0] if runs else None
 
 
+def runs_started_by(client: FabricClient, workspace: str, name: str, parents: list[str],
+                    ids: Optional[dict[str, str]] = None) -> Optional[tuple[str, list[RunResult]]]:
+    """(parent, runs): the runs of ``name`` that the newest finished run of one of ``parents`` started, read-only, or None
+    when no parent run started any (the caller then groups by start time).
+
+    An InvokePipeline activity's output is the child's job instance (``id``, ``itemId``, ``status``, times, live on
+    2026-10-27), so the batch is exact: a run of the child started by hand, or by another parent, a minute earlier is not
+    taken in. A failed InvokePipeline attempt that a retry recovered is left out, as ``summarize`` does for activities."""
+    ids = ids if ids is not None else client.list_pipelines(workspace)
+    item_id = ids.get(name.lower())
+    if item_id is None:
+        raise DeployError(f"No pipeline named '{name}' in the workspace.")
+    best: Optional[tuple[str, RunResult]] = None
+    for parent in parents:
+        run = latest_run(client, workspace, parent, ids) if parent.lower() in ids else None
+        if run is not None and (best is None or run.started > best[1].started):
+            best = (parent, run)
+    if best is None:
+        return None
+    calls = [a for a in best[1].activities if a.type == "InvokePipeline" and str(a.output.get("itemId", "")).lower() == item_id.lower()
+             and _GUID.fullmatch(str(a.output.get("id", "")))]
+    recovered = {(a.name, a.iteration) for a in calls if a.status == "Succeeded"}
+    calls = [a for a in calls if a.status == "Succeeded" or (a.name, a.iteration) not in recovered]
+    out: list[RunResult] = []
+    for a in calls:
+        job = a.output
+        if any(r.job_id == job["id"] for r in out):
+            continue
+        result = RunResult(pipeline=name, item_id=item_id, job_id=str(job["id"]), status=str(job.get("status", "")),
+                           started=str(job.get("startTimeUtc") or ""), ended=str(job.get("endTimeUtc") or ""),
+                           failure=_failure_text(job.get("failureReason")))
+        result.activities = _query_activities(client, workspace, result.job_id, result.started)
+        out.append(result)
+    if not out:
+        return None
+    return best[0], sorted(out, key=lambda r: r.started, reverse=True)
+
+
 def recent_runs(client: FabricClient, workspace: str, name: str, window_minutes: int = 10,
                 ids: Optional[dict[str, str]] = None) -> list[RunResult]:
     """The most recent finished run and every other finished run that started within ``window_minutes`` of it, newest
