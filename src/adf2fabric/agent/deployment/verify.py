@@ -432,10 +432,45 @@ def short_failure(text: str) -> str:
     return out if len(out) <= _FAILURE_CHARS else out[:_FAILURE_CHARS - 1] + "…"
 
 
+def _bound_children(conversion_dir: Path) -> dict[str, str]:
+    """Item id (lower case) -> pipeline name for the child pipelines bound in the resolutions file (``ItemToId`` ``pipeline:NAME``)."""
+    try:
+        rows = json.loads((conversion_dir / "resolutions.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    out: dict[str, str] = {}
+    for r in rows if isinstance(rows, list) else []:
+        key = str(r.get("key", "")) if isinstance(r, dict) else ""
+        if isinstance(r, dict) and r.get("type") == "ItemToId" and key.lower().startswith("pipeline:") and r.get("value"):
+            out[str(r["value"]).lower()] = key.split(":", 1)[1]
+    return out
+
+
+def _invoked_ids(content: Any) -> list[str]:
+    """Every ``pipelineId`` an InvokePipeline activity holds, at any depth (iterative: a deep pipeline must not hit the recursion limit)."""
+    found: list[str] = []
+    stack = [content]
+    while stack:
+        node = stack.pop()
+        if isinstance(node, dict):
+            if node.get("type") == "InvokePipeline" and isinstance(node.get("typeProperties"), dict):
+                pid = node["typeProperties"].get("pipelineId")
+                if isinstance(pid, str):
+                    found.append(pid.lower())
+            stack.extend(node.values())
+        elif isinstance(node, list):
+            stack.extend(node)
+    return found
+
+
 def callers(conversion_dir: Path, pipelines: list) -> dict[str, list[str]]:
-    """Pipeline -> the converted pipelines that invoke it, from the converted JSON (``pipelines`` = PipelineConversion)."""
+    """Pipeline -> the converted pipelines that invoke it, from the converted JSON (``pipelines`` = PipelineConversion).
+
+    A child is found by its ``<item:pipeline:...>`` placeholder, or, once its id is bound, by that id in the resolutions file:
+    binding a child must not make its caller look like it calls nothing."""
     from adf2fabric.agent.deployment.fabric_deploy import child_refs
 
+    bound = _bound_children(conversion_dir)
     out: dict[str, list[str]] = {}
     for p in pipelines:
         if not p.artifact_path:
@@ -444,7 +479,9 @@ def callers(conversion_dir: Path, pipelines: list) -> dict[str, list[str]]:
             content = json.loads((conversion_dir / p.artifact_path).read_text(encoding="utf-8"))
         except (OSError, ValueError):
             continue
-        for child in child_refs(content):
+        children = list(child_refs(content))
+        children += [bound[i] for i in _invoked_ids(content) if i in bound and bound[i] not in children]
+        for child in children:
             out.setdefault(child, []).append(p.source_pipeline)
     return out
 

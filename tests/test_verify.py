@@ -317,6 +317,27 @@ def test_callers_are_read_from_the_converted_json(tmp_path):
     assert V.callers(tmp_path, [P("Parent", "a.json"), P("Child", "b.json"), P("Gone", None)]) == {"Child": ["Parent"]}
 
 
+def test_a_child_whose_id_is_bound_is_still_known_to_be_called(tmp_path):
+    """Binding a child's id removes its <item:pipeline:..> placeholder; its caller must still be found (found live: the child was
+    then compared run for run and a loop's other files were paired with the wrong baseline)."""
+    class P:
+        def __init__(self, name, path):
+            self.source_pipeline, self.artifact_path = name, path
+
+    cid = "ef6e47da-327e-4cc2-b2d5-c1a19777a3d7"
+    nested = {"properties": {"activities": [{"type": "ForEach", "typeProperties": {"activities": [
+        {"type": "InvokePipeline", "typeProperties": {"pipelineId": cid.upper()}}]}}]}}
+    (tmp_path / "a.json").write_text(json.dumps(nested), encoding="utf-8")
+    (tmp_path / "b.json").write_text("{}", encoding="utf-8")
+    pipes = [P("Parent", "a.json"), P("Child", "b.json")]
+    assert V.callers(tmp_path, pipes) == {}  # nothing says which pipeline that id is
+    (tmp_path / "resolutions.json").write_text(json.dumps([{"type": "ItemToId", "key": "pipeline:Child", "value": cid},
+                                                           {"type": "WorkspaceId", "key": "*", "value": "w"}]), encoding="utf-8")
+    assert V.callers(tmp_path, pipes) == {"Child": ["Parent"]}
+    (tmp_path / "a.json").write_text(json.dumps({"x": "<item:pipeline:Child>", **nested}), encoding="utf-8")
+    assert V.callers(tmp_path, pipes) == {"Child": ["Parent"]}  # placeholder and bound id together: listed once
+
+
 def test_a_called_pipeline_last_run_by_hand_in_adf_is_compared_run_for_run(monkeypatch):
     seen = {}
 
