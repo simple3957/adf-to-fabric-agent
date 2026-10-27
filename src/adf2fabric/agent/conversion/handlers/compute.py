@@ -106,6 +106,56 @@ def _databricks_notebook_as_fabric_notebook(cx: ActivityBuilder, name: str, entr
                   "check its storage access, lakehouse and environment.")
 
 
+def _cluster_settings(cx: ActivityBuilder, ls_name: str) -> tuple[dict, list[str]]:
+    """The Fabric cluster properties for the cluster a Databricks linked service describes, and why any part of it
+    still needs a person (empty when the whole cluster was taken over).
+
+    Fabric keeps a job cluster flat in the activity's typeProperties under the ADF linked-service names: a pipeline saved
+    in the Fabric portal on 2026-10-27 read back with newClusterNodeType, newClusterNumOfWorker, newClusterVersion,
+    clusterOption and newClusterInitScripts. Only values discovery read as literals are used; nothing is guessed.
+    """
+    ls = cx.pc.project.linked_services.get(ls_name.lower())
+    c = ls.compute if ls else None
+    if c is None or c.mode == "unspecified":
+        return {}, ["the linked service names no cluster"]
+    problems = [f"'{f}' is an expression or a linked-service parameter" for f in c.unresolved_fields]
+    if c.mode == "existing_cluster":
+        return {"existingClusterId": c.existing_cluster_id}, problems
+    if c.mode == "instance_pool":
+        return {}, problems + ["it runs on an instance pool, which has no documented Fabric setting"]
+    tp: dict[str, Any] = {}
+    if c.runtime_version and c.node_type:
+        tp["newClusterVersion"], tp["newClusterNodeType"] = c.runtime_version, c.node_type
+    else:
+        problems.append("its Spark version or node type is not set")
+    if c.min_workers is None:
+        problems.append("its number of workers is not set")
+    elif c.min_workers == c.max_workers:
+        tp["newClusterNumOfWorker"], tp["clusterOption"] = str(c.min_workers), "Fixed"
+    else:
+        tp["newClusterNumOfWorker"] = f"{c.min_workers}:{c.max_workers}"
+        problems.append("it autoscales, and how Fabric stores autoscaling has not been confirmed")
+    if c.driver_node_type:
+        tp["newClusterDriverNodeType"] = c.driver_node_type
+    if c.policy_id:
+        tp["policyId"] = c.policy_id
+    if any(v == "[masked]" for v in c.spark_conf.values()):
+        problems.append("a Spark setting looks like a secret and is not copied")
+    elif c.spark_conf:
+        tp["newClusterSparkConf"] = dict(c.spark_conf)
+    if c.spark_env_var_names:
+        problems.append("its Spark environment variables are not read")
+    if c.init_script_count:
+        problems.append("its init scripts are not read")
+    else:
+        tp["newClusterInitScripts"] = []
+    if c.custom_tag_names:
+        cx.dropped(f"linkedService {ls_name}.newClusterCustomTags",
+                   f"the tag values ({', '.join(c.custom_tag_names)}) are not read from the linked service",
+                   manual="Add the tags on the Fabric Azure Databricks activity if billing or a cluster policy needs them.")
+    return tp, problems
+
+
 def convert_databricks_notebook(cx: ActivityBuilder) -> None:
     a = cx.act
     bound = _bound_fabric_notebook(cx)
@@ -119,14 +169,19 @@ def convert_databricks_notebook(cx: ActivityBuilder) -> None:
         return _block(cx, "databricks_no_linked_service", "it has no Databricks linked service.",
                       "Add the Databricks linked service in the source and re-convert.", disposition="reuse_externally")
     tp = carry(cx, ("notebookPath", "baseParameters", "libraries"))
+    cluster, problems = _cluster_settings(cx, ls)
+    tp.update(cluster)
+    for key in cluster:
+        cx.mapping(f"linkedService {ls}.{key}", f"typeProperties.{key}", "linked_service_cluster")
     name = cx.add(cx.envelope(a.name, "DatabricksNotebook", tp, connection=cx.connection(ls)))
     cx.mapping("linkedServiceName", "externalReferences.connection", "linked_service_to_connection")
     cx.cover(Op.external_execution, name)
     cx.strategy = ConversionStrategy.transformed
     cx.disposition = "reuse_externally"
-    cx.manual("databricks_cluster",
-              "The cluster (existing cluster id or new-cluster settings) is defined in the ADF linked service, which "
-              "is not read.", "Set existingClusterId or newClusterSettings on the Fabric Azure Databricks activity.")
+    if problems:
+        cx.manual("databricks_cluster",
+                  f"The cluster of linked service '{ls}' cannot be taken over completely: {'; '.join(problems)}.",
+                  "Complete the cluster on the Fabric Azure Databricks activity (Settings > Cluster).")
     cx.summary = (f"DatabricksNotebook '{a.name}' -> Fabric Azure Databricks activity running notebook "
                   f"{tp.get('notebookPath')!r} on the same workspace (reused externally).")
 
@@ -146,11 +201,12 @@ register(ConversionRule(
     variants=("existing cluster", "new job cluster", "libraries", "base parameters"),
     strategy=ConversionStrategy.transformed, handler=convert_databricks_notebook,
     runtime_disposition="reuse_externally",
-    property_rules=("notebookPath, baseParameters, libraries carried", "linkedServiceName -> externalReferences.connection"),
+    property_rules=("notebookPath, baseParameters, libraries carried", "linkedServiceName -> externalReferences.connection",
+                    "linked service cluster -> existingClusterId or newCluster* settings"),
     io_rules=("none",), expression_rules=("baseParameters expressions converted",),
     dependency_rules=("dependsOn mapped 1:1",), parameter_variable_rules=("unchanged",),
-    unsupported=("cluster settings held in the ADF linked service",),
-    manual_configuration=("Fabric Databricks connection", "existingClusterId / newClusterSettings"),
+    unsupported=("instance pools", "autoscaling (not confirmed)", "init scripts, Spark environment variables, tag values"),
+    manual_configuration=("Fabric Databricks connection", "a cluster the linked service does not fully describe"),
     validation_rules=("notebookPath present", "connection present"),
 ))
 def convert_databricks_job(cx: ActivityBuilder) -> None:

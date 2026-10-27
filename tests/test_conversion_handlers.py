@@ -553,8 +553,52 @@ def test_databricks_notebook_is_reused_externally_with_a_cluster_step():
     c = find(content, "Nb")
     assert c["type"] == "DatabricksNotebook" and c["typeProperties"]["notebookPath"] == "/Shared/etl"
     assert c["externalReferences"] == {"connection": "<connection:LS_DBX>"}
-    assert a.runtime_disposition == "reuse_externally" and a.status is S.manual_required
-    assert any("existingClusterId" in s for s in a.manual_steps)
+    assert a.runtime_disposition == "reuse_externally" and a.status is S.manual_required  # the linked service names no cluster
+    assert any("Settings > Cluster" in s for s in a.manual_steps)
+
+
+DBX_CLUSTER = {"domain": "https://adb-1.2.azuredatabricks.net", "authentication": "MSI", "policyId": "POL1",
+               "newClusterNodeType": "Standard_D4ds_v5", "newClusterNumOfWorker": "0", "newClusterVersion": "15.4.x-scala2.12",
+               "newClusterSparkConf": {"spark.databricks.cluster.profile": "singleNode", "spark.master": "local[*, 4]"},
+               "newClusterInitScripts": [], "clusterOption": "Fixed"}
+
+
+def _dbx(tp):
+    nb = act("Nb", "DatabricksNotebook", {"notebookPath": "/Shared/etl"}, linkedServiceName=ref("LinkedService", "LS_DBX"))
+    _, content, a = one(nb, linked_services=[linked_service("LS_DBX", "AzureDatabricks", tp)])
+    return find(content, "Nb")["typeProperties"], a
+
+
+def test_databricks_job_cluster_is_taken_from_the_linked_service():
+    tp, a = _dbx(DBX_CLUSTER)
+    assert tp == {"notebookPath": "/Shared/etl", "newClusterVersion": "15.4.x-scala2.12", "newClusterNodeType": "Standard_D4ds_v5",
+                  "newClusterNumOfWorker": "0", "clusterOption": "Fixed", "policyId": "POL1", "newClusterInitScripts": [],
+                  "newClusterSparkConf": {"spark.databricks.cluster.profile": "singleNode", "spark.master": "local[*, 4]"}}
+    assert a.status is S.converted and not a.manual_steps
+
+
+def test_databricks_existing_cluster_is_referenced_by_id():
+    tp, a = _dbx({"domain": "https://adb-1.2.azuredatabricks.net", "existingClusterId": "0101-abc"})
+    assert tp["existingClusterId"] == "0101-abc" and "newClusterNodeType" not in tp and a.status is S.converted
+
+
+def test_databricks_tag_values_are_a_visible_difference_not_a_silent_drop():
+    tp, a = _dbx({**DBX_CLUSTER, "newClusterCustomTags": {"project": "x"}})
+    assert a.status is S.converted_with_differences and not a.manual_steps
+    assert any("project" in limitation for limitation in a.limitations)
+
+
+@pytest.mark.parametrize("change, reason", [
+    ({"newClusterNodeType": {"value": "@linkedService().node", "type": "Expression"}}, "newClusterNodeType"),
+    ({"newClusterNumOfWorker": "2:8"}, "autoscales"),
+    ({"newClusterInitScripts": ["dbfs:/init.sh"]}, "init scripts"),
+    ({"newClusterSparkConf": {"spark.hadoop.fs.azure.account.key": "secret"}}, "secret"),
+    ({"instancePoolId": "pool-1", "newClusterNodeType": None, "newClusterNumOfWorker": None}, "instance pool"),
+])
+def test_databricks_cluster_parts_that_cannot_be_read_stay_manual(change, reason):
+    tp, a = _dbx({k: v for k, v in {**DBX_CLUSTER, **change}.items() if v is not None})
+    assert a.status is S.manual_required
+    assert any(reason in w.message for w in a.warnings if w.code == "databricks_cluster")
 
 
 def test_databricks_jar_is_blocked_with_an_alternative():

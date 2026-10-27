@@ -120,9 +120,13 @@ FABRIC_ACTIVITIES: dict[str, FabricActivitySchema] = {a.type: a for a in [
         "additionalLakehouses", "environmentId"]),
     _s("RefreshDataFlow", ["dataflowId", "workspaceId"], ["notifyOption", "dataflowType", "parameters"],
        envelope_extra=("externalReferences",)),
+    # The documented newClusterSettings has no documented fields. A pipeline saved in the Fabric portal (2026-10-27)
+    # stores the job cluster flat under the ADF linked-service names; the converter emits those, INFERRED.
     _s("DatabricksNotebook", ["notebookPath"],
        ["baseParameters", "libraries", "existingClusterId", "newClusterSettings", "pythonWheelTask",
-        "sparkJarTask", "sparkPythonTask"], envelope_required=("externalReferences",)),
+        "sparkJarTask", "sparkPythonTask"], envelope_required=("externalReferences",),
+       inferred_tp=("newClusterVersion", "newClusterNodeType", "newClusterNumOfWorker", "clusterOption",
+                    "newClusterInitScripts", "newClusterDriverNodeType", "newClusterSparkConf", "policyId")),
     _s("AzureHDInsight", ["hdiActivityType"],
        ["arguments", "getDebugInfo", "scriptSettings", "defines", "variables", "queryTimeout"],
        envelope_extra=("externalReferences",)),
@@ -185,6 +189,9 @@ INFERRED: tuple[str, ...] = (
     "typeProperties of datasetSettings (shown in Microsoft's own example, absent from the DatasetSettings table)",
     "workspace item ids (notebook / dataflow / pipeline / Spark job) are placeholders until resolved",
     "envelope userProperties used to mark inferred components (shown in Microsoft's example, absent from the table)",
+    "Azure Databricks activity job-cluster settings (newClusterVersion, newClusterNodeType, newClusterNumOfWorker, "
+    "clusterOption, newClusterInitScripts read back from a pipeline saved in the Fabric portal; newClusterDriverNodeType, "
+    "newClusterSparkConf and policyId follow the same naming, unconfirmed)",
 )
 
 

@@ -46,7 +46,7 @@ unsupported properties, manual configuration, validation rules and runtime dispo
 | Stored procedure, Script | same, only on documented stores; else blocked with alternatives | B / E |
 | Synapse SQL pool stored procedure (`SqlPoolStoredProcedure`) | Fabric Stored procedure on a connection bound by name (`connection:sqlpool:<pool>`); the pool itself does not move | B |
 | Web, WebHook | same (URL split into connection + `relativeUrl`; dynamic URL -> manual) | B |
-| AzureFunction, Databricks notebook, HDInsight Hive/Pig, Custom (Batch), Azure ML pipeline, Kusto | same Fabric activity, runtime reused | B |
+| AzureFunction, Databricks notebook, HDInsight Hive/Pig, Custom (Batch), Azure ML pipeline, Kusto | same Fabric activity, runtime reused (Databricks: the linked service's cluster is copied to the activity, under the ADF names Fabric stores it with) | B |
 | Synapse notebook, Spark job, Mapping/Wrangling data flow | Notebook / Spark job definition / Dataflow Gen2 **scaffold** (item must be migrated) | D |
 | SSIS, U-SQL, ML Studio classic, Databricks JAR/Python/Job, HDInsight MapReduce/Streaming/Spark, unknown types | blocked + documented alternatives (Databricks Job: Fabric has the task type but documents only its portal settings) | E |
 

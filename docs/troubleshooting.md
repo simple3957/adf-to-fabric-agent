@@ -46,7 +46,7 @@ never deletes anything: remove stale ones in the portal). Without `--workspace-i
 | `linked_service_not_found` | Complete the source (`linkedService/`, the ARM export, or `intake --factory ... --artifact-kind linkedservice`), or create the connection and bind it. |
 | `dataset_not_found` | Add the `dataset/` folder to the source. A dataset cannot be bound by hand. |
 | `synapse_notebook_migrate`, `spark_job_migrate` | Migrate the notebook or job (`workloads-assess`, `-generate`, `-approve`, `-deploy`), bind its id, convert again. |
-| `databricks_cluster` | Supply the cluster (`--compute-sources`), or move the notebook to Fabric. |
+| `databricks_cluster` | The cluster is taken from the Databricks linked service when it states one with literal values; this finding means part of it could not be (an expression, autoscaling, an instance pool, init scripts, environment variables or a secret-looking Spark setting). Complete it on the Fabric Azure Databricks activity, or move the notebook to Fabric. |
 | `unsupported_trigger`, `unsupported_triggerbody`, `web_dynamic_url` | Pass the value as a pipeline parameter with a default (the optional model-assisted drafts can propose this: `docs/assisted-drafts.md`). |
 | `ssis_unsupported`, `usql_retired`, `aml_deprecated`, `dataflow_reauthor`, `hdinsight_program_settings`, `databricks_jar_python`, `no_conversion_rule` | No automatic conversion exists. Rebuild the logic (Fabric notebook, Dataflow Gen2, Spark job) and call it from the pipeline. |
 | `stored_procedure_linked_service_not_in_source`, `script_store_unsupported` | The linked service must be in the source (its store type decides what Fabric supports). |
