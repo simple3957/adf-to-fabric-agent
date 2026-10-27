@@ -47,6 +47,7 @@ class Inputs:
     workloads: Optional[WorkloadManifest] = None
     provisioning: Any = None  # a VerificationReport, when provisioning was verified
     source_dir: Optional[Path] = None
+    assisted: list[str] = field(default_factory=list)  # pipelines validated against an accepted model-assisted edit of their source
 
 
 @dataclass

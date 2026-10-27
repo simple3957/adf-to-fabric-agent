@@ -19,6 +19,7 @@ from adf2fabric.agent.deployment.fabric_deploy import FABRIC_API, DeployError, F
 from adf2fabric.agent.deployment.fabric_run import RunResult, recent_runs
 from adf2fabric.agent.deployment.verify import metrics as activity_metrics
 from adf2fabric.agent.deployment.verify import summarize
+from adf2fabric.agent.structure import confidence as conf
 from adf2fabric.agent.structure.compare import Parity, compare
 from adf2fabric.agent.structure.tree import Node, Structure, adf_structure, fabric_structure
 from adf2fabric.agent.validation.views import scan_source
@@ -125,19 +126,30 @@ def collect(store: Any, pid: str, workspace: str, make_client: Callable[[], Fabr
 
     with ThreadPoolExecutor(max_workers=max(1, min(workers, len(names) or 1))) as pool:
         rows = list(pool.map(one, names))
-    data: dict[str, Any] = {"project": pid, "workspace_known": True, "pipelines": rows}
+    data: dict[str, Any] = {"project": pid, "workspace_known": True, "pipelines": rows,
+                            "workspace_pipelines": sorted(by_id.get(v.lower(), k) for k, v in ids.items())}  # every pipeline in the workspace, by display name
     data["progress"] = _progress(project_dir, rows, conv)
+    val, ver = _load(project_dir, "validation/validation.yaml") or {}, _load(project_dir, "verification/verification.json") or {}
+    by_conv = {p.source_pipeline.lower(): p for p in (conv.pipelines if conv else [])}
+    assisted = {n.pipeline.lower() for n in (conv.assisted if conv else [])}
+    for r in rows:
+        r["confidence"] = conf.assess(r, by_conv.get(r["pipeline"].lower()), (val.get("checks") or []) if isinstance(val, dict) else [],
+                                      ver.get(r["pipeline"]) if isinstance(ver, dict) else None, conf.generated_mtime(project_dir, r["pipeline"]),
+                                      assisted=r["pipeline"].lower() in assisted)
+    data["confidence"] = conf.estate([r["confidence"] for r in rows])
     return data
 
 
+def _load(project_dir: Path, rel: str) -> Any:
+    f = project_dir / rel
+    try:
+        return json.loads(f.read_text(encoding="utf-8")) if rel.endswith(".json") else yaml.safe_load(f.read_text(encoding="utf-8"))
+    except (OSError, ValueError, yaml.YAMLError):
+        return None
+
+
 def _progress(project_dir: Path, rows: list[dict], conv: Any) -> dict[str, Any]:
-    def load(rel: str) -> Any:
-        f = project_dir / rel
-        try:
-            return json.loads(f.read_text(encoding="utf-8")) if rel.endswith(".json") else yaml.safe_load(f.read_text(encoding="utf-8"))
-        except (OSError, ValueError, yaml.YAMLError):
-            return None
-    ver, val = load("verification/verification.json") or {}, load("validation/validation.yaml") or {}
+    ver, val = _load(project_dir, "verification/verification.json") or {}, _load(project_dir, "validation/validation.yaml") or {}
     parity = [r.get("parity") for r in rows if r.get("parity")]
     runs = [r.get("run") for r in rows if r.get("run")]
     return {
@@ -151,6 +163,15 @@ def _progress(project_dir: Path, rows: list[dict], conv: Any) -> dict[str, Any]:
 
 
 # --- rendering -----------------------------------------------------------------------------------------------------------
+
+
+def _confidence_summary(data: dict[str, Any]) -> list[str]:
+    c = data.get("confidence")
+    if not c:
+        return []
+    labels = ", ".join(f"{n} {k}" for k, n in sorted(c["labels"].items()))
+    return [f"* Evidence confidence: average **{c['average_score']}/100** ({labels}); **{c['exercised_share']}%** of the {c['activities']} activities ran to success in the latest runs "
+            "(the rest sit on branches not taken). This is how much is proven, not a probability that it is correct."]
 
 
 def _line(n: Node) -> str:
@@ -220,9 +241,9 @@ def render(data: dict[str, Any]) -> str:
            f"* Structure equal to ADF: **{prog['structure_equivalent']}**, differs: **{prog['structure_differs']}**",
            f"* Latest Fabric run completed: **{prog['last_run_completed']}** of {prog['ran']} that have run",
            f"* Matches its ADF baseline (run-and-compare): **{prog['matches_baseline']}**",
-           f"* Validation overall: **{prog['validation_overall'] or 'not recorded'}**", ""]
-    out += ["## Overview", "", "| Pipeline | ADF activities | Fabric activities | Depth | Starts | Structure | Latest run | Duration |",
-            "|---|---|---|---|---|---|---|---|"]
+           f"* Validation overall: **{prog['validation_overall'] or 'not recorded'}**"] + _confidence_summary(data) + [""]
+    out += ["## Overview", "", "| Pipeline | ADF activities | Fabric activities | Depth | Starts | Structure | Latest run | Duration | Confidence |",
+            "|---|---|---|---|---|---|---|---|---|"]
     for r in rows:
         a, f, p, run = r.get("adf"), r.get("fabric"), r.get("parity"), r.get("run") or {}
         dur = None
@@ -234,7 +255,8 @@ def render(data: dict[str, Any]) -> str:
                 dur = None
         out.append(f"| {r['pipeline']} | {len(a.nodes) if a else '-'} | {len(f.nodes) if f else ('not deployed' if not r.get('deployed') else '-')} | "
                    f"{a.max_depth if a else '-'} | {', '.join(a.called) if a and a.called else '-'} | {p.verdict.replace('_', ' ') if p else '-'} | "
-                   f"{run.get('status', 'never run' if r.get('deployed') else '-')} | {_ms(dur)} |")
+                   f"{run.get('status', 'never run' if r.get('deployed') else '-')} | {_ms(dur)} | "
+                   f"{r['confidence'].label + ' ' + str(r['confidence'].score) if r.get('confidence') else '-'} |")
     out += _behaviour(rows)
     calls = [(r["pipeline"], n.name, c) for r in rows if r.get("adf") for n in r["adf"].nodes for c in n.calls]
     out += ["", "## Pipeline-to-pipeline calls", ""]
@@ -244,6 +266,11 @@ def render(data: dict[str, Any]) -> str:
         if not r.get("deployed"):
             out += ["Not deployed in the workspace."]
         a, f, p, run = r.get("adf"), r.get("fabric"), r.get("parity"), r.get("run")
+        cf = r.get("confidence")
+        if cf:
+            out += [f"**Confidence: {cf.label} ({cf.score}/100)**" + (f", {cf.executed} of {cf.activities} activities exercised" if cf.activities else ""), "",
+                    "| Evidence | Points | Detail |", "|---|---|---|"] + [f"| {e.layer} | {e.points}/{e.maximum} | {e.detail} |" for e in cf.evidence]
+            out += [f"* Gap: {g}" for g in cf.gaps] + [f"* Limit: {x}" for x in cf.limits] + [""]
         out += ["**ADF** (source)", ""] + _tree(a) + ["", "**Fabric** (deployed)", ""] + _tree(f)
         if r.get("fabric_error"):
             out += ["", f"Definition not read: {r['fabric_error']}"]

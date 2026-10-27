@@ -6,6 +6,8 @@ own. Secrets (Git token, connection passwords) are passed straight through to th
 
 from __future__ import annotations
 
+from urllib.parse import quote
+
 import os
 import time
 from typing import Any, Callable, Iterable, Optional
@@ -213,13 +215,32 @@ class ApiClient:
     def run_stage(self, pid: str, stage: str, *, pipelines: Iterable[str] = (), workspace_id: Optional[str] = None,
                   with_children: bool = False, allow_unbound: bool = False, confirm: bool = False, validate_stages: Iterable[str] = (),
                   run: bool = False, run_timeout: Optional[int] = None, lakehouse: Optional[str] = None, apply_reconstruction: Optional[bool] = None,
-                  idempotency_key: Optional[str] = None) -> dict:
+                  assisted: bool = False, idempotency_key: Optional[str] = None) -> dict:
         body = {"pipelines": list(pipelines), "workspace_id": workspace_id, "with_children": with_children,
-                "allow_unbound": allow_unbound, "confirm": confirm, "validate_stages": list(validate_stages), "run": run}
+                "allow_unbound": allow_unbound, "confirm": confirm, "validate_stages": list(validate_stages), "run": run, "assisted": assisted}
         for k, v in (("run_timeout", run_timeout), ("lakehouse", lakehouse), ("apply_reconstruction", apply_reconstruction)):
             if v is not None:  # left out = follow the approved brief
                 body[k] = v
         return self._post(f"/projects/{pid}/stages/{stage}", body, idempotency_key)
+
+    # ---- model-assisted drafts (optional) ------------------------------------------------------------------------------
+    def assist(self, pid: str) -> dict:
+        return self._get(f"/projects/{pid}/assist")
+
+    def assist_detail(self, pid: str, name: str) -> dict:
+        return self._get(f"/projects/{pid}/assist/{quote(name, safe='')}")
+
+    def assist_prompt(self, pid: str, name: str) -> dict:
+        return self._get(f"/projects/{pid}/assist/{quote(name, safe='')}/prompt")
+
+    def assist_generate(self, pid: str, names: Iterable[str]) -> dict:
+        return self._post(f"/projects/{pid}/assist/generate", {"names": list(names)})
+
+    def assist_accept(self, pid: str, name: str, code: Optional[str] = None) -> dict:
+        return self._post(f"/projects/{pid}/assist/{quote(name, safe='')}/accept", {"code": code} if code is not None else {})
+
+    def assist_discard(self, pid: str, name: str, scope: str = "draft") -> dict:
+        return self._post(f"/projects/{pid}/assist/{quote(name, safe='')}/discard", {"scope": scope})
 
     # ---- views built and redacted on the server ------------------------------------------------------------------------
     def inventory(self, pid: str) -> dict:

@@ -12,6 +12,7 @@ import theme
 from api_client import ApiClient
 import options
 from components import STATE_LABELS, call, can, empty_state, intent, run_job, short_source, state_badge, status_badge, test_report, typed_confirm
+import panels_assist
 
 
 # ---- 1. discover ----------------------------------------------------------------------------------------------------------
@@ -303,13 +304,20 @@ def convert(api: ApiClient, pid: str, result: dict | None) -> None:
         options.seed(f"conv-recon-{pid}-{ver}", bool((brief or {}).get("apply_reconstruction")))
         recon = st.checkbox("Apply the safe reconstruction proposals for incomplete pipelines (every inferred element is marked)",
                             key=f"conv-recon-{pid}-{ver}", help="Off: incomplete pipelines stay blocked until the source is fixed.")
+        offer = panels_assist.accepted(api, pid)
+        assisted = False
+        if offer:
+            assisted = st.checkbox(f"Use the accepted model-assisted drafts ({len(offer)}: {', '.join(offer[:3])}{'...' if len(offer) > 3 else ''})",
+                                   key=f"conv-assisted-{pid}", help="Each replaces that pipeline's original source for this conversion. The converter is still deterministic, "
+                                                                     "the original file is unchanged, and every such pipeline is marked in the report.")
     if st.button("Convert again" if result else "Convert", type="primary", key="conv-go", disabled=bool(problem)):
         job = run_job(lambda: api.run_stage(pid, "convert", pipelines=pipes, lakehouse=lake if route == "lakehouse" else "", apply_reconstruction=recon,
-                                            idempotency_key=intent("convert-step")), "Stage: convert", intent_name="convert-step")
+                                            assisted=assisted, idempotency_key=intent("convert-step")), "Stage: convert", intent_name="convert-step")
         if job and job["state"] == "succeeded":
             st.session_state.setdefault("conversion", {})[pid] = job["result"]
             st.rerun()
     if not result:
+        panels_assist.section(api, pid)
         return
     st.markdown(f"Overall: {status_badge(result.get('status'))} · connection bindings "
                 f"{'used' if result.get('resolutions_used') else '**not applied yet**'} · "
@@ -328,6 +336,9 @@ def convert(api: ApiClient, pid: str, result: dict | None) -> None:
                    "".join(f"\n- `{u}`" for u in result["unbound"]))
     if result.get("filled_at_deploy"):
         st.caption(f"{len(result['filled_at_deploy'])} child pipeline id(s) are filled in automatically when you deploy.")
+    if result.get("assisted"):
+        st.info("Converted from a reviewed model-assisted edit of the source (the original file is unchanged): " + ", ".join(f"`{n}`" for n in result["assisted"]))
+    panels_assist.section(api, pid)
 
 
 # ---- 4. deploy ------------------------------------------------------------------------------------------------------------

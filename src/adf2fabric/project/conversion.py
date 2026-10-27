@@ -267,6 +267,17 @@ class ConversionOutcome(str, Enum):
     failed = "failed"
 
 
+class AssistedNote(_Strict):
+    """A pipeline converted from a reviewed, model-assisted edit of its ADF source (agent/assist)."""
+
+    pipeline: str
+    accepted_at: Optional[str] = None
+    accepted_by: Optional[str] = None
+    edited: bool = False  # the reviewer changed the model's draft before accepting it
+    model: str = ""
+    source_hash: str = ""
+
+
 class DatasetLedgerEntry(_Strict):
     """What became of one ADF dataset. Fabric has no dataset item: its settings are copied into each activity that uses it."""
 
@@ -293,6 +304,7 @@ class ProjectConversion(_Strict):
     workspace_items: list[Prerequisite] = Field(default_factory=list)
     schema_notes: list[str] = Field(default_factory=list)  # inferred (not documented) schema parts
     dataset_ledger: list[DatasetLedgerEntry] = Field(default_factory=list)  # every source dataset and what became of it
+    assisted: list[AssistedNote] = Field(default_factory=list)  # pipelines converted from an accepted model-assisted draft (opt-in)
     reconstruction_applied: list[str] = Field(default_factory=list)  # proposal ids that entered this output
     reconstruction_open: list[str] = Field(default_factory=list)  # blocker ids still unresolved
     compatibility: list[CompatibilityFinding] = Field(default_factory=list)  # retired/deprecated/preview components

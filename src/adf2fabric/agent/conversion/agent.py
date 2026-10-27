@@ -29,6 +29,7 @@ from adf2fabric.agent.conversion.models import ConversionRequest, ConversionResu
 from adf2fabric.agent.conversion.report import render_report, render_resolutions_template
 from adf2fabric.agent.discovery.adf_semantic.pipeline_analysis import walk
 from adf2fabric.project.conversion import (
+    AssistedNote,
     ConversionOutcome,
     ConversionStatus,
     Prerequisite,
@@ -116,6 +117,13 @@ class ConversionAgent:
                 return ConversionResult(success=False, message="Conversion failed.", error=prepared)
             d, applied, open_blockers = prepared
 
+        assisted: list[dict] = []
+        assist_log: list[str] = []
+        if request.assisted:  # opt-in: accepted, still-current model-assisted drafts stand in for their pipelines' source (agent/assist)
+            from adf2fabric.agent.assist import service as assist_service
+
+            d, assisted, assist_log = assist_service.apply(self.store, pid, d)
+
         resolutions = Resolutions.load(Path(request.resolutions_path) if request.resolutions_path else None)
         ctx = build_project_context(d, resolutions)
         if self.store.has_workload_manifest(project.id):
@@ -186,6 +194,9 @@ class ConversionAgent:
         all_fine = all(r.status is ConversionStatus.converted for r in converted) and not lost
         outcome = ConversionOutcome.converted if all_fine else ConversionOutcome.partial
         conv = self._assemble(pid, d, converted, ctx, outcome, "", compute_sources, contents)
+        conv.assisted = [AssistedNote(**n) for n in assisted if n["pipeline"].lower() in {p.name.lower() for p in selected}]
+        conv.schema_notes += [f"Converted from a reviewed model-assisted edit of the source (not the original file): {n.pipeline}, accepted "
+                              f"{n.accepted_at or '?'} by {n.accepted_by or '?'}{' and edited' if n.edited else ''}." for n in conv.assisted] + assist_log
         conv.reconstruction_applied = sorted(p.id for p in applied)
         conv.reconstruction_open = sorted(open_blockers)
         self.store.save_conversion(pid, conv)

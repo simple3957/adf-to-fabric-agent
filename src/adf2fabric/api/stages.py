@@ -232,9 +232,11 @@ def run_stage(c: Container, session: Session, pid: str, stage: str, log: Log, op
         r = ConversionAgent(c.store).run(ConversionRequest(
             project_name=pid, pipelines=pipelines, resolutions_path=str(res) if res.exists() else None, lakehouse=lakehouse,
             apply_reconstruction=bool(options["apply_reconstruction"]) if options.get("apply_reconstruction") is not None
-            else bool((brief or {}).get("apply_reconstruction"))))
+            else bool((brief or {}).get("apply_reconstruction")),
+            assisted=bool(options.get("assisted"))))
         _ok(r)  # a failed conversion has no record: say why before reading it
-        return _ok(r, **conversion_summary(c.store, pid, r.conversion), brief=(brief or {}).get("version"), lakehouse=lakehouse)
+        return _ok(r, **conversion_summary(c.store, pid, r.conversion), brief=(brief or {}).get("version"), lakehouse=lakehouse,
+                   assisted=[n.pipeline for n in r.conversion.assisted] if r.conversion else [])
     if stage == "compute":
         from adf2fabric.agent.assessment.agent import ComputeAgent, ComputeRequest
 

@@ -23,7 +23,7 @@ from adf2fabric.agent.validation import remote, static, views
 from adf2fabric.project.provisioning import VerificationReport as ProvVerification
 from adf2fabric.project.source import SourceManifest
 from adf2fabric.project.store import ProjectNotFoundError, ProjectStore
-from adf2fabric.project.validation import (CheckResult, ComponentStatus as S, InventoryCounts, Result as R, Stage, StageSummary, ValidationReport)
+from adf2fabric.project.validation import (Category as K, CheckResult, ComponentStatus as S, InventoryCounts, Result as R, Stage, StageSummary, ValidationReport)
 
 ALL_STAGES = ("static", "api", "deployment", "runtime")
 
@@ -35,12 +35,42 @@ def _optional(fn):
         return None
 
 
+def _assisted_sources(store: ProjectStore, pid: str, src: views.SourceScan) -> list[str]:
+    """A pipeline the last conversion made from an accepted model-assisted draft is compared with THAT source (the one it was converted from), not the
+    original file, so the person's reviewed edit is not reported as an unexplained difference. Each is listed, and shown as an informational check."""
+    if not store.has_conversion(pid):
+        return []
+    try:
+        notes = store.load_conversion(pid).assisted
+    except Exception:  # noqa: BLE001 - an unreadable record means nothing is assisted here
+        return []
+    if not notes:
+        return []
+    import json
+    from adf2fabric.agent.assist import context as assist_context, service as assist_service
+
+    drafts = assist_service.AssistStore(store.project_dir(pid) / "assist")
+    done: list[str] = []
+    for n in notes:
+        accepted = drafts.get(n.pipeline).get("accepted")
+        found = src.names("pipeline").get(n.pipeline.lower())
+        if not accepted or found is None or not isinstance(found.data, dict) or assist_context.source_hash(found.data) != n.source_hash:
+            continue  # the source changed since the conversion: the original is what it must be compared with
+        try:
+            found.data = json.loads(accepted["code"])
+        except ValueError:
+            continue
+        done.append(n.pipeline)
+    return done
+
+
 def load_inputs(store: ProjectStore, pid: str) -> static.Inputs:
     pdir = store.project_dir(pid)
     src = views.scan_source(store.source_dir(pid))
     tgt = views.scan_target(store.conversion_dir(pid))
+    assisted = _assisted_sources(store, pid, src)
     paired, unpaired = views.pair_pipelines(src, tgt)
-    return static.Inputs(
+    return static.Inputs(assisted=assisted, 
         project_id=pid, src=src, tgt=tgt, paired=paired, unpaired=unpaired,
         manifest=_optional(lambda: store.load_source_manifest(pid)),
         discovery=_optional(lambda: store.load_adf_semantic_discovery(pid)) if store.has_adf_semantic_discovery(pid) else None,
@@ -104,6 +134,13 @@ def validate(store: ProjectStore, pid: str, *, stages: set[str], fab: Optional[F
     c = static.Collector()
     if "static" in stages:
         c = static.run_static(inp)
+    for name in inp.assisted:
+        c.add("source_inventory.assisted_source", K.source_inventory, R.NOT_RUN,
+              f"Pipeline '{name}' was converted from a reviewed model-assisted edit of its source, and is compared with that edit.",
+              component=f"pipeline:{name}", required=False,
+              evidence=["A person reviewed and accepted the edit; the original file in the repository differs from it.",
+                        "This says what the comparison used. It is not evidence that the edit keeps the pipeline's behaviour: only a run compared with a baseline is."],
+              remediation="Make the same change in the ADF source (and re-run discovery) so the repository and Fabric agree.")
     remote.api_and_deployment(inp, c, fab, workspace, "api" in stages, "deployment" in stages)
     remote.runtime(inp, c, store.project_dir(pid), "runtime" in stages)
     checks = c.checks

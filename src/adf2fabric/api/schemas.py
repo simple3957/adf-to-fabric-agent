@@ -71,6 +71,18 @@ class ApplyBody(_In):
     confirm: bool = False  # a real (not dry-run) apply must say it is meant
 
 
+class AssistGenerateBody(_In):
+    names: list[str] = Field(min_length=1, max_length=25)  # pipelines to draft a fix for
+
+
+class AssistAcceptBody(_In):
+    code: Optional[str] = Field(default=None, max_length=1_048_576)  # an edited version of the draft; None accepts the draft as it is
+
+
+class AssistDiscardBody(_In):
+    scope: str = Field(default="draft", pattern="^(draft|all)$")
+
+
 class StageBody(_In):
     pipelines: list[str] = Field(default_factory=list)
     workspace_id: Optional[str] = None
@@ -80,6 +92,7 @@ class StageBody(_In):
     validate_stages: list[str] = Field(default_factory=list, max_length=4)  # validate stage: static | api | deployment | runtime
     lakehouse: Optional[str] = Field(default=None, max_length=256)  # convert: repoint ADLS datasets to this lakehouse; "" = keep connections; None = follow the brief
     apply_reconstruction: Optional[bool] = None  # convert: apply the safe reconstruction proposals; None = follow the brief
+    assisted: bool = False  # convert: use the model-assisted drafts a person accepted (and that are still current) in place of the original source
     run: bool = False  # verify stage: START a real Fabric run of each named pipeline, then compare (needs migration:execute + confirm)
     run_timeout: int = Field(default=1800, ge=60, le=3000)  # seconds to wait for each started run; kept within one Fabric token's lifetime
 

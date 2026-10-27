@@ -1506,9 +1506,13 @@ def discovery_adf_semantic(project_name: str) -> None:
 )
 @click.option("--from-brief", "from_brief", is_flag=True,
               help="Take scope, lakehouse repointing and reconstruction from the approved consultation brief (refused when it is not approved).")
+@click.option("--assisted", "assisted", is_flag=True,
+              help="Opt-in: convert the model-assisted drafts a person accepted (and that are still current) in place of the original source of those "
+                   "pipelines (see `assist-candidates`). The converter itself stays deterministic; each such pipeline is marked.")
 def convert(project_name: str, pipelines: tuple[str, ...], resolutions_path: str | None,
-            apply_reconstruction: bool, compute_sources_path: str | None, lakehouse: str | None, from_brief: bool) -> None:
-    """Convert the discovered ADF pipelines to Fabric pipeline definitions (deterministic, no LLM)."""
+            apply_reconstruction: bool, compute_sources_path: str | None, lakehouse: str | None, from_brief: bool, assisted: bool) -> None:
+    """Convert the discovered ADF pipelines to Fabric pipeline definitions (deterministic: no model writes Fabric JSON; --assisted only swaps in
+    ADF source a person reviewed)."""
     config = load_config()
     store = ProjectStore(projects_root(config))
     if from_brief:
@@ -1530,7 +1534,7 @@ def convert(project_name: str, pipelines: tuple[str, ...], resolutions_path: str
     result = ConversionAgent(store).run(
         ConversionRequest(project_name=project_name, pipelines=list(pipelines), resolutions_path=resolutions_path,
                           apply_reconstruction=apply_reconstruction, compute_sources_path=compute_sources_path,
-                          lakehouse=lakehouse)
+                          lakehouse=lakehouse, assisted=assisted)
     )
     if not result.success:
         click.secho(f"Conversion failed: {result.error}", fg="red", err=True)
@@ -1558,6 +1562,9 @@ def convert(project_name: str, pipelines: tuple[str, ...], resolutions_path: str
                     fg="yellow")
     if c.reconstruction_open:
         click.secho(f"  {len(c.reconstruction_open)} reconstruction blocker(s) remain unresolved.", fg="yellow")
+    for n in c.assisted:
+        click.secho(f"  model-assisted: {n.pipeline} was converted from the draft accepted {n.accepted_at or '?'} by {n.accepted_by or '?'}"
+                    f"{' (edited)' if n.edited else ''}; the original file differs.", fg="yellow")
     if c.compatibility:
         by_status: dict[str, int] = {}
         for f in c.compatibility:
@@ -2155,7 +2162,207 @@ def pipeline_report_cmd(project_name: str, workspace_id: str, workers: int, auth
     click.echo(f"PIPELINE REPORT  {p['pipelines']} pipeline(s), {p['deployed']} deployed")
     click.echo(f"  structure equal to ADF: {p['structure_equivalent']}   differs: {p['structure_differs']}")
     click.echo(f"  latest Fabric run completed: {p['last_run_completed']} of {p['ran']}   matches ADF baseline: {p['matches_baseline']}")
+    c = data["confidence"]
+    click.echo(f"  evidence confidence: average {c['average_score']}/100 ({', '.join(f'{n} {k}' for k, n in sorted(c['labels'].items()))});"
+               f" {c['exercised_share']}% of {c['activities']} activities exercised")
+    for r in data["pipelines"]:
+        cf = r["confidence"]
+        click.echo(f"    {r['pipeline']:<32} {cf.label:<12} {cf.score:>3}/100" + (f"   gap: {cf.gaps[0][:90]}" if cf.gaps else ""))
     click.echo(f"  report: {out / 'pipeline-report.md'}")
+
+
+def _assist(project_name: str, synchronous: bool = True):
+    import getpass
+
+    from adf2fabric.agent.assist.service import AssistService
+
+    config = load_config()
+    store = ProjectStore(projects_root(config))
+    pid = slugify(project_name)
+    if not store.exists(pid):
+        click.secho(f"No project '{pid}' found.", fg="red", err=True)
+        sys.exit(1)
+    return AssistService(store, pid, synchronous=synchronous), getpass.getuser()
+
+
+def _assist_fail(exc: Exception) -> None:
+    click.secho(str(exc), fg="red", err=True)
+    sys.exit(1)
+
+
+@cli.command(name="assist-candidates")
+@click.option("--project", "project_name", required=True, help="Project name (`convert` must have run).")
+def assist_candidates_cmd(project_name: str) -> None:
+    """Pipelines the converter left with something for a person: a model can draft a fix on request (optional; ADF2FABRIC_LLM=on)."""
+    from adf2fabric.agent.assist.service import AssistError
+
+    svc, _ = _assist(project_name)
+    s = svc.settings()
+    click.echo(f"MODEL-ASSISTED DRAFTS  {'on' if s['enabled'] else 'OFF'}   model: {s['model']}   claude CLI: {'found' if s['available'] else 'not found'}")
+    if not s["enabled"]:
+        click.secho(f"  {s['disabled_reason']}", fg="yellow")
+    try:
+        found = svc.candidates()
+    except AssistError as exc:
+        _assist_fail(exc)
+    for c in found["items"]:
+        click.echo(f"  {c['pipeline']}: {c['status']}, {len(c['problems'])} problem(s) - draft: {c['state']}" + (f" ({c['confidence']} confidence)" if c["confidence"] else ""))
+        for pr in c["problems"][:3]:
+            click.echo(f"      {pr[:150]}")
+    click.echo(f"  {found['summary']['total']} candidate(s), {found['summary']['drafts']} draft(s) waiting, {found['summary']['accepted']} accepted")
+
+
+@cli.command(name="assist-prompt")
+@click.option("--project", "project_name", required=True)
+@click.option("--pipeline", "pipeline", required=True)
+def assist_prompt_cmd(project_name: str, pipeline: str) -> None:
+    """Print exactly what would be sent to the model for this pipeline (secrets removed). Sends nothing."""
+    from adf2fabric.agent.assist.service import AssistError
+
+    svc, _ = _assist(project_name)
+    try:
+        click.echo(svc.prompt(pipeline)["prompt"])
+    except AssistError as exc:
+        _assist_fail(exc)
+
+
+@cli.command(name="assist-draft")
+@click.option("--project", "project_name", required=True)
+@click.option("--pipeline", "pipelines", multiple=True, required=True, help="Pipeline to draft a fix for. Repeatable.")
+def assist_draft_cmd(project_name: str, pipelines: tuple[str, ...]) -> None:
+    """Ask the model for a draft (needs ADF2FABRIC_LLM=on and the Claude Code CLI). Nothing uses it until `assist-accept`."""
+    from adf2fabric.agent.assist.service import AssistError
+
+    svc, _ = _assist(project_name)
+    try:
+        svc.generate(list(pipelines))
+    except AssistError as exc:
+        _assist_fail(exc)
+    for name in pipelines:
+        v = svc.detail(name)
+        if v["state"] == "failed":
+            click.secho(f"  {name}: FAILED - {v['error']}", fg="red")
+            continue
+        d = v["draft"]
+        click.echo(f"  {name}: draft ready ({d['confidence']} confidence, {d['duration_ms'] // 1000}s)")
+        for ch in d["checks"]:
+            click.secho(f"      {ch['level']}: {ch['message']}", fg={"error": "red", "warning": "yellow", "ok": "green"}[ch["level"]])
+    click.echo("  Review with `assist-show`, accept with `assist-accept`. Then `convert --assisted`.")
+
+
+@cli.command(name="assist-show")
+@click.option("--project", "project_name", required=True)
+@click.option("--pipeline", "pipeline", required=True)
+@click.option("--code", "show_code", is_flag=True, help="Also print the draft's code.")
+def assist_show_cmd(project_name: str, pipeline: str, show_code: bool) -> None:
+    """The problems, the draft's notes, its automatic checks and what it left for a person."""
+    from adf2fabric.agent.assist.service import AssistError
+
+    svc, _ = _assist(project_name)
+    try:
+        v = svc.detail(pipeline)
+    except AssistError as exc:
+        _assist_fail(exc)
+    click.echo(f"{v['pipeline']}: {v['state']}   (converter: {v['source']['summary']})")
+    for pr in v["source"]["problems"]:
+        click.echo(f"  problem: {pr[:200]}")
+    for label in ("draft", "accepted"):
+        d = v[label]
+        if not d:
+            continue
+        click.echo(f"  {label}: {d['confidence']} confidence{' (stale: the source changed)' if d.get('stale') else ''}")
+        for n in d["notes"]:
+            click.echo(f"      note: {n}")
+        for u in d["unconverted"]:
+            click.secho(f"      left for a person: {u}", fg="yellow")
+        for ch in d["checks"]:
+            click.secho(f"      {ch['level']}: {ch['message']}", fg={"error": "red", "warning": "yellow", "ok": "green"}[ch["level"]])
+        if show_code:
+            click.echo(d["code"])
+
+
+@cli.command(name="assist-accept")
+@click.option("--project", "project_name", required=True)
+@click.option("--pipeline", "pipeline", required=True)
+@click.option("--file", "code_file", type=click.Path(exists=True, dir_okay=False), default=None, help="Accept this edited version of the draft instead (it is checked again).")
+def assist_accept_cmd(project_name: str, pipeline: str, code_file: str | None) -> None:
+    """Accept the draft (or an edited file) as the source `convert --assisted` uses for this pipeline, while its source is unchanged."""
+    from adf2fabric.agent.assist.service import AssistError
+
+    svc, who = _assist(project_name)
+    try:
+        v = svc.accept(pipeline, Path(code_file).read_text(encoding="utf-8") if code_file else None, by=who)
+    except AssistError as exc:
+        _assist_fail(exc)
+    click.secho(f"  {pipeline}: accepted by {v['accepted']['accepted_by']}{' (edited)' if v['accepted']['edited'] else ''}. "
+                f"Run `convert --assisted` to use it.", fg="green")
+
+
+@cli.command(name="assist-discard")
+@click.option("--project", "project_name", required=True)
+@click.option("--pipeline", "pipeline", required=True)
+@click.option("--all", "everything", is_flag=True, help="Also drop the accepted version (go back to the original source).")
+def assist_discard_cmd(project_name: str, pipeline: str, everything: bool) -> None:
+    """Drop the draft, or with --all the accepted version too."""
+    from adf2fabric.agent.assist.service import AssistError
+
+    svc, _ = _assist(project_name)
+    try:
+        svc.discard(pipeline, "all" if everything else "draft")
+    except AssistError as exc:
+        _assist_fail(exc)
+    click.echo(f"  {pipeline}: {'draft and accepted version' if everything else 'draft'} discarded.")
+
+
+@cli.command(name="diagnose")
+@click.option("--project", "project_name", required=True, help="Project name (`convert` must have run).")
+@click.option("--workspace-id", default=None, help="Also read this Fabric workspace (what is deployed, the latest runs). Without it only conversion and binding are covered.")
+@azure_auth_options()
+@_audited("diagnose")
+def diagnose_cmd(project_name: str, workspace_id: str | None, auth: str, **auth_env: str | None) -> None:
+    """Why each pipeline and service is not yet running perfectly in Fabric, and what to do about it. Read-only: nothing is changed."""
+    import json
+
+    from adf2fabric.agent.diagnose import engine
+
+    config = load_config()
+    store = ProjectStore(projects_root(config))
+    pid = slugify(project_name)
+    if not store.exists(pid):
+        click.secho(f"No project '{pid}' found.", fg="red", err=True)
+        sys.exit(1)
+    report = None
+    if workspace_id:
+        from adf2fabric.agent.deployment.fabric_deploy import FABRIC_SCOPE, DeployError, FabricClient
+        from adf2fabric.agent.structure import report as structure_report
+        from adf2fabric.connectivity._azure import CredentialUnavailable, build_credential
+
+        try:
+            credential, _ = build_credential(credential_from(auth, **auth_env))
+            token = credential.get_token(FABRIC_SCOPE).token
+            report = structure_report.collect(store, pid, workspace_id, lambda: FabricClient(token))
+        except (DeployError, CredentialUnavailable) as exc:
+            click.secho(f"Could not read the workspace: {getattr(exc, 'detail', None) or exc}. Showing conversion and binding only.", fg="yellow", err=True)
+    d = engine.diagnose(store, pid, report)
+    out = store.project_dir(pid) / "diagnosis"
+    out.mkdir(parents=True, exist_ok=True)
+    (out / "diagnosis.md").write_text(engine.render(d), encoding="utf-8")
+    (out / "diagnosis.json").write_text(json.dumps(d, indent=2, default=str), encoding="utf-8")
+    if not d["ready"]:
+        click.secho(d["message"], fg="yellow")
+        return
+    click.echo(f"DIAGNOSIS  {pid}   workspace read: {'yes' if d['workspace_read'] else 'no'}")
+    for stage, n in d["summary"].items():
+        click.secho(f"  {n:>3}  {engine.HEADLINE[stage]}", fg="green" if stage == "proven" else "yellow" if stage in ("run_ok_no_baseline", "ready_to_deploy") else "red")
+    for i, g in enumerate(d["fix_first"][:6], 1):
+        click.echo(f"  fix {i}: {g['cause'][:110]} ({len(g['pipelines'])} pipeline(s))")
+        click.echo(f"         do: {g['fix'][:160]}")
+    for x in d["services"]:
+        if x["state"] == "not bound" or x["level"] in ("unsupported", "unlisted"):
+            click.echo(f"  service {x['service']} ({x['type']}): {x['state']} - {x['todo'][:120]}")
+    if d["extras"]:
+        click.echo(f"  {len(d['extras'])} pipeline(s) in the workspace are not in this project: {', '.join(d['extras'][:6])}")
+    click.echo(f"  report: {out / 'diagnosis.md'}")
 
 
 @cli.command(name="handover")

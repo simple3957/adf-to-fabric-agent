@@ -572,6 +572,9 @@ class ProjectStore:
             raise ValueError(f"Refusing to write outside the conversion folder: {relative_path}")
         try:
             target.parent.mkdir(parents=True, exist_ok=True)
+            # An unchanged file is left alone so its timestamp still says when its content last changed (runtime evidence is judged against it).
+            if target.is_file() and target.read_text(encoding="utf-8") == text:
+                return target
             target.write_text(text, encoding="utf-8")
         except OSError as exc:
             raise ProjectPathError(target, exc) from None

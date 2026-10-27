@@ -375,3 +375,17 @@ def test_a_path_too_long_for_windows_is_explained_not_a_raw_file_error(tmp_path,
         store.write_conversion_file("p", "pipelines/PL_X.DataPipeline/pipeline-content.json", "{}")
     assert "260" in str(exc.value) and "projects_root" in str(exc.value) and str(tmp_path) not in str(exc.value)
     monkeypatch.setattr(type(tmp_path), "write_text", real)
+
+
+def test_an_unchanged_generated_file_is_not_rewritten_so_its_timestamp_still_means_something(tmp_path):
+    import os
+
+    from adf2fabric.project.store import ProjectStore
+
+    store = ProjectStore(tmp_path)
+    f = store.write_conversion_file("p", "pipelines/PL_X.DataPipeline/pipeline-content.json", '{"a": 1}\n')
+    os.utime(f, (1_000_000_000, 1_000_000_000))
+    store.write_conversion_file("p", "pipelines/PL_X.DataPipeline/pipeline-content.json", '{"a": 1}\n')
+    assert f.stat().st_mtime == 1_000_000_000
+    store.write_conversion_file("p", "pipelines/PL_X.DataPipeline/pipeline-content.json", '{"a": 2}\n')
+    assert f.stat().st_mtime > 1_000_000_000 and '"a": 2' in f.read_text(encoding="utf-8")

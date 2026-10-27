@@ -21,6 +21,10 @@ class ConversionRequest(BaseModel):
         default=None,
         description="JSON file describing external Spark compute that ADF only references (Databricks clusters by id, "
                     "Synapse Spark pools by name), so it can be sized. See docs/compute-plan.md.")
+    assisted: bool = Field(
+        default=False,
+        description="Opt-in: convert the model-assisted drafts a person accepted (and that are still current) in place of the original source of "
+                    "those pipelines. The converter itself stays deterministic; each such pipeline is marked as assisted.")
     lakehouse: Optional[str] = Field(
         default=None,
         description="Repoint storage datasets to this lakehouse through the OneLake shortcuts of the storage map (opt-in; "

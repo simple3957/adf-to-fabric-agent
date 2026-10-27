@@ -921,6 +921,58 @@ def create_app(settings: Optional[Settings] = None, live: Optional[Container] = 
         ctx.audit("journey.confirm", "ok", resource="project", resource_id=slug, steps=",".join(body.steps))
         return {"confirmed": _journey_read(ctx, slug)}
 
+    # ---- model-assisted drafts (optional; off unless ADF2FABRIC_LLM=on): a model drafts corrected ADF source, a person accepts it, convert --assisted uses it ------
+    def _assist(ctx: Ctx, pid: str):
+        from adf2fabric.agent.assist.service import AssistService
+
+        return AssistService(ctx.c.store, ctx.project(pid))
+
+    def _assist_call(fn):
+        from adf2fabric.agent.assist.service import AssistError
+
+        try:
+            return fn()
+        except AssistError as exc:
+            raise HTTPException(exc.status, str(exc)) from None
+
+    @app.get("/projects/{pid}/assist")
+    def assist_overview(pid: str, ctx: Ctx = Depends(), _: Principal = need(P.reports_view)):
+        svc = _assist(ctx, pid)
+        try:
+            found = svc.candidates()
+        except Exception:  # noqa: BLE001 - nothing to draft until a conversion exists; the settings are still shown
+            found = None
+        return {"settings": svc.settings(), "candidates": found}
+
+    @app.get("/projects/{pid}/assist/{name}")
+    def assist_detail(pid: str, name: str, ctx: Ctx = Depends(), _: Principal = need(P.reports_view)):
+        return _assist_call(lambda: _assist(ctx, pid).detail(name))
+
+    @app.get("/projects/{pid}/assist/{name}/prompt")
+    def assist_prompt(pid: str, name: str, ctx: Ctx = Depends(), _: Principal = need(P.reports_view)):
+        return _assist_call(lambda: _assist(ctx, pid).prompt(name))
+
+    @app.post("/projects/{pid}/assist/generate", status_code=202)
+    def assist_generate(pid: str, body: S.AssistGenerateBody, ctx: Ctx = Depends(), _: Principal = need(P.plans_generate)):
+        slug = ctx.project(pid)
+        result = _assist_call(lambda: _assist(ctx, pid).generate(body.names))
+        ctx.audit("assist.generate", "ok", resource="project", resource_id=slug, pipelines=",".join(body.names)[:200])
+        return result
+
+    @app.post("/projects/{pid}/assist/{name}/accept")
+    def assist_accept(pid: str, name: str, body: S.AssistAcceptBody, ctx: Ctx = Depends(), _: Principal = need(P.plans_generate)):
+        slug = ctx.project(pid)
+        result = _assist_call(lambda: _assist(ctx, pid).accept(name, body.code, by=ctx.principal.id))
+        ctx.audit("assist.accept", "ok", resource="project", resource_id=slug, pipeline=name, edited=bool(result["accepted"]["edited"]))
+        return result
+
+    @app.post("/projects/{pid}/assist/{name}/discard")
+    def assist_discard(pid: str, name: str, body: S.AssistDiscardBody, ctx: Ctx = Depends(), _: Principal = need(P.plans_generate)):
+        slug = ctx.project(pid)
+        result = _assist_call(lambda: _assist(ctx, pid).discard(name, body.scope))
+        ctx.audit("assist.discard", "ok", resource="project", resource_id=slug, pipeline=name, scope=body.scope)
+        return result
+
     @app.post("/projects/{pid}/journey/reset")
     def journey_reset(pid: str, body: S.JourneyBody, ctx: Ctx = Depends(), _: Principal = need(P.plans_generate)):
         slug = ctx.project(pid)

@@ -107,6 +107,12 @@ def render_report(c: ProjectConversion) -> str:
         if p.prerequisites:
             out += ["", "### Prerequisites for this pipeline", ""] + _prereq_lines(p.prerequisites)
 
+    if c.assisted:
+        out += ["", "## Model-assisted pipelines (converted from a reviewed edit of the source, not the original file)", "",
+                "A model drafted a corrected ADF source for each pipeline below, a person reviewed and accepted it, and the deterministic converter then converted "
+                "it like any other source. The original file in the repository is unchanged and differs from what was converted.", "",
+                "| Pipeline | Accepted | By | Edited by the reviewer | Model |", "| --- | --- | --- | --- | --- |"]
+        out += [f"| `{n.pipeline}` | {n.accepted_at or '-'} | {_cell(n.accepted_by or '-')} | {'yes' if n.edited else 'no'} | {_cell(n.model or '-')} |" for n in c.assisted]
     if c.dataset_ledger:
         counts: dict[str, int] = {}
         for e in c.dataset_ledger:

@@ -145,6 +145,7 @@ The CLI commands (`provision-*`, `workloads-*`, `validate`) still rely on the op
 * **The Azure CLI session is shared by everyone the server serves.** Grants limit what each person may target, but all calls run as the
   server's signed-in identity; Azure's audit log shows that identity, not the API user (our audit log does).
 * **SSRF is checked at request time.** DNS can change before `git` fetches; use the allow-list where you can.
+* **Model-assisted drafts send a pipeline's definition off the machine** (to Anthropic, through the Claude Code CLI) when `ADF2FABRIC_LLM=on` and a draft is generated. Secret-looking values are removed first and `assist-prompt` shows the whole prompt, but a client who must not allow it should leave the feature off (the default). See `docs/assisted-drafts.md`.
 * **Project files on disk are not encrypted** and rely on filesystem permissions. Source ADF JSON can contain secrets that its authors
   stored there (validation reports them without printing them).
 * **No independent penetration test has been done.** A black-box probe of the running API (authn, authz, tenancy, SSRF, uploads, races, secret
