@@ -30,6 +30,9 @@ never deletes anything: remove stale ones in the portal). Without `--workspace-i
 2. **It is bound.** The pipeline holds the connection's id. Bind with `LinkedServiceToConnectionId` (key = the linked service) in the resolutions file; a linked service
    that is not in the source can still be bound this way (the activity then converts with a visible difference). Datasets that pass different values to one linked
    service need one connection each (`LS?Param=value`).
+   The Connect step lists existing connections only when it can read them from Fabric through the session's Fabric sign-in. When the "existing connection"
+   dropdown is empty it now says why: not signed in to Fabric for this session (`not_connected`), the sign-in could not list connections (`unreadable`, with a
+   short reason), or no connection is visible to that account. In every case you can still paste a connection ID (Fabric: Settings > Manage connections and gateways).
 3. **Its credential is entered and tested in Fabric.** Nothing is copied from ADF (secrets are never stored in project files).
 4. **The identity can reach the data.** For ADLS: Storage Blob Data Contributor. Reading ADLS through a Databricks-style external location fails with 401: use a
    OneLake shortcut (`storage-map`, `create-shortcut`) or grant the running identity.

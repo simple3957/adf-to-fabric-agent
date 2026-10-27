@@ -182,7 +182,9 @@ class ApiClient:
         return self._get("/connectors")["connectors"]
 
     def cards(self, pid: str) -> list[dict]:
-        return self._get(f"/projects/{pid}/connections")["cards"]
+        got = self._get(f"/projects/{pid}/connections")
+        self.fabric_read = {**getattr(self, "fabric_read", {}), pid: got.get("fabric") or {}}  # whether Fabric's connections could be read
+        return got["cards"]
 
     def set_choice(self, pid: str, ls: str, method: str, endpoint: Optional[dict] = None, values: Optional[dict] = None,
                    display_name: Optional[str] = None) -> dict:

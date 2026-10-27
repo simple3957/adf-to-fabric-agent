@@ -197,10 +197,24 @@ def _apply_table(res: dict) -> None:
             st.caption(f"• {i['linked_service']}: {a}")
 
 
+def fabric_read_notice(read: dict | None) -> None:
+    """Say why the 'existing connection' list may be empty: no Fabric sign-in, a read that failed, or nothing visible to this account."""
+    read = read or {}
+    state = read.get("state")
+    if state in ("not_connected", "unreadable") or (state == "ok" and not read.get("connections")):
+        text = {"not_connected": "Fabric is not connected for this session, so existing connections can't be listed.",
+                "unreadable": "Fabric's connections could not be read, so the list of existing ones is empty.",
+                "ok": "Fabric returned no connections for this account."}[state]
+        st.warning(f"{text} {read.get('todo', '')}".strip())
+        if read.get("detail") and state != "ok":
+            st.caption(f"Reason: {read['detail']}")
+
+
 def connect(api: ApiClient, pid: str, cards: list[dict] | None, workspace_id: str | None) -> None:
     if not cards:
         st.info("No linked services found." if cards == [] else "Run discovery first.")
         return
+    fabric_read_notice((getattr(api, "fabric_read", None) or {}).get(pid))
     ready = sum(1 for c in cards if c["state"] in READY)
     problems = sum(1 for c in cards if c["state"] in PROBLEM)
     st.markdown(f"**{len(cards)} linked services** · {ready} ready" + (f" · {problems} need attention" if problems else "")

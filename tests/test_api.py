@@ -222,3 +222,8 @@ def test_bad_session_id_and_unexpected_error_generic(client):
 def test_session_never_holds_token(client):
     client.put("/session/source", json={"kind": "git", "repository_url": "https://e.com/x.git", "token": SECRET})
     assert SECRET not in client.get("/session").text
+
+
+def test_the_connections_response_says_whether_fabric_could_be_read(client):
+    got = client.get("/projects/demo-estate/connections").json()
+    assert got["fabric"]["state"] in ("ok", "not_connected", "unreadable") and "cards" in got

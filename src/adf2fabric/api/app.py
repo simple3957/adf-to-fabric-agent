@@ -640,6 +640,15 @@ def create_app(settings: Optional[Settings] = None, live: Optional[Container] = 
         except Exception:  # noqa: BLE001 - cards still render without Fabric; the card says what is unverified
             return None
 
+    def _fabric_or_why(ctx: Ctx):
+        """The Fabric service, or None and a short reason (the Connect step says why its existing-connection list is empty)."""
+        try:
+            return ctx.c.fabric(ctx.session), ""
+        except Exception as exc:  # noqa: BLE001
+            from adf2fabric.connections.service import reason
+
+            return None, reason(exc)
+
     def _ls(value: str) -> str:
         if not _LS.match(value or ""):
             raise guards.Rejected("The linked service name is not valid.")
@@ -654,7 +663,9 @@ def create_app(settings: Optional[Settings] = None, live: Optional[Container] = 
     @app.get("/projects/{pid}/connections")
     def cards(pid: str, ctx: Ctx = Depends(), _: Principal = need(P.reports_view)):
         slug = ctx.project(pid)
-        return {"cards": S.dump(ctx.c.connections.cards(slug, ctx.key, _fabric_or_none(ctx)))}
+        fabric, why = _fabric_or_why(ctx)
+        cards, status = ctx.c.connections.cards_and_status(slug, ctx.key, fabric, fabric_error=why)
+        return {"cards": S.dump(cards), "fabric": status}
 
     @app.put("/projects/{pid}/connections/{ls}/choice")
     def set_choice(pid: str, ls: str, body: S.ChoiceBody, ctx: Ctx = Depends(), _: Principal = need(P.plans_generate)):

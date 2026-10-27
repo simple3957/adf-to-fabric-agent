@@ -749,3 +749,26 @@ def test_skipping_can_be_undone_by_choosing_a_method(project):
     s.set_choice(pid, sql_choice())
     s.put_secret("sess", pid, "LS_SQL", "password", PW)
     assert {c.name: c for c in s.cards(pid, "sess")}["LS_SQL"].state is ConnectionState.connection_configured
+
+
+# --- why the "existing connection" list is empty -----------------------------------------------------------------------------
+
+
+class _Unreadable(FakeFabric):
+    def connections(self):
+        raise RuntimeError("401 Unauthorized eyJhbGciOiJSUzI1NiJ9.abcdefghijklmnopqrstuvwxyz0123456789 for the token")
+
+
+def test_the_fabric_read_says_whether_connections_could_be_listed_and_never_a_token(project):
+    s, pid = svc(project)
+    _, none = s.cards_and_status(pid, "sess", None, fabric_error="AzureCliError: not signed in")
+    assert none["state"] == "not_connected" and "not signed in" in none["detail"] and "sign in" in none["todo"]
+    _, bare = s.cards_and_status(pid, "sess", None)
+    assert bare["state"] == "not_connected" and bare["detail"]
+    _, bad = s.cards_and_status(pid, "sess", _Unreadable())
+    assert bad["state"] == "unreadable" and "401" in bad["detail"] and "eyJ" not in bad["detail"] and "paste" in bad["todo"]
+    _, ok = s.cards_and_status(pid, "sess", FakeFabric(existing=[{"id": GUID1, "displayName": "x", "connectionDetails": {"type": "SQL", "path": "h;d"}}]))
+    assert ok["state"] == "ok" and ok["connections"] == 1 and not ok["todo"]
+    _, empty = s.cards_and_status(pid, "sess", FakeFabric())
+    assert empty["state"] == "ok" and empty["connections"] == 0 and "No Fabric connections" in empty["todo"]
+    assert [c.name for c in s.cards(pid, "sess")] == [c.name for c in s.cards_and_status(pid, "sess", None)[0]]  # cards() is unchanged

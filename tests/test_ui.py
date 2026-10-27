@@ -401,3 +401,22 @@ def test_a_stale_discovery_is_shown_as_out_of_date_not_done():
 
     f = discover_facts({"has_semantic": False, "semantic_stale": True}, None)
     assert not f.complete and f.metric == "Out of date"
+
+
+def test_an_empty_existing_connection_list_says_why():
+    import streamlit as st
+    from streamlit.testing.v1 import AppTest
+
+    def page():
+        import panels
+
+        panels.fabric_read_notice({"state": "not_connected", "detail": "AzureCliError: not signed in", "todo": "Sign in."})
+        panels.fabric_read_notice({"state": "unreadable", "detail": "RuntimeError: 401", "todo": "Check access."})
+        panels.fabric_read_notice({"state": "ok", "connections": 0, "todo": "Create one."})
+        panels.fabric_read_notice({"state": "ok", "connections": 3})
+        panels.fabric_read_notice(None)
+
+    at = AppTest.from_function(page).run()
+    warnings = [w.value for w in at.warning]
+    assert len(warnings) == 3 and "not connected" in warnings[0] and "could not be read" in warnings[1] and "no connections" in warnings[2]
+    assert any("AzureCliError" in c.value for c in at.caption) and not at.exception

@@ -136,22 +136,32 @@ class ConnectionService:
     # ---- cards ---------------------------------------------------------------------------------------------------
     def cards(self, pid: str, session: str, fabric: Optional[FabricService] = None,
               network_hints: Optional[dict[str, dict]] = None) -> list[LinkedServiceCard]:
+        return self.cards_and_status(pid, session, fabric, network_hints)[0]
+
+    def cards_and_status(self, pid: str, session: str, fabric: Optional[FabricService] = None,
+                         network_hints: Optional[dict[str, dict]] = None, fabric_error: str = "") -> tuple[list[LinkedServiceCard], dict]:
+        """The cards, and whether the Fabric side (existing connections, supported types) could be read, with the reason when not.
+
+        The cards render without Fabric, but an empty "existing connection" list must say why it is empty."""
         d = self.semantic(pid)
         supported = conns = gws = None
+        conn_error = ""
         if fabric is not None:
             from concurrent.futures import ThreadPoolExecutor
 
             held = self._supported if self._supported and time.monotonic() - self._supported[0] < SUPPORTED_TYPES_SECONDS else None
             with ThreadPoolExecutor(max_workers=3) as pool:  # three independent Fabric calls, made at the same time
                 f_sup = None if held else pool.submit(_soft, fabric.supported_connection_types)
-                f_con, f_gws = pool.submit(_soft, fabric.connections), pool.submit(_soft, fabric.gateways)
+                f_con, f_gws = pool.submit(_soft_why, fabric.connections), pool.submit(_soft, fabric.gateways)
                 supported = held[1] if held else f_sup.result()
-                conns, gws = f_con.result(), f_gws.result()
+                conns, conn_error = f_con.result()
+                gws = f_gws.result()
             if not held and supported is not None:
                 self._supported = (time.monotonic(), supported)
         states = {name: s for (p, name), s in self._states.items() if p == pid}
-        return build_cards(d, choices=self.load_choices(pid), supported_types=supported, connections=conns, gateways=gws,
-                           secrets_held=self._held(session, d), network_hints=network_hints, states=states)
+        cards = build_cards(d, choices=self.load_choices(pid), supported_types=supported, connections=conns, gateways=gws,
+                            secrets_held=self._held(session, d), network_hints=network_hints, states=states)
+        return cards, fabric_status(fabric is not None, conns, fabric_error or conn_error)
 
     # ---- testing -------------------------------------------------------------------------------------------------
     def test(self, pid: str, session: str, linked_service: str, fabric: Optional[FabricService] = None) -> TestReport:
@@ -365,6 +375,34 @@ def _soft(fn: Callable[[], Any]) -> Any:
         return fn()
     except (FabricApiError, Exception):  # noqa: BLE001
         return None
+
+
+def _soft_why(fn: Callable[[], Any]) -> tuple[Any, str]:
+    """Like ``_soft``, but also says why it failed (a short, token-free reason)."""
+    try:
+        return fn(), ""
+    except Exception as exc:  # noqa: BLE001
+        return None, reason(exc)
+
+
+def reason(exc: BaseException) -> str:
+    """A short reason fit for a screen: the error's own message, truncated, with anything token-shaped removed."""
+    text = " ".join(str(getattr(exc, "detail", None) or exc).split())
+    text = re.sub(r"eyJ[\w\-.]{20,}|[A-Za-z0-9+/=_\-]{40,}", "[removed]", text)
+    return f"{type(exc).__name__}: {text[:200]}" if text else type(exc).__name__
+
+
+def fabric_status(signed_in: bool, connections: Optional[list], error: str = "") -> dict:
+    """``state``: ``not_connected`` (no Fabric sign-in for this session), ``unreadable`` (signed in, the list could not be read) or
+    ``ok`` (``connections`` = how many were read). ``detail`` says what to do."""
+    if not signed_in:
+        return {"state": "not_connected", "connections": 0, "detail": error or "Not signed in to Fabric in this session.",
+                "todo": "Choose the Fabric destination and sign in with the account that owns the connections, then reload this step."}
+    if connections is None:
+        return {"state": "unreadable", "connections": 0, "detail": error or "The connection list could not be read.",
+                "todo": "Check the sign-in can list connections (Fabric admin or connection access) and try again; you can still paste a connection ID."}
+    return {"state": "ok", "connections": len(connections), "detail": "",
+            "todo": "" if connections else "No Fabric connections are visible to this account; create one in Fabric, or paste an ID."}
 
 
 def _name(raw: str) -> str:
