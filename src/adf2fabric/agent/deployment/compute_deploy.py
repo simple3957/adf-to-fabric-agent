@@ -81,9 +81,17 @@ def validate_pool_body(body: Optional[dict]) -> list[str]:
     return problems
 
 
+def _executors(pool_: dict) -> Any:
+    """Dynamic executor allocation as compared. Fabric returns only ``{"enabled": false}`` for a disabled one (live,
+    2026-10-27), dropping the min/max it was created with: when off, the limits do not apply and are not compared."""
+    d = pool_.get("dynamicExecutorAllocation")
+    return {"enabled": False} if isinstance(d, dict) and d.get("enabled") is False else d
+
+
 def pool_matches(existing: dict, body: dict) -> bool:
     """True when an existing pool already has the settings of the proposed body."""
-    return all(existing.get(k) == body.get(k) for k in ("nodeFamily", "nodeSize", "autoScale", "dynamicExecutorAllocation"))
+    return (all(existing.get(k) == body.get(k) for k in ("nodeFamily", "nodeSize", "autoScale"))
+            and _executors(existing) == _executors(body))
 
 
 def find_reusable(existing: dict[str, dict], body: dict) -> tuple[Optional[dict], str]:

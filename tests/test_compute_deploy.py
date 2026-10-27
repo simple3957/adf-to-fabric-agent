@@ -370,6 +370,19 @@ def test_applying_through_the_cli_writes_the_record_and_updates_the_plan(estate,
     assert {t.provisioning_status for t in plan.targets if t.spark_pool == "ADF-Large-n3-9"} == {"created"}
 
 
+def test_a_pool_without_dynamic_allocation_matches_although_fabric_drops_its_executor_limits():
+    """Live 2026-10-27: ADF-Small-n1, created from this very body, read back as {"enabled": false} and was planned as a conflict."""
+    sent = body("ADF-Small-n1", size="Small", lo=1, hi=1)
+    assert sent["dynamicExecutorAllocation"] == {"enabled": False, "minExecutors": 1, "maxExecutors": 1}
+    live = dict(sent, id="pool-1", type="Workspace", dynamicExecutorAllocation={"enabled": False})
+    assert cd.pool_matches(live, sent)
+    assert cd.find_reusable({"adf-small-n1": live}, sent) == (live, "identical")
+    on = dict(live, dynamicExecutorAllocation={"enabled": True, "minExecutors": 1, "maxExecutors": 1})
+    assert not cd.pool_matches(on, sent)  # allocation on is a different setting
+    scaling = body()
+    assert not cd.pool_matches(dict(scaling, dynamicExecutorAllocation=dict(scaling["dynamicExecutorAllocation"], maxExecutors=9)), scaling)
+
+
 def test_the_workspace_starter_pool_is_never_a_reuse_candidate():
     starter = {"id": "00000000-0000-0000-0000-000000000000", "name": "Starter Pool", "type": "Workspace",
                "nodeFamily": "MemoryOptimized", "nodeSize": "Medium",
