@@ -667,6 +667,39 @@ def create_app(settings: Optional[Settings] = None, live: Optional[Container] = 
         cards, status = ctx.c.connections.cards_and_status(slug, ctx.key, fabric, fabric_error=why)
         return {"cards": S.dump(cards), "fabric": status}
 
+    @app.get("/projects/{pid}/bindings")
+    def bindings(pid: str, ctx: Ctx = Depends(), _: Principal = need(P.reports_view)):
+        """The ids a person must supply after conversion (notebooks, Spark jobs, dataflows, free connections), with live candidates."""
+        from adf2fabric.project import bindings as B
+
+        slug = ctx.project(pid)
+        items = B.open_items(ctx.c.store, slug)
+        fabric, why = _fabric_or_why(ctx)
+        found, read_error = B.candidates(fabric, ctx.session.destination.get("workspace_id"), items) if items else ({}, "")
+        return {"items": [{**i, "candidates": found.get(i["key"], [])} for i in items], "fabric_note": why or read_error}
+
+    @app.put("/projects/{pid}/bindings")
+    def set_binding(pid: str, body: S.BindingBody, ctx: Ctx = Depends(), _: Principal = need(P.plans_generate)):
+        from adf2fabric.project import bindings as B
+
+        slug = ctx.project(pid)
+        items = B.open_items(ctx.c.store, slug)
+        item = next((i for i in items if i["key"].lower() == body.key.lower()), None)
+        verified: Optional[bool] = None
+        if item is not None and item["kind"] != "connection":  # a notebook, job or dataflow must exist in the chosen workspace; a connection may be visible to others only
+            fabric, _why = _fabric_or_why(ctx)
+            found, _err = B.candidates(fabric, ctx.session.destination.get("workspace_id"), [item])
+            if item["key"] in found:
+                verified = body.value.strip().lower() in {c["id"].lower() for c in found[item["key"]]}
+                if not verified:
+                    raise guards.Rejected(f"That id is not a {item['label'].lower()} in the chosen Fabric workspace.")
+        try:
+            done = B.set_binding(ctx.c.store, slug, body.key, body.value)
+        except B.BindingError as exc:
+            raise guards.Rejected(str(exc)) from None
+        ctx.audit("binding.set", resource="binding", resource_id=done["key"], changed=done["changed"], verified=verified)
+        return {**done, "verified": verified}
+
     @app.put("/projects/{pid}/connections/{ls}/choice")
     def set_choice(pid: str, ls: str, body: S.ChoiceBody, ctx: Ctx = Depends(), _: Principal = need(P.plans_generate)):
         slug = ctx.project(pid)

@@ -186,6 +186,12 @@ class ApiClient:
         self.fabric_read = {**getattr(self, "fabric_read", {}), pid: got.get("fabric") or {}}  # whether Fabric's connections could be read
         return got["cards"]
 
+    def bindings(self, pid: str) -> dict:
+        return self._get(f"/projects/{pid}/bindings")
+
+    def set_binding(self, pid: str, key: str, value: str) -> dict:
+        return self._put(f"/projects/{pid}/bindings", {"key": key, "value": value})
+
     def set_choice(self, pid: str, ls: str, method: str, endpoint: Optional[dict] = None, values: Optional[dict] = None,
                    display_name: Optional[str] = None) -> dict:
         return self._put(f"/projects/{pid}/connections/{ls}/choice",

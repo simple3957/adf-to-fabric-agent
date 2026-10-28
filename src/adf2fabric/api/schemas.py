@@ -49,6 +49,11 @@ class ImportBody(_In):
     pipelines: list[str] = Field(default_factory=list)
 
 
+class BindingBody(_In):
+    key: str = Field(max_length=200)
+    value: str = Field(max_length=64)
+
+
 class ChoiceBody(_In):
     method: str
     endpoint: dict[str, str] = Field(default_factory=dict)

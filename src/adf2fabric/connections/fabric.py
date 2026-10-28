@@ -212,6 +212,10 @@ class FabricService:
     def pipelines(self, workspace_id: str) -> list[dict]:
         return self._paged(f"workspaces/{workspace_id}/dataPipelines", "listing data pipelines")
 
+    def items(self, workspace_id: str, item_type: str) -> list[dict]:
+        """The workspace's items of one type (``Notebook``, ``SparkJobDefinition``, ``Dataflow``...)."""
+        return self._paged(f"workspaces/{workspace_id}/items?type={item_type}", f"listing {item_type} items")
+
     def create_connection(self, body: dict) -> dict:
         resp = self.api.request("POST", "connections", body)
         if resp.status not in (200, 201):

@@ -213,6 +213,9 @@ class DemoFabricService(FabricService):
         return [{"id": "gw-vnet", "type": "VirtualNetwork", "displayName": "Demo VNet gateway"},
                 {"id": "gw-onprem", "type": "OnPremises", "displayName": "Demo on-premises gateway"}]
 
+    def items(self, workspace_id, item_type):
+        return [{"id": "00000000-0000-0000-0000-00000000a001", "displayName": "Demo notebook"}] if item_type == "Notebook" else []
+
     def pipelines(self, workspace_id):
         return []
 

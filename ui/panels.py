@@ -13,6 +13,7 @@ from api_client import ApiClient
 import options
 from components import STATE_LABELS, call, can, empty_state, intent, run_job, short_source, state_badge, status_badge, test_report, typed_confirm
 import panels_assist
+import panels_bindings
 
 
 # ---- 1. discover ----------------------------------------------------------------------------------------------------------
@@ -346,8 +347,8 @@ def convert(api: ApiClient, pid: str, result: dict | None) -> None:
         show = {"error": st.error, "warning": st.warning}.get(f.get("severity"), st.info)
         show(f"**{f['subject']}**: {f['message']}  \n*Fix:* {f['fix']}")
     if result.get("unbound"):
-        st.warning("You still need to supply (pipelines that need these won't be ready to run):\n" +
-                   "".join(f"\n- `{u}`" for u in result["unbound"]))
+        st.warning(f"{len(result['unbound'])} id(s) are still open: pipelines that need them won't be ready to run.")
+    panels_bindings.section(api, pid, result.get("unbound") or [])
     if result.get("filled_at_deploy"):
         st.caption(f"{len(result['filled_at_deploy'])} child pipeline id(s) are filled in automatically when you deploy.")
     if result.get("assisted"):

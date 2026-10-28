@@ -96,6 +96,7 @@ def make_zip(files: dict[str, str | bytes] | None = None, **extra) -> bytes:
 PROTECTED = [("GET", "/me"), ("GET", "/mode"), ("POST", "/mode"), ("GET", "/session"), ("GET", "/projects"), ("GET", "/projects/demo-estate"),
              ("GET", "/projects/demo-estate/conversion"), ("GET", "/projects/demo-estate/handover"), ("GET", "/projects/demo-estate/linked-services"),
              ("GET", "/projects/demo-estate/connections"), ("GET", "/projects/demo-estate/connections/report"), ("GET", "/connectors"), ("GET", "/jobs"),
+             ("GET", "/projects/demo-estate/bindings"), ("PUT", "/projects/demo-estate/bindings"),
              ("GET", "/jobs/abc"), ("GET", "/auth/azure_cli/status"), ("GET", "/auth/azure_cli/accounts"), ("GET", "/auth/azure_cli/tenants"),
              ("POST", "/auth/azure_cli/login"), ("POST", "/auth/azure_cli/logout"), ("GET", "/azure/subscriptions"), ("GET", "/azure/discover"),
              ("PUT", "/session/source"), ("POST", "/test/source"), ("PUT", "/uploads/zip"), ("PUT", "/session/destination"), ("GET", "/fabric/workspaces"),
@@ -213,6 +214,8 @@ ROUTES = [  # (method, path, body, permissions required)
     ("POST", "/projects/demo-estate/stages/convert", {}, {G.projects_view, G.plans_generate}),
     ("POST", "/projects/demo-estate/stages/deploy_dry_run", {"workspace_id": WS}, {G.projects_view, G.plans_generate}),
     ("POST", "/projects/demo-estate/stages/deploy_apply", {"workspace_id": WS}, {G.projects_view, G.migration_execute}),
+    ("GET", "/projects/demo-estate/bindings", None, {G.reports_view}),
+    ("PUT", "/projects/demo-estate/bindings", {"key": "notebook:Nope", "value": "00000000-0000-0000-0000-000000000001"}, {G.plans_generate}),
     ("PUT", "/projects/demo-estate/connections/LS_Sales_SQL/choice", {"method": "sql_login", "values": {"username": "u"}}, {G.plans_generate}),
     ("POST", "/projects/demo-estate/connections/LS_Sales_SQL/test", {}, {G.plans_generate}),
     ("POST", "/projects/demo-estate/connections/apply", {"dry_run": True, "workspace_id": WS}, {G.plans_generate}),
@@ -615,7 +618,7 @@ def test_unexpected_errors_are_generic_and_leak_no_trace_or_path(world, monkeypa
     def boom(*a, **k):
         raise RuntimeError(f"failed reading {world.demo.store.projects_root}\\secret\\file and token ghp_abcdefghijklmnopqrstuvwxyz0123456789")
 
-    monkeypatch.setattr(world.demo.connections, "cards", boom)
+    monkeypatch.setattr(world.demo.connections, "cards_and_status", boom)
     r = world.call("ann", "GET", "/projects/demo-estate/connections")
     assert r.status_code == 500
     assert "Traceback" not in r.text and str(world.demo.store.projects_root) not in r.text and "ghp_" not in r.text and r.json()["error"].startswith("Unexpected RuntimeError")
