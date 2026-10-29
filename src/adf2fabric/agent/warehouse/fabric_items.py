@@ -7,9 +7,10 @@ from __future__ import annotations
 
 from typing import Optional
 
+from adf2fabric.cloud import FABRIC_ENDPOINT
 from adf2fabric.agent.deployment.fabric_deploy import FABRIC_API, DeployError, FabricClient, _error_text
 
-FABRIC_RESOURCE = "https://api.fabric.microsoft.com"
+FABRIC_RESOURCE = FABRIC_ENDPOINT  # from cloud.py: sovereign clouds set ADF2FABRIC_FABRIC_ENDPOINT
 
 
 class WarehouseClient(FabricClient):

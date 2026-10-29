@@ -24,6 +24,8 @@ from adf2fabric.connections.redaction import redact, redact_mapping
 _ROOTS = [Path(tempfile.gettempdir())]  # server paths in a job's log or error are replaced before anyone reads them
 
 QUEUED, RUNNING, SUCCEEDED, FAILED = "queued", "running", "succeeded", "failed"
+KEEP_FINISHED = 200  # finished jobs kept for the Activity page; older ones are dropped so a long-running server does not grow without bound
+MAX_EVENTS = 2000  # log lines kept per job
 
 
 class JobConflict(Exception):
@@ -63,6 +65,7 @@ class JobRegistry:
         with self._lock:
             if project_id and project_id in self._active and self._jobs[self._active[project_id]].state in (QUEUED, RUNNING):
                 raise JobConflict(f"A '{self._jobs[self._active[project_id]].kind}' job is already running for this project.")
+            self._evict()
             job = Job(id=uuid.uuid4().hex[:12], kind=kind, project_id=project_id, org=org, owner=owner)
             self._jobs[job.id] = job
             if project_id:
@@ -70,20 +73,34 @@ class JobRegistry:
         self._pool.submit(self._run, job, fn)
         return job
 
+    def _evict(self) -> None:
+        """Called with the lock held: drop the oldest finished jobs beyond KEEP_FINISHED (running ones are never dropped)."""
+        done = sorted((j for j in self._jobs.values() if j.state in (SUCCEEDED, FAILED)), key=lambda j: j.finished or j.created)
+        for old in done[:max(0, len(done) - KEEP_FINISHED)]:
+            del self._jobs[old.id]
+            if self._active.get(old.project_id or "") == old.id:
+                del self._active[old.project_id or ""]
+
     def _run(self, job: Job, fn) -> None:
-        job.state = RUNNING
+        with self._lock:
+            job.state = RUNNING
 
         def log(message: str) -> None:
-            job.events.append({"t": round(time.time() - job.created, 2), "message": scrub(redact(message), _ROOTS)})
+            with self._lock:
+                if len(job.events) < MAX_EVENTS:
+                    job.events.append({"t": round(time.time() - job.created, 2), "message": scrub(redact(message), _ROOTS)})
 
         try:
-            job.result = redact_mapping(fn(log))  # type: ignore[assignment]
-            job.state = SUCCEEDED
+            result = redact_mapping(fn(log))
+            with self._lock:
+                job.result, job.state = result, SUCCEEDED  # type: ignore[assignment]
         except Exception as exc:  # noqa: BLE001 - reported, redacted; the traceback never leaves the server
-            job.error = scrub(redact(f"{type(exc).__name__}: {exc}"), _ROOTS)[:400]
-            job.state = FAILED
+            error = scrub(redact(f"{type(exc).__name__}: {exc}"), _ROOTS)[:400]
+            with self._lock:
+                job.error, job.state = error, FAILED
         finally:
-            job.finished = time.time()
+            with self._lock:
+                job.finished = time.time()
 
     def get(self, job_id: str) -> Optional[Job]:
         return self._jobs.get(job_id)

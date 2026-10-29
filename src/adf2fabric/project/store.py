@@ -22,6 +22,8 @@ from typing import Any
 import yaml
 from pydantic import BaseModel
 
+from adf2fabric.paths import repo_root
+from adf2fabric.project.locks import write_atomic
 from adf2fabric.project.dependencies import DependencyInventory
 from adf2fabric.project.validation import ValidationReport
 from adf2fabric.project.workloads import WorkloadManifest
@@ -39,8 +41,7 @@ from adf2fabric.project.reconstruction import ProjectReconstruction
 from adf2fabric.project.source import SourceManifest
 from adf2fabric.project.models import Consultation, Project
 
-# Repo root is three parents up from this file: src/adf2fabric/project/store.py
-REPO_ROOT = Path(__file__).resolve().parents[3]
+REPO_ROOT = repo_root()  # the checkout, ADF2FABRIC_HOME, or (after a plain pip install) the current directory
 DEFAULT_PROJECTS_ROOT = REPO_ROOT / "projects"
 
 # Name of the source subfolder inside a project directory. This is the
@@ -59,6 +60,12 @@ _SAFE_LOADER = getattr(yaml, "CSafeLoader", yaml.SafeLoader)
 
 def _safe_load(stream):
     return yaml.load(stream, Loader=_SAFE_LOADER)  # noqa: S506  # nosec B506: a safe loader, never the full one
+
+
+def _write_yaml(path: Path, data: Any) -> None:
+    """Dump through a temp file and replace, so a crash or a second writer never leaves a half-written record."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    write_atomic(path, yaml.safe_dump(data, sort_keys=False))
 
 
 def slugify(name: str) -> str:
@@ -108,8 +115,7 @@ class ProjectStore:
         self.project_dir(project_id).mkdir(parents=True, exist_ok=True)
         data = json.loads(manifest.model_dump_json())
         path = self.source_manifest_path(project_id)
-        with path.open("w", encoding="utf-8") as f:
-            yaml.safe_dump(data, f, sort_keys=False)
+        _write_yaml(path, data)
         return path
 
     def load_source_manifest(self, project_id: str) -> SourceManifest:
@@ -149,8 +155,7 @@ class ProjectStore:
         # as human-readable YAML.
         data = json.loads(project.model_dump_json())
         path = project_dir / "project.yaml"
-        with path.open("w", encoding="utf-8") as f:
-            yaml.safe_dump(data, f, sort_keys=False)
+        _write_yaml(path, data)
         return path
 
     def load(self, project_id: str) -> Project:
@@ -188,8 +193,7 @@ class ProjectStore:
         # as human-readable YAML. No secrets are present on the model by design.
         data = json.loads(consultation.model_dump_json())
         path = self.consultation_path(project_id)
-        with path.open("w", encoding="utf-8") as f:
-            yaml.safe_dump(data, f, sort_keys=False)
+        _write_yaml(path, data)
         return path
 
     def load_consultation(self, project_id: str) -> Consultation:
@@ -223,8 +227,7 @@ class ProjectStore:
         # as human-readable YAML. No secrets are present on the model by design.
         data = json.loads(discovery.model_dump_json())
         path = self.repository_discovery_path(project_id)
-        with path.open("w", encoding="utf-8") as f:
-            yaml.safe_dump(data, f, sort_keys=False)
+        _write_yaml(path, data)
         return path
 
     def load_repository_discovery(self, project_id: str) -> RepositoryDiscovery:
@@ -253,8 +256,7 @@ class ProjectStore:
         # as human-readable YAML. No secrets are present on the model by design.
         data = json.loads(discovery.model_dump_json())
         path = self.adls_discovery_path(project_id)
-        with path.open("w", encoding="utf-8") as f:
-            yaml.safe_dump(data, f, sort_keys=False)
+        _write_yaml(path, data)
         return path
 
     def load_adls_discovery(self, project_id: str) -> AdlsDiscovery:
@@ -285,8 +287,7 @@ class ProjectStore:
         # as human-readable YAML. No secrets are present on the model by design.
         data = json.loads(discovery.model_dump_json())
         path = self.adls_paths_discovery_path(project_id)
-        with path.open("w", encoding="utf-8") as f:
-            yaml.safe_dump(data, f, sort_keys=False)
+        _write_yaml(path, data)
         return path
 
     def load_adls_paths_discovery(self, project_id: str) -> AdlsPathsDiscovery:
@@ -315,8 +316,7 @@ class ProjectStore:
         # as human-readable YAML. No secrets are present on the model by design.
         data = json.loads(discovery.model_dump_json())
         path = self.sql_discovery_path(project_id)
-        with path.open("w", encoding="utf-8") as f:
-            yaml.safe_dump(data, f, sort_keys=False)
+        _write_yaml(path, data)
         return path
 
     def load_sql_discovery(self, project_id: str) -> SqlDiscovery:
@@ -347,8 +347,7 @@ class ProjectStore:
         # as human-readable YAML. No secrets are present on the model by design.
         data = json.loads(discovery.model_dump_json())
         path = self.sql_structural_discovery_path(project_id)
-        with path.open("w", encoding="utf-8") as f:
-            yaml.safe_dump(data, f, sort_keys=False)
+        _write_yaml(path, data)
         return path
 
     def load_sql_structural_discovery(self, project_id: str) -> SqlStructuralDiscovery:
@@ -377,8 +376,7 @@ class ProjectStore:
         # as human-readable YAML. No secrets are present on the model by design.
         data = json.loads(discovery.model_dump_json())
         path = self.adf_discovery_path(project_id)
-        with path.open("w", encoding="utf-8") as f:
-            yaml.safe_dump(data, f, sort_keys=False)
+        _write_yaml(path, data)
         return path
 
     def load_adf_discovery(self, project_id: str) -> AdfDiscovery:
@@ -409,8 +407,7 @@ class ProjectStore:
         # as human-readable YAML. No secrets are present on the model by design.
         data = json.loads(discovery.model_dump_json())
         path = self.adf_semantic_discovery_path(project_id)
-        with path.open("w", encoding="utf-8") as f:
-            yaml.safe_dump(data, f, sort_keys=False)
+        _write_yaml(path, data)
         return path
 
     def load_adf_semantic_discovery(self, project_id: str) -> AdfSemanticDiscovery:
@@ -438,8 +435,7 @@ class ProjectStore:
     def save_dependency_inventory(self, project_id: str, inventory: DependencyInventory, report_markdown: str = "") -> Path:
         self.discovery_dir(project_id).mkdir(parents=True, exist_ok=True)
         path = self.dependency_inventory_path(project_id)
-        with path.open("w", encoding="utf-8") as f:
-            yaml.safe_dump(json.loads(inventory.model_dump_json()), f, sort_keys=False)
+        _write_yaml(path, json.loads(inventory.model_dump_json()))
         if report_markdown:
             self.dependency_report_path(project_id).write_text(report_markdown, encoding="utf-8")
         return path
@@ -470,8 +466,7 @@ class ProjectStore:
     def save_workload_manifest(self, project_id: str, manifest: WorkloadManifest, report_markdown: str = "") -> Path:
         self.workloads_dir(project_id).mkdir(parents=True, exist_ok=True)
         path = self.workload_manifest_path(project_id)
-        with path.open("w", encoding="utf-8") as f:
-            yaml.safe_dump(json.loads(manifest.model_dump_json()), f, sort_keys=False)
+        _write_yaml(path, json.loads(manifest.model_dump_json()))
         if report_markdown:
             self.workload_report_path(project_id).write_text(report_markdown, encoding="utf-8")
         return path
@@ -493,8 +488,7 @@ class ProjectStore:
     def save_validation_report(self, project_id: str, report: ValidationReport) -> Path:
         path = self.validation_path(project_id)
         path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("w", encoding="utf-8") as f:
-            yaml.safe_dump(json.loads(report.model_dump_json()), f, sort_keys=False)
+        _write_yaml(path, json.loads(report.model_dump_json()))
         return path
 
     def load_validation_report(self, project_id: str) -> ValidationReport:
@@ -519,10 +513,7 @@ class ProjectStore:
         """Atomically replace one provisioning record (write a temp file, then rename), so a crash never leaves half a journal."""
         self.provisioning_dir(project_id).mkdir(parents=True, exist_ok=True)
         path = self.provisioning_path(project_id, name)
-        tmp = path.with_suffix(".yaml.tmp")
-        with tmp.open("w", encoding="utf-8") as f:
-            yaml.safe_dump(json.loads(model.model_dump_json()), f, sort_keys=False)
-        tmp.replace(path)
+        _write_yaml(path, json.loads(model.model_dump_json()))
         return path
 
     def load_provisioning(self, project_id: str, name: str, cls: Any) -> Any:
@@ -549,8 +540,7 @@ class ProjectStore:
         # on the model by design (it is built from the secret-masked semantic record).
         data = json.loads(conversion.model_dump_json())
         path = self.conversion_path(project_id)
-        with path.open("w", encoding="utf-8") as f:
-            yaml.safe_dump(data, f, sort_keys=False)
+        _write_yaml(path, data)
         return path
 
     def load_conversion(self, project_id: str) -> ProjectConversion:
@@ -595,8 +585,7 @@ class ProjectStore:
         self.reconstruction_dir(project_id).mkdir(parents=True, exist_ok=True)
         data = json.loads(record.model_dump_json())
         path = self.reconstruction_path(project_id)
-        with path.open("w", encoding="utf-8") as f:
-            yaml.safe_dump(data, f, sort_keys=False)
+        _write_yaml(path, data)
         return path
 
     def load_reconstruction(self, project_id: str) -> ProjectReconstruction:

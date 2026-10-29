@@ -10,7 +10,9 @@ from pathlib import Path
 
 import yaml
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+from adf2fabric.paths import repo_root
+
+REPO_ROOT = repo_root()
 DEFAULT_CONFIG_PATH = REPO_ROOT / "config" / "config.yaml"
 
 _DEFAULTS = {

@@ -13,6 +13,7 @@ from datetime import date
 from typing import Any, Optional, Protocol
 
 from adf2fabric.agent.assessment import compute_rates as R
+from adf2fabric.cloud import ARM_ENDPOINT
 
 RETAIL_PRICES = R.AZURE_RETAIL_PRICES
 CURRENCIES = ("USD", "INR")
@@ -89,7 +90,7 @@ def workspace_info(transport: Any, token: str, resource_id: str) -> Optional[tup
     """(region, tier) of a Databricks workspace from ARM, e.g. ("centralindia", "premium"); None if not readable."""
     if not resource_id or not resource_id.lower().startswith("/subscriptions/"):
         return None
-    resp = transport.get(f"https://management.azure.com{resource_id}?api-version={WORKSPACE_API_VERSION}",
+    resp = transport.get(f"{ARM_ENDPOINT}{resource_id}?api-version={WORKSPACE_API_VERSION}",
                          headers={"Authorization": f"Bearer {token}"}, timeout=60)
     if getattr(resp, "status_code", None) != 200:
         return None

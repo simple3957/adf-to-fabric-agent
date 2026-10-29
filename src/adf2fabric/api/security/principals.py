@@ -113,14 +113,25 @@ class UserStore:
     def __init__(self, root: Path):
         self.path = Path(root) / "_auth" / "users.yaml"
         self._lock = threading.Lock()
+        self._cache: tuple[tuple[int, int], dict[str, UserRecord]] | None = None  # ((mtime_ns, size), users): parsed again only when the file changed
 
     def _load(self) -> dict[str, UserRecord]:
-        if not self.path.exists():
+        try:
+            st = self.path.stat()
+        except OSError:
+            self._cache = None
             return {}
+        stamp = (st.st_mtime_ns, st.st_size)
+        cached = self._cache
+        if cached is not None and cached[0] == stamp:
+            return dict(cached[1])  # a copy: callers change it before saving
         try:
             raw = yaml.safe_load(self.path.read_text(encoding="utf-8")) or {}
-            return {u["id"].lower(): UserRecord.model_validate(u) for u in raw.get("users", [])}
+            users = {u["id"].lower(): UserRecord.model_validate(u) for u in raw.get("users", [])}
+            self._cache = (stamp, users)
+            return dict(users)
         except Exception as exc:  # noqa: BLE001 - a damaged file must lock everyone out, not let everyone in
+            self._cache = None
             raise UserError(f"The user store {self.path.name} cannot be read ({type(exc).__name__}); refusing all sign-ins until it is fixed.") from None
 
     def _save(self, users: dict[str, UserRecord]) -> None:
@@ -132,6 +143,7 @@ class UserStore:
         except OSError:
             pass
         tmp.replace(self.path)
+        self._cache = None  # a write in this process is never hidden by a timestamp that did not move
 
     def has_users(self) -> bool:
         """Whether any user has ever been created (a cheap stat, so it can be asked on every request)."""
@@ -203,7 +215,7 @@ class UserStore:
         """The principal for a token, or None. Constant-time over all users so timing does not reveal which hash was close."""
         digest = hash_token(token)
         found: Optional[UserRecord] = None
-        for rec in self._load().values():
+        for rec in self._load().values():  # all users are compared on purpose: no early exit to time
             if hmac.compare_digest(rec.token_sha256, digest) and not rec.disabled:
                 found = rec
         return make_principal(found.id, found.org, found.roles, found.grants, "token") if found else None

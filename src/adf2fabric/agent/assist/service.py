@@ -20,11 +20,12 @@ from typing import Any, Optional
 
 from adf2fabric.agent.assist import checks, context, model as model_mod, templates
 from adf2fabric.agent.assist.model import ModelError
+from adf2fabric.paths import repo_root
 from adf2fabric.project.locks import lock_for, write_atomic
 
 MAX_NAMES = 25
 MAX_ACCEPT_BYTES = 1024 * 1024
-REPO_ROOT = Path(__file__).resolve().parents[4]
+REPO_ROOT = repo_root()
 QUEUED, RUNNING, FAILED = "queued", "running", "failed"
 _JOBS: dict[tuple[str, str], dict[str, Any]] = {}  # (project dir, pipeline lower) -> {"state", "error", "started_at"}; memory only
 _JOBS_LOCK = threading.Lock()
