@@ -46,6 +46,30 @@ the existing nine steps and flows.
   * *Run and compare*: which pipelines and how long to wait for each run.
   The server checks every choice again (names, convert-only choices, the real-run rules).
 
+## Each question is asked once
+
+- **Pipeline scope.** Convert and Deploy share one scope per project (`options.scope_picker`): the approved brief's scope is the first default, a choice made in
+  one step is where the next starts, and an empty scope means all. The picker stays closed unless someone opens it. Running real pipelines is the exception:
+  it is never prefilled, because running everything is never the default.
+- **Linked services of one type.** On Connect, a sign-in method and details saved for one service are offered to the other not-yet-ready services of the same
+  connector type (`panels.share_targets`), ticked by default and listed. Each keeps its own server or account from the source. An existing-connection id is
+  never shared (it belongs to one account), and a secret typed once is held for each service that takes the answer.
+- **Not merged, on purpose.** The typed confirmations (CREATE, DEPLOY, APPLY, RUN) stay on every step that changes Fabric: they are the protection, not a
+  repeated question.
+
+## What the UI does not cover yet (CLI only)
+
+Checked against the API routes and the CLI on 2026-10-29. Everything the API exposes has a UI use except the admin routes; these CLI features have no UI:
+
+| Feature | CLI | Why it matters for "everything intact" |
+|---|---|---|
+| Generate, approve, deploy and record a run of Spark notebooks and jobs | `workloads-generate`, `workloads-approve`, `workloads-deploy`, `workloads-record-run` | The UI only assesses them (Review > Compute) |
+| Deploy proposed Spark pools and environments | `compute-deploy` | Review shows the proposals; creating them is CLI |
+| Storage map, OneLake shortcuts | `storage-map`, `create-shortcut` | Needed before Convert can repoint storage |
+| Notebook deploy, Git commit | `deploy-notebook`, `git-commit` | Notebooks are not deployed by Deploy |
+| Diagnosis (fix-first ranking) | `diagnose` | The Report step shows states, not the ranked fixes |
+| Users and audit log | `auth-user-*`, `audit-verify` (the API has admin routes, no UI) | Administration |
+
 ## Things that go wrong in use, and what the UI does
 
 * **Reload, new tab, or a long job.** Step confirmations are kept on the server per project, and the Migration page shows a job that is

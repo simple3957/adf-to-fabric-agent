@@ -21,6 +21,16 @@ One-page map. Each stage reads the previous stage's output from `projects/<name>
                           pipelines, compute pools/environments, schedules
 ```
 
+Stages added around the main line (each has its own doc; CLAUDE.md has the table):
+
+- `agent/dependencies`, `agent/storage`, `agent/workloads`: dependency order, ADLS-to-OneLake mapping, Spark workload migration.
+- `agent/provisioning`: approval-gated Fabric target provisioning.
+- `agent/validation`, `agent/diagnose`, `agent/structure`: independent validation, first-unmet-stage diagnosis, pipeline composition and run report.
+- `agent/assist`: optional, off by default, model-assisted drafts a person must accept.
+- `agent/deployment/verify.py`, `deploy-notebook`, `git-commit`: post-deploy run comparison, notebook deploy, Git commit.
+
+Where the working folders are: `paths.repo_root()` (the checkout, `ADF2FABRIC_HOME`, or the current directory after a plain `pip install`).
+
 Cross-cutting:
 
 - **Connections** (`connections/`, `connectivity/`): linked-service verdicts, credential cards, connection creation. See `docs/connections.md`, `docs/linked-service-mapping.md`.

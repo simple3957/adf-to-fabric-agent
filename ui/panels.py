@@ -56,11 +56,34 @@ def _grid(items: list, render) -> None:
                 render(item)
 
 
-def _editor(api: ApiClient, pid: str, card: dict, known: dict[str, str]) -> None:
+def share_targets(siblings: list[dict] | None, method_id: str, method: dict) -> list[dict]:
+    """The other linked services of the same connector type that can take the answer just given, so it is asked once for the type.
+
+    Never an existing-connection id (it belongs to one account), and only services where that sign-in method is offered."""
+    if any(f["name"] == "connection_id" for f in method.get("fields", [])):
+        return []
+    return [s for s in (siblings or []) if method_id in {o["id"] for o in s.get("auth_options", []) if o.get("available")} and not _needs_own_answer(s)]
+
+
+def _needs_own_answer(card: dict) -> bool:
+    """A service whose answer is not the same as its siblings': it reaches its data through a gateway, or a required server value is not in the source."""
+    if (card.get("runtime") or {}).get("fabric_path") not in (None, "cloud_connection"):
+        return True
+    return any(f.get("required") and not f.get("value") for f in card.get("endpoint_fields", []))
+
+
+def state_text(card: dict) -> str:
+    """The status words for a card. 'Test failed' is only true after a test: a card that merely lacks a required value says so instead."""
+    if card.get("state") == "validation_failed" and card.get("missing"):
+        return "Needs details"
+    return STATE_LABELS.get(card["state"], (card["state"],))[0]
+
+
+def _editor(api: ApiClient, pid: str, card: dict, known: dict[str, str], siblings: list[dict] | None = None) -> None:
     """The one linked service being set up: its state once, the few facts that matter, and one form."""
     name = card["name"]
     held = set(card.get("secrets_held", []))
-    st.markdown(f"#### {name} &nbsp; {state_badge(card['state'])}" + (" 🔑" if held else ""))
+    st.markdown(f"#### {name} &nbsp; {':orange-badge[Needs details]' if state_text(card) == 'Needs details' else state_badge(card['state'])}" + (" 🔑" if held else ""))
     st.caption(f"{card.get('adf_type') or '?'} → {card.get('connector_label') or 'no matching Fabric connector'}"
                f"{' (' + card['fabric_connection_type'] + ')' if card.get('fabric_connection_type') else ''}"
                f" · authored auth: {card.get('authentication_type') or '-'}")
@@ -150,6 +173,15 @@ def _editor(api: ApiClient, pid: str, card: dict, known: dict[str, str]) -> None
 
         _grid(method.get("fields", []), method_field)
         display = st.text_input("Fabric connection name (optional)", value=chosen.get("display_name") or "", key=f"d-{name}")
+        # The same questions for every service of one connector type are answered once: an existing-connection id belongs to one account, so it is never shared.
+        same_as = share_targets(siblings, method_id, method)
+        left_out = [s["name"] for s in (siblings or []) if s not in same_as]
+        same = bool(same_as) and st.checkbox(
+            f"Use this sign-in method and these details for the {len(same_as)} other {card.get('connector_label') or 'matching'} linked service(s) still to do",
+            value=True, key=f"same-{name}", help="Each keeps its own server or account from the source. Applies to: " + ", ".join(s["name"] for s in same_as[:8]) +
+            (" …" if len(same_as) > 8 else "") + ". You can still change any of them afterwards.")
+        if same_as and left_out:
+            st.caption("Not included, because each needs its own answer (a gateway, a server that is not in the source, or no such method): " + ", ".join(left_out[:8]))
         a, b, _ = st.columns([1, 1.5, 2.5])
         save = a.form_submit_button("Save")
         save_test = b.form_submit_button("Save and test", type="primary")
@@ -160,6 +192,12 @@ def _editor(api: ApiClient, pid: str, card: dict, known: dict[str, str]) -> None
                 for field, value in secrets.items():
                     if value:
                         call(api.put_secret, pid, name, field, value)
+                for sib in (same_as if same else []):
+                    own = {f["name"]: f["value"] for f in sib.get("endpoint_fields", []) if f.get("value")}
+                    if call(api.set_choice, pid, sib["name"], method_id, own, {k: v for k, v in values.items() if v}, None) is not None:
+                        for field, value in secrets.items():
+                            if value:
+                                call(api.put_secret, pid, sib["name"], field, value)
                 if save_test:
                     st.session_state["conn_test"] = (name, call(api.test_connection, pid, name))
                 st.rerun()
@@ -228,7 +266,7 @@ def connect(api: ApiClient, pid: str, cards: list[dict] | None, workspace_id: st
             known.setdefault(c.get("fabric_connection_type") or "?", {})[m["display_name"]] = m["id"]
 
     rows = [{"Linked service": c["name"], "Type": c.get("adf_type") or "?",
-             "Fabric connector": c.get("connector_label") or "none", "Status": STATE_LABELS.get(c["state"], (c["state"],))[0]} for c in cards]
+             "Fabric connector": c.get("connector_label") or "none", "Status": state_text(c)} for c in cards]
     event = st.dataframe(rows, hide_index=True, on_select="rerun", selection_mode="single-row", key="conn-table", width="stretch",
                          column_config={"Linked service": st.column_config.TextColumn(width="medium"),
                                         "Type": st.column_config.TextColumn(width="small"),
@@ -240,7 +278,9 @@ def connect(api: ApiClient, pid: str, cards: list[dict] | None, workspace_id: st
         st.caption("Showing the first one still to do. Select a row above to set up another." if first_open is not None
                    else "Every linked service is set. Select a row above to change one.")
     with st.container(border=True):
-        _editor(api, pid, card, known.get(card.get("fabric_connection_type") or "?", {}))
+        kind = card.get("fabric_connection_type")
+        _editor(api, pid, card, known.get(kind or "?", {}),
+                [c for c in cards if c["name"] != card["name"] and kind and c.get("fabric_connection_type") == kind and c["state"] not in READY])
 
     st.markdown("#### Create the connections in Fabric")
     if not workspace_id:
@@ -300,9 +340,7 @@ def convert(api: ApiClient, pid: str, result: dict | None) -> None:
     known = [p["name"] for p in (call(api.inventory, pid) or {}).get("pipelines", [])]
     ver = brief["version"] if brief else 0
     with options.card("convert", "Conversion options", "What this run converts and how. A choice here is for this run only.", options.source_label(brief)):
-        options.seed(f"conv-pipes-{pid}-{ver}", [p for p in (brief or {}).get("pipelines") or [] if p in known])
-        pipes = st.multiselect("Pipelines to convert (empty = all)", known, key=f"conv-pipes-{pid}-{ver}",
-                               help="A pipeline that calls another needs that one converted too, or already deployed.")
+        pipes = options.scope_picker(pid, known, f"conv-pipes-{pid}-{ver}", brief)
         options.seed(f"conv-store-{pid}-{ver}", "lakehouse" if (brief or {}).get("lakehouse") else "connections")
         route = st.radio("Storage", ["connections", "lakehouse"], key=f"conv-store-{pid}-{ver}", horizontal=True,
                          format_func=lambda v: {"connections": "Keep Fabric connections to the original storage",
@@ -343,6 +381,12 @@ def convert(api: ApiClient, pid: str, result: dict | None) -> None:
             col.metric(k.replace("_", " "), n)
     st.dataframe([{"pipeline": p["name"], "status": p["status"], "structurally valid": "✅" if p["structurally_valid"] else "❌",
                    "ready to run": "✅" if p["runtime_ready"] else "⬜"} for p in result.get("pipelines", [])], hide_index=True)
+    triggers = list({t["name"]: t for t in result.get("triggers", [])}.values())
+    if triggers:
+        st.markdown("##### Triggers")
+        st.dataframe([{"trigger": t["name"], "type": t.get("type") or "?", "Fabric schedule": str(t.get("schedule", "manual")).replace("_", " "),
+                       "what to do": t.get("action") or ""} for t in triggers], hide_index=True)
+        st.caption("Schedules are created switched off and never duplicated. 'manual' means it must be recreated by hand in Fabric.")
     for f in result.get("preflight", []):
         show = {"error": st.error, "warning": st.warning}.get(f.get("severity"), st.info)
         show(f"**{f['subject']}**: {f['message']}  \n*Fix:* {f['fix']}")
@@ -369,9 +413,7 @@ def deploy(api: ApiClient, pid: str, dest: dict, conversion: dict | None, result
     ver = brief["version"] if brief else 0
     with options.card("deploy", "Deployment options", "What is published, and how. Deploying always starts with a dry run of exactly these pipelines.",
                       options.source_label(brief)):
-        scoped = [p for p in ((brief or {}).get("pipelines") or []) if p in known]
-        options.seed(f"dep-pipes-{pid}-{ver}", scoped if (brief or {}).get("pipelines") is not None else [])
-        pipes = st.multiselect("Pipelines (empty = all converted)", known, key=f"dep-pipes-{pid}-{ver}")
+        pipes = options.scope_picker(pid, known, f"dep-pipes-{pid}-{ver}", brief)
         children = st.checkbox("Include child pipelines they call", value=True, key="dep-children",
                                help="A caller is refused unless every child is selected or already in the workspace.")
         unbound = st.checkbox("Allow unbound connections (not recommended)", value=False, key="dep-unbound",
@@ -381,7 +423,11 @@ def deploy(api: ApiClient, pid: str, dest: dict, conversion: dict | None, result
     a.markdown(theme.badge("Dry run: changes nothing", "info"), unsafe_allow_html=True)
     if a.button("Dry run", type="primary", key="dep-dry"):
         stage = "deploy_dry_run"
-    dry_done = bool(result)
+    refused = [r["name"] for r in (result or {}).get("results", []) if r.get("action") in ("failed", "refused")]
+    dry_done = bool(result) and not refused  # the server wants a dry run with nothing refused
+    if result and not result.get("applied") and refused:
+        st.warning(f"The dry run refused {len(refused)} pipeline(s): {', '.join(refused[:4])}. Fix the cause shown below (usually an unbound connection) "
+                   "and run the dry run again; the real deploy unlocks only after a clean one.")
     b.markdown(theme.badge("Deploy: changes Fabric", "warning"), unsafe_allow_html=True)
     with b:
         sure = typed_confirm("Deploy for real: this creates or updates pipelines in Fabric", "DEPLOY", "dep-sure", disabled=not dry_done)

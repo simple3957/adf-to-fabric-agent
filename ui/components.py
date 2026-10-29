@@ -144,8 +144,12 @@ def run_job(start: Callable[[], dict], label: str, intent_name: Optional[str] = 
     try:
         job = start()
     except ApiError as err:
-        if err.status == 409:
+        if intent_name and err.status == 422:  # a key the server bound to a different request (options changed): use a new one next time
+            st.session_state.get("intents", {}).pop(intent_name, None)
+        if err.status == 409 and "already running" in err.message:  # a job in progress; any other 409 has its own reason, which is all that is shown
             st.warning(err.message + " Watch it from the banner at the top of this page; a second one is not started.")
+        elif err.status == 409:
+            st.warning(err.message)
         else:
             show_error(err)
         return None
@@ -175,7 +179,9 @@ def watch_job(job: dict, label: str, intent_name: Optional[str] = None) -> Optio
         else:
             box.update(label=f"{label}: failed after {final.get('elapsed', 0):g}s", state="error")
             st.error(final.get("error") or "The job failed.")
-    st.session_state.setdefault("job_history", []).insert(0, final)
+    history = st.session_state.setdefault("job_history", [])
+    history.insert(0, final)
+    del history[50:]  # a long session does not keep every job's result in memory
     if intent_name:
         st.session_state.get("intents", {}).pop(intent_name, None)
     return final

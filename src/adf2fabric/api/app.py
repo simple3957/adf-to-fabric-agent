@@ -18,6 +18,7 @@ import json
 import re
 import shutil
 import tempfile
+import threading
 import uuid
 from pathlib import Path
 from typing import Any, Optional
@@ -78,6 +79,7 @@ def create_app(settings: Optional[Settings] = None, live: Optional[Container] = 
     app = FastAPI(title="ADF to Fabric Migration Accelerator API", version="0.1.0", docs_url=None, redoc_url=None, openapi_url=None)
     app.state.containers = {"live": live or Container(settings), "demo": demo}
     app.state.modes = {}  # scoped session key -> "live" | "demo"
+    app.state.idem_lock = threading.RLock()  # route handlers run on worker threads: check, submit and remember a key as one step
     app.state.idem = {}  # (scoped session key, Idempotency-Key) -> (time, response body): a repeated submission returns the first result
     root = app.state.containers["live"].store.projects_root
     sec = security or SecuritySettings(root=root)
@@ -783,9 +785,10 @@ def create_app(settings: Optional[Settings] = None, live: Optional[Container] = 
         import time as _t
 
         now = _t.time()
-        for old in [x for x, v in app.state.idem.items() if now - v[0] > IDEMPOTENCY_TTL]:
-            del app.state.idem[old]
-        hit = app.state.idem.get(k) if k else None
+        with app.state.idem_lock:
+            for old in [x for x, v in list(app.state.idem.items()) if now - v[0] > IDEMPOTENCY_TTL]:
+                app.state.idem.pop(old, None)
+            hit = app.state.idem.get(k) if k else None
         if hit and hit[2] != sig:  # the same key for a different request would hand back a job the caller did not ask for
             raise HTTPException(422, "This Idempotency-Key was already used for a different request. Use a new key for a new request.")
         return JSONResponse(status_code=202, content=hit[1], headers={"Idempotent-Replay": "true"}) if hit else None
@@ -794,7 +797,8 @@ def create_app(settings: Optional[Settings] = None, live: Optional[Container] = 
         import time as _t
 
         if k:
-            app.state.idem[k] = (_t.time(), body, sig)
+            with app.state.idem_lock:
+                app.state.idem[k] = (_t.time(), body, sig)
         return body
 
     @app.post("/projects/{pid}/stages/{stage}", status_code=202)
@@ -864,16 +868,17 @@ def create_app(settings: Optional[Settings] = None, live: Optional[Container] = 
                 raise HTTPException(409, "The approved consultation brief does not allow real runs (validation depth, or data restrictions). Change the brief to allow them.")
         key = _idem_key(ctx, request)
         sig = _idem_sig(slug, f"stage.{stage}", body)
-        replay = _idem_replay(key, sig)
-        if replay is not None:
-            return replay
-        opts = body.model_dump()
-        if body.run:  # after the replay check: a repeated submission starts nothing and is not a new request
-            ctx.audit("verify.run", "requested", resource="project", resource_id=slug, workspace=ws, pipelines=len(body.pipelines))
-        ctx.audit(f"stage.{stage}", "requested", resource="project", resource_id=slug, workspace=ws or "")
-        job = ctx.c.jobs.submit(stage, slug, lambda log: run_stage(ctx.c, ctx.session, slug, stage, log, opts),
-                                org=ctx.principal.org, owner=ctx.principal.id).public()
-        return _idem_remember(key, job, sig)
+        with app.state.idem_lock:  # two requests with one key must not both start a job
+            replay = _idem_replay(key, sig)
+            if replay is not None:
+                return replay
+            opts = body.model_dump()
+            if body.run:  # after the replay check: a repeated submission starts nothing and is not a new request
+                ctx.audit("verify.run", "requested", resource="project", resource_id=slug, workspace=ws, pipelines=len(body.pipelines))
+            ctx.audit(f"stage.{stage}", "requested", resource="project", resource_id=slug, workspace=ws or "")
+            job = ctx.c.jobs.submit(stage, slug, lambda log: run_stage(ctx.c, ctx.session, slug, stage, log, opts),
+                                    org=ctx.principal.org, owner=ctx.principal.id).public()
+            return _idem_remember(key, job, sig)
 
     def _pub_job(j, since: int = 0) -> dict:
         """A job as the browser sees it: the result passes through the same redaction as every other view (paths, secrets and code are dropped)."""
@@ -910,6 +915,11 @@ def create_app(settings: Optional[Settings] = None, live: Optional[Container] = 
         if not ctx.c.store.has_adf_semantic_discovery(slug):
             raise HTTPException(409, "Discovery has not run: the waves are built from what was discovered.")
         return views.waves(ctx.c.store, slug, _roots())
+
+    @app.get("/projects/{pid}/confidence")
+    def confidence_view(pid: str, ctx: Ctx = Depends(), _: Principal = need(P.reports_view)):
+        slug = ctx.project(pid)
+        return views.confidence(ctx.c.store, slug, _roots())
 
     @app.get("/projects/{pid}/compatibility")
     def compatibility_view(pid: str, ctx: Ctx = Depends(), _: Principal = need(P.reports_view)):
@@ -1203,24 +1213,25 @@ def create_app(settings: Optional[Settings] = None, live: Optional[Container] = 
                 raise HTTPException(409, "Run the dry run of this plan first.")
         key = _idem_key(ctx, request)
         sig = _idem_sig(slug, "provisioning.apply", body)
-        replay = _idem_replay(key, sig)
-        if replay is not None:
-            return replay
-        ctx.audit("provisioning.apply", "requested" if body.apply else "dry_run", resource="project", resource_id=slug)
+        with app.state.idem_lock:  # two requests with one key must not both start a job
+            replay = _idem_replay(key, sig)
+            if replay is not None:
+                return replay
+            ctx.audit("provisioning.apply", "requested" if body.apply else "dry_run", resource="project", resource_id=slug)
 
-        def work(log) -> dict[str, Any]:
-            fab, _arm = ctx.c.gateways(ctx.session)
-            log("applying the approved steps" if body.apply else "dry run: nothing will be written")
-            try:
-                run, report = prov.apply(ctx.c.store, slug, fab, None, do_apply=body.apply)
-            except ApplyRefused as exc:
-                raise StageError(str(exc)) from None
-            failed = sum(1 for r in run.results if r.status.value in ("failed", "mismatch"))
-            return {"message": ("Applied. Read the verification below: only it says what exists." if body.apply else "Dry run finished: nothing was changed."),
-                    "dry_run": run.dry_run, "failed": failed, "verified": bool(report and report.all_verified)}
+            def work(log) -> dict[str, Any]:
+                fab, _arm = ctx.c.gateways(ctx.session)
+                log("applying the approved steps" if body.apply else "dry run: nothing will be written")
+                try:
+                    run, report = prov.apply(ctx.c.store, slug, fab, None, do_apply=body.apply)
+                except ApplyRefused as exc:
+                    raise StageError(str(exc)) from None
+                failed = sum(1 for r in run.results if r.status.value in ("failed", "mismatch"))
+                return {"message": ("Applied. Read the verification below: only it says what exists." if body.apply else "Dry run finished: nothing was changed."),
+                        "dry_run": run.dry_run, "failed": failed, "verified": bool(report and report.all_verified)}
 
-        return _idem_remember(key, ctx.c.jobs.submit("provision_apply" if body.apply else "provision_dry_run", slug, work, org=ctx.principal.org,
-                                                      owner=ctx.principal.id).public(), sig)
+            return _idem_remember(key, ctx.c.jobs.submit("provision_apply" if body.apply else "provision_dry_run", slug, work, org=ctx.principal.org,
+                                                          owner=ctx.principal.id).public(), sig)
 
     @app.post("/projects/{pid}/provisioning/verify", status_code=202)
     def provisioning_verify(pid: str, ctx: Ctx = Depends(), _: Principal = need(P.plans_generate)):

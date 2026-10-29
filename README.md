@@ -7,7 +7,8 @@ The stages that exist today turn an Azure Data Factory estate into Fabric pipeli
 (intake -> discovery -> parse -> convert -> deploy), plus a connection/authentication layer and a FastAPI backend
 for a UI (Streamlit, built separately). The broader lifecycle below is the product
 direction; [Implementation Status](#implementation-status) states exactly what is built.
-Everything is deterministic: **no LLM or generative model is used anywhere.**
+Conversion is deterministic: a model never produces Fabric JSON. The one optional exception, off by default, is
+model-assisted drafts of corrected ADF source that a person must accept (`ADF2FABRIC_LLM=on`, see `docs/assisted-drafts.md`).
 
 ---
 

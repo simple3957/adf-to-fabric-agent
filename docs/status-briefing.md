@@ -1,5 +1,7 @@
 # Status briefing (2026-10-16)
 
+> Older than the code: since this audit `verify` (run check), `deploy-notebook`, `git-commit`, provisioning, workloads and validation were added. See CLAUDE.md for the current command list.
+
 Based on a read-only code audit plus one full test run: **1068 passed, 1 skipped** (about 4.5 min). All tests are offline and mocked. No stage was run against a live Fabric workspace in this audit.
 
 ## Where we are

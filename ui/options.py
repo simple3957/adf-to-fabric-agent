@@ -46,6 +46,25 @@ def seed(key: str, value) -> None:
     st.session_state.setdefault(key, value)
 
 
+def scope_picker(pid: str, known: list[str], key: str, brief: Optional[dict], label: str = "Narrow to these pipelines") -> list[str]:
+    """Which pipelines this run covers, asked once per project instead of once per step.
+
+    The first answer anywhere (Convert or Deploy) is remembered for the project and is where the next step starts, so the same question is not put
+    again; with nothing chosen the whole estate is meant, and the picker stays closed. The approved brief's scope is the very first default."""
+    saved = st.session_state.setdefault("scope", {}).get(pid)
+    start = saved if saved is not None else ((brief or {}).get("pipelines") or [])
+    start = [p for p in start if p in known]
+    picked = list(start)
+    st.caption(f"Scope: {'all ' + str(len(known)) if not start else str(len(start)) + ' of ' + str(len(known))} pipeline(s)"
+               + (" · remembered from an earlier step" if saved is not None else ""))
+    with st.expander("Change the scope", expanded=False):
+        picked = st.multiselect(label, known, default=start, key=key,
+                                help="Empty means all. A pipeline that calls another needs that one converted or already deployed. This choice is kept for the "
+                                     "next steps, so it is not asked again.")
+    st.session_state["scope"][pid] = picked
+    return picked
+
+
 def lakehouse_problem(name: str) -> str:
     name = name.strip()
     if not name:

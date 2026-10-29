@@ -222,7 +222,7 @@ ROUTES = [  # (method, path, body, permissions required)
     ("POST", "/projects/demo-estate/connections/apply", {"dry_run": False, "workspace_id": WS}, {G.plans_generate, G.migration_execute}),
     ("POST", "/projects/demo-estate/connections/workspace-identity", {"workspace_id": WS}, {G.provision_approve, G.migration_execute}),
     ("GET", "/projects/demo-estate/inventory", None, {G.reports_view}),
-    ("GET", "/projects/demo-estate/waves", None, {G.reports_view}), ("GET", "/projects/demo-estate/compatibility", None, {G.reports_view}),
+    ("GET", "/projects/demo-estate/waves", None, {G.reports_view}), ("GET", "/projects/demo-estate/confidence", None, {G.reports_view}), ("GET", "/projects/demo-estate/compatibility", None, {G.reports_view}),
     ("GET", "/projects/demo-estate/validation", None, {G.reports_view}), ("GET", "/projects/demo-estate/report", None, {G.reports_view}),
     ("GET", "/projects/demo-estate/provisioning", None, {G.reports_view}),
     ("POST", "/projects/demo-estate/stages/dependencies", {}, {G.projects_view, G.discovery_run}),

@@ -55,6 +55,11 @@ class ApiClient:
         except requests.ConnectionError:
             raise ApiError(0, f"Cannot reach the API at {self.base_url}.",
                            ["Start it with: python -m adf2fabric.api"]) from None
+        except requests.Timeout:
+            raise ApiError(0, f"The API at {self.base_url} did not answer within {int(self.timeout)} s.",
+                           ["Try again. A job that was already started keeps running on the server."]) from None
+        except requests.RequestException as exc:
+            raise ApiError(0, f"The request to the API failed ({type(exc).__name__}).") from None
         if resp.status_code >= 400:
             try:
                 body = resp.json()
@@ -62,7 +67,12 @@ class ApiClient:
                 body = {}
             raise ApiError(resp.status_code, body.get("error") or f"HTTP {resp.status_code}",
                            body.get("actions"), body.get("details"), str(getattr(resp, "headers", {}).get("x-request-id", "") or ""))
-        return resp.json() if resp.content else None
+        if not resp.content:
+            return None
+        try:
+            return resp.json()
+        except ValueError:
+            raise ApiError(resp.status_code, "The API answered with something that is not JSON.") from None
 
     def _get(self, path: str, **params: Any) -> Any:
         return self._request("GET", path, params={k: v for k, v in params.items() if v is not None} or None)
@@ -257,6 +267,9 @@ class ApiClient:
     def waves(self, pid: str) -> dict:
         return self._get(f"/projects/{pid}/waves")
 
+    def confidence(self, pid: str) -> dict:
+        return self._get(f"/projects/{pid}/confidence")
+
     def compatibility(self, pid: str) -> dict:
         return self._get(f"/projects/{pid}/compatibility")
 
@@ -329,9 +342,17 @@ class ApiClient:
     def wait_job(self, job: dict, on_event: Optional[Callable[[dict], None]] = None, interval: float = 1.0,
                  timeout: float = 1800) -> dict:
         """Poll a job until it finishes, passing each new log event to ``on_event``. Returns the final job."""
-        since, end = 0, time.time() + timeout
+        since, end, failures = 0, time.time() + timeout, 0
         while True:
-            current = self.job(job["id"], since)
+            try:
+                current = self.job(job["id"], since)
+                failures = 0
+            except ApiError as err:
+                failures += 1
+                if err.status != 0 or failures > 3:  # a brief network error while polling is not the job failing
+                    raise
+                time.sleep(interval)
+                continue
             for event in current.get("events", []):
                 if on_event:
                     on_event(event)
