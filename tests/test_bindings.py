@@ -111,3 +111,15 @@ def test_the_api_refuses_a_notebook_id_that_is_not_in_the_workspace(api):
     r = api.put("/projects/test-proj/bindings", json={"key": "notebook:NB_X", "value": "44444444-4444-4444-4444-444444444444"})
     assert r.status_code in (400, 422) and "not a fabric notebook" in r.text.lower()
     assert not (api.store.conversion_dir("test-proj") / "resolutions.json").exists()
+
+
+def test_a_lakehouse_the_convert_step_pointed_at_is_offered_to_bind(tmp_path):
+    """Choosing the lakehouse option leaves <item:lakehouse:NAME>; without an entry here the five refused pipelines had nothing to click to fix them."""
+    store, pid, _ = _convert(tmp_path, FILES)
+    conv = store.load_conversion(pid)
+    conv.workspace_items.append(Prerequisite(kind="workspace_item", name="lakehouse:LH_Migration", detail="the lakehouse the datasets point at",
+                                             binding="<item:lakehouse:LH_Migration>", needed_by=["Copy_X"]))
+    store.save_conversion(pid, conv)
+    item = next(i for i in B.open_items(store, pid) if i["key"] == "lakehouse:LH_Migration")
+    assert item["item_type"] == "Lakehouse" and item["label"] == "Fabric lakehouse" and item["bound"] is False
+    assert B.set_binding(store, pid, "lakehouse:LH_Migration", NB)["changed"] is True

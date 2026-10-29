@@ -438,7 +438,7 @@ def deploy(api: ApiClient, pid: str, dest: dict, conversion: dict | None, result
     if stale_dry:
         st.info("The scope or options changed since the last dry run. Run the dry run again before deploying.")
     if result and not result.get("applied") and refused:
-        st.warning(f"The dry run refused {len(refused)} pipeline(s): {', '.join(refused[:4])}. Fix the cause shown below (usually an unbound connection) "
+        st.warning(f"The dry run refused {len(refused)} pipeline(s): {', '.join(refused[:4])}{f' and {len(refused) - 4} more' if len(refused) > 4 else ''}. Fix the cause shown below (usually an unbound connection) "
                    "and run the dry run again; the real deploy unlocks only after a clean one.")
         passed = [r["name"] for r in result["results"] if r.get("action") not in ("failed", "refused") and r["name"] in known]
         if passed:

@@ -23,6 +23,7 @@ ITEM_KINDS: dict[str, tuple[str, str]] = {
     "notebook": ("Fabric notebook", "Notebook"),
     "sparkjob": ("Fabric Spark job definition", "SparkJobDefinition"),
     "dataflow": ("Fabric dataflow", "Dataflow"),
+    "lakehouse": ("Fabric lakehouse", "Lakehouse"),  # the Convert step's lakehouse option leaves <item:lakehouse:NAME> until the item's id is known
 }
 FABRIC_PIPELINE_CONNECTION = "FabricDataPipelines"  # the connection type behind an Invoke pipeline activity
 
@@ -109,7 +110,7 @@ def candidates(fabric: Any, workspace_id: Optional[str], items: list[dict[str, A
         by_type: dict[str, list[dict[str, str]]] = {}
         for t in {i["item_type"] for i in items if i["item_type"] != "Connection"}:
             if not workspace_id:
-                return {}, "Choose a Fabric workspace on the Connections page to list its notebooks, jobs and dataflows. You can still paste an id."
+                return {}, "Choose a Fabric workspace on the Connections page to list its notebooks, jobs, dataflows and lakehouses. You can still paste an id."
             by_type[t] = [{"id": str(x.get("id", "")), "name": str(x.get("displayName", ""))} for x in fabric.items(workspace_id, t)]
         conns = fabric.connections() if any(i["item_type"] == "Connection" for i in items) else []
         for i in items:

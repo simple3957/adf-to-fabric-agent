@@ -41,7 +41,9 @@ def section(api: ApiClient, pid: str, unbound: list[str]) -> None:
                 st.info("Saved. Convert again to use it.")
             names = {f"{c['name']} · {c['id'][:8]}…": c["id"] for c in i.get("candidates") or []}
             with st.form(f"bind-{i['key']}", border=False):
-                picked = st.selectbox(f"{i['label']} in Fabric", [CHOOSE, *names], key=f"bind-pick-{i['key']}") if names else CHOOSE
+                same_name = next((n for n in names if n.startswith(f"{i['name']} · ")), None)  # the item the pipelines were pointed at by name
+                picked = st.selectbox(f"{i['label']} in Fabric", [CHOOSE, *names], index=([CHOOSE, *names].index(same_name) if same_name else 0),
+                                      key=f"bind-pick-{i['key']}") if names else CHOOSE
                 pasted = st.text_input("…or paste its id", value="" if names else (i.get("value") or ""), key=f"bind-id-{i['key']}",
                                        help="Fabric: open the item, the id is the last GUID in the address bar (connections: Settings > Manage connections and gateways).")
                 if st.form_submit_button("Save", disabled=not can("plans:generate")):
