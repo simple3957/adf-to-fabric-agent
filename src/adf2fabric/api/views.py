@@ -183,6 +183,13 @@ def _dependencies(store: ProjectStore, pid: str) -> dict[str, Any]:
             "access_checks": "run" if inv.checks_requested else "not run: nothing external was contacted"}
 
 
+def confidence(store: ProjectStore, pid: str, roots: tuple[Path, ...] = ()) -> dict[str, Any]:
+    """The confidence range per area and per item, with the criteria behind it and the questions that would narrow it. Read-only; names, states and counts."""
+    from adf2fabric.agent.confidence import engine
+
+    return sanitize(engine.assess(store, pid), roots)
+
+
 def waves(store: ProjectStore, pid: str, roots: tuple[Path, ...] = ()) -> dict[str, Any]:
     """The dependency waves and the order the pipelines are deployed in, with what each object needs and what needs it.
 

@@ -2365,6 +2365,35 @@ def diagnose_cmd(project_name: str, workspace_id: str | None, auth: str, **auth_
     click.echo(f"  report: {out / 'diagnosis.md'}")
 
 
+@cli.command(name="confidence")
+@click.option("--project", "project_name", required=True, help="Project name (`convert` must have run).")
+def confidence_cmd(project_name: str) -> None:
+    """How much of the migration is established: a range per area and per item, from the criteria met, and what to find out first. Read-only."""
+    import json
+
+    from adf2fabric.agent.confidence import engine
+
+    store = ProjectStore(projects_root(load_config()))
+    pid = slugify(project_name)
+    d = engine.assess(store, pid)
+    if not d.get("ready"):
+        click.secho(f"Confidence: {d['message']}", fg="red", err=True)
+        sys.exit(1)
+    out = store.project_dir(pid) / "confidence"
+    out.mkdir(parents=True, exist_ok=True)
+    (out / "confidence.json").write_text(json.dumps(d, indent=2), encoding="utf-8")
+    (out / "confidence.md").write_text(engine.render(d), encoding="utf-8")
+    o = d["overall"] or {}
+    click.echo(f"CONFIDENCE  project: {pid}  overall: {o.get('low')}% to {o.get('high')}% ({str(o.get('label', '')).replace('_', ' ')}); {o.get('known')}% of it checked")
+    for a in d["areas"].values():
+        click.echo(f"  {a['title']}: {a['low']}% to {a['high']}%")
+    if d["stale"]:
+        click.secho("  The source changed after the conversion: nothing proven earlier is assumed to hold.", fg="yellow")
+    for i, q in enumerate(d["questions"][:5], 1):
+        click.echo(f"  {i}. {q['question']}  (+{q['raises_low_by']} low, +{q['raises_high_by']} high)")
+    click.echo(f"  report: {out / 'confidence.md'}")
+
+
 @cli.command(name="handover")
 @click.option("--project", "project_name", required=True, help="Project name (`convert` must have run).")
 def handover_cmd(project_name: str) -> None:
