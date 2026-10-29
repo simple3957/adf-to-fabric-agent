@@ -91,3 +91,26 @@ def test_ui_client_turns_timeouts_into_api_errors():
     with pytest.raises(ApiError) as exc:
         ApiClient("s", base_url="http://x", http=Http())._get("/health")
     assert exc.value.status == 0 and "did not answer" in exc.value.message
+
+
+def test_a_databricks_workspace_url_is_read_from_domain():
+    """The Connect step asked for a Workspace URL that the linked service already held (authored as `domain`)."""
+    from adf2fabric.agent.discovery.adf_semantic.parser import parse_linked_service
+
+    ls = parse_linked_service({"name": "LS_Databricks", "properties": {"type": "AzureDatabricks", "typeProperties": {
+        "domain": "https://adb-1.1.azuredatabricks.net", "authentication": "MSI"}}}, "linkedService/LS_Databricks.json")
+    assert ls.endpoint == "https://adb-1.1.azuredatabricks.net"
+
+
+def test_a_run_older_than_the_latest_deploy_does_not_prove_the_new_definition(tmp_path):
+    import json, time
+    from adf2fabric.agent.deployment import record as deploy_record, verify
+
+    old = "2026-10-23T06:53:50.8566667"  # Fabric reports 7 fractional digits and no zone
+    p = verify.record_path(tmp_path)
+    p.parent.mkdir(parents=True)
+    p.write_text(json.dumps({"PL_A": {"verdict": "matches", "fabric_status": "Completed", "ran_at": old}}), encoding="utf-8")
+    assert verify.current_record(tmp_path)["PL_A"]["verdict"] == "matches"  # nothing was deployed since: the run stands
+    deploy_record.note_apply(tmp_path, "ws", [type("R", (), {"name": "PL_A", "action": "update"})()], now=time.time())
+    got = verify.current_record(tmp_path)["PL_A"]
+    assert got["verdict"] == "not_run" and got["stale_run"] and "deploy" in got["detail"]

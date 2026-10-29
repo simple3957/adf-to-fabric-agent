@@ -289,7 +289,8 @@ def run_stage(c: Container, session: Session, pid: str, stage: str, log: Log, op
     if stage == "deploy_apply":
         deploy_record.note_apply(c.store.project_dir(pid), workspace, results)
     else:
-        deploy_record.note_dry_run(c.store.project_dir(pid), workspace, [i.name for i in items], sum(1 for r in results if r.action in ("failed", "refused")))
+        deploy_record.note_dry_run(c.store.project_dir(pid), workspace, [i.name for i in items], sum(1 for r in results if r.action in ("failed", "refused")),
+                                   allow_unbound=bool(options.get("allow_unbound")))
     return {"applied": stage == "deploy_apply",
             "results": [{"name": r.name, "action": r.action, "detail": r.detail, "children": r.children}
                         for r in results]}

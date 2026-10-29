@@ -499,6 +499,24 @@ def load_record(path: Path) -> dict[str, dict]:
     return data if isinstance(data, dict) else {}
 
 
+def current_record(project_dir: Path) -> dict[str, dict]:
+    """The run-and-compare record as evidence about what is deployed NOW: a run that ended before the pipeline's latest deploy ran the previous
+    definition, so it is reported as ``not_run`` (with why) instead of vouching for the new one."""
+    from adf2fabric.agent.deployment import record as deploy_record
+
+    record = load_record(record_path(project_dir))
+    deployed = {k.lower(): v for k, v in (deploy_record.load(project_dir).get("pipelines") or {}).items() if isinstance(v, dict)}
+    out: dict[str, dict] = {}
+    for name, entry in record.items():
+        row = deployed.get(name.lower())
+        ran = _parse(entry.get("ran_at"))
+        if row and row.get("ok") and ran is not None and ran.timestamp() < float(row.get("at") or 0):
+            entry = {**entry, "verdict": "not_run", "detail": "Its last recorded run is older than the latest deploy, so it does not vouch for what is deployed now. Run it again.",
+                     "stale_run": True}
+        out[name] = entry
+    return out
+
+
 def last_completed(entry: Optional[dict]) -> Optional[dict]:
     """The last completed Fabric run kept for a pipeline (a later failed run does not replace it)."""
     if not entry:

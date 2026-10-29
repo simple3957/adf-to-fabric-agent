@@ -11,7 +11,7 @@ import json
 from dataclasses import dataclass
 from typing import Optional
 
-from adf2fabric.agent.deployment.verify import load_record, record_path
+from adf2fabric.agent.deployment.verify import current_record, load_record, record_path
 from adf2fabric.project.conversion import ProjectConversion
 from adf2fabric.project.store import ProjectStore
 
@@ -96,7 +96,7 @@ def render(store: ProjectStore, pid: str) -> str:
     conv = store.load_conversion(pid)
     project = store.load(pid)
     verification = load_record(record_path(store.project_dir(pid)))
-    ready = assess(conv, verification)
+    ready = assess(conv, current_record(store.project_dir(pid)))
     stale = bool(project.repository and conv.source_commit_sha != project.repository.commit_sha)
     by_level: dict[str, int] = {}
     for r in ready:

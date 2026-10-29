@@ -462,7 +462,8 @@ def parse_linked_service(data: dict, path: str) -> AdfLinkedService:
     tp = props.get("typeProperties") if isinstance(props.get("typeProperties"), dict) else {}
 
     endpoint = None
-    for key in _ENDPOINT_KEYS:
+    keys = (*_ENDPOINT_KEYS, "domain") if props.get("type") == "AzureDatabricks" else _ENDPOINT_KEYS  # a Databricks workspace URL is authored as 'domain'
+    for key in keys:
         if key in tp:
             endpoint = safe_scalar(tp.get(key))
             if endpoint is not None:

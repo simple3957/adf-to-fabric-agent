@@ -36,9 +36,11 @@ def _write(project_dir: Path, data: dict[str, Any]) -> None:
     tmp.replace(p)
 
 
-def note_dry_run(project_dir: Path, workspace: str, pipelines: Iterable[str], failed: int, now: Optional[float] = None) -> None:
+def note_dry_run(project_dir: Path, workspace: str, pipelines: Iterable[str], failed: int, now: Optional[float] = None,
+                 allow_unbound: bool = False) -> None:
     data = load(project_dir)
-    data["last_dry_run"] = {"at": now or time.time(), "workspace": workspace, "pipelines": sorted(set(pipelines)), "refused": failed}
+    data["last_dry_run"] = {"at": now or time.time(), "workspace": workspace, "pipelines": sorted(set(pipelines)), "refused": failed,
+                            "allow_unbound": bool(allow_unbound)}
     _write(project_dir, data)
 
 
@@ -53,10 +55,15 @@ def note_apply(project_dir: Path, workspace: str, results: Iterable[Any], now: O
     _write(project_dir, data)
 
 
-def dry_run_ok(project_dir: Path, workspace: str, pipelines: Iterable[str], max_age: float = 3600.0, now: Optional[float] = None) -> bool:
-    """True when a dry run of (at least) these pipelines in this workspace finished, with nothing refused, within ``max_age`` seconds."""
+def dry_run_ok(project_dir: Path, workspace: str, pipelines: Iterable[str], max_age: float = 3600.0, now: Optional[float] = None,
+               allow_unbound: bool = False) -> bool:
+    """True when a dry run of (at least) these pipelines in this workspace finished, with nothing refused, within ``max_age`` seconds.
+
+    A dry run that allowed unbound connections does not vouch for a real deploy that does not: that one would refuse what the preview let through."""
     last = load(project_dir).get("last_dry_run") or {}
     if not last or last.get("workspace") != workspace or last.get("refused"):
+        return False
+    if last.get("allow_unbound") and not allow_unbound:
         return False
     if (now or time.time()) - float(last.get("at", 0)) > max_age:
         return False

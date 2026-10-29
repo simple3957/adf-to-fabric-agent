@@ -311,9 +311,16 @@ def test_a_stale_dry_run_does_not_license_a_deploy(world, monkeypatch):
     prepare(world)
     run(world, "oscar", "deploy_dry_run", {"workspace_id": DEMO_WS, "allow_unbound": True})
     real = deploy_record.dry_run_ok
-    monkeypatch.setattr(deploy_record, "dry_run_ok", lambda d, w, p, max_age=3600.0, now=None: real(d, w, p, max_age, now=time.time() + 7200))
+    monkeypatch.setattr(deploy_record, "dry_run_ok", lambda d, w, p, max_age=3600.0, now=None, **kw: real(d, w, p, max_age, now=time.time() + 7200, **kw))
     r = stage(world, "oscar", "deploy_apply", {"workspace_id": DEMO_WS, "allow_unbound": True, "confirm": True})
     assert r.status_code == 409
+
+
+def test_a_dry_run_that_allowed_unbound_does_not_license_a_stricter_deploy(world):
+    prepare(world)
+    run(world, "oscar", "deploy_dry_run", {"workspace_id": DEMO_WS, "allow_unbound": True})
+    r = stage(world, "oscar", "deploy_apply", {"workspace_id": DEMO_WS, "confirm": True})  # the preview let through what this would refuse
+    assert r.status_code == 409 and "same options" in r.json()["error"]
 
 
 def test_states_move_only_on_evidence_and_never_skip_ahead(world):

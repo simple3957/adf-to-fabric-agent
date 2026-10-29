@@ -424,7 +424,11 @@ def deploy(api: ApiClient, pid: str, dest: dict, conversion: dict | None, result
     if a.button("Dry run", type="primary", key="dep-dry"):
         stage = "deploy_dry_run"
     refused = [r["name"] for r in (result or {}).get("results", []) if r.get("action") in ("failed", "refused")]
-    dry_done = bool(result) and not refused  # the server wants a dry run with nothing refused
+    sig = (tuple(sorted(pipes)), bool(children), bool(unbound))
+    stale_dry = bool(result) and not result.get("applied") and st.session_state.get("deploy_sig", {}).get(pid) != sig
+    dry_done = bool(result) and not refused and not stale_dry  # the server wants a dry run of these pipelines and options with nothing refused
+    if stale_dry:
+        st.info("The scope or options changed since the last dry run. Run the dry run again before deploying.")
     if result and not result.get("applied") and refused:
         st.warning(f"The dry run refused {len(refused)} pipeline(s): {', '.join(refused[:4])}. Fix the cause shown below (usually an unbound connection) "
                    "and run the dry run again; the real deploy unlocks only after a clean one.")
@@ -440,6 +444,7 @@ def deploy(api: ApiClient, pid: str, dest: dict, conversion: dict | None, result
                       "Deploy (dry run)" if stage == "deploy_dry_run" else "Deploy", intent_name=stage)
         if job and job["state"] == "succeeded":
             st.session_state.setdefault("deploy", {})[pid] = job["result"]
+            st.session_state.setdefault("deploy_sig", {})[pid] = sig
             st.rerun()
     if result:
         st.markdown(theme.badge("Deployed to Fabric", "success") if result.get("applied")

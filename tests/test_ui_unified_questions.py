@@ -105,3 +105,17 @@ def test_a_409_that_is_not_a_running_job_is_not_told_to_watch_the_banner():
         st.warning = real
     assert shown[0] == "Run a dry run of exactly these pipelines first."
     assert "banner" in shown[1]
+
+
+def test_every_permission_the_ui_asks_about_is_a_real_one():
+    """`can("plans_generate")` (underscore) never matches the server's `plans:generate`, so the button it guards stays disabled for a signed-in person."""
+    import re
+    from pathlib import Path
+    from adf2fabric.api.security.permissions import Permission
+
+    real = {p.value for p in Permission}
+    asked = {}
+    for f in (Path(__file__).resolve().parents[1] / "ui").rglob("*.py"):
+        for m in re.finditer(r"\bcan\(\s*[\"']([^\"']+)[\"']\s*\)", f.read_text(encoding="utf-8")):
+            asked.setdefault(m.group(1), f.name)
+    assert not {k: v for k, v in asked.items() if k not in real}, "can() was asked about a permission that does not exist"

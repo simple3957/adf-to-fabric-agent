@@ -91,7 +91,7 @@ def pipeline_states(store: ProjectStore, pid: str) -> dict[str, dict[str, Any]]:
     conv = _try(lambda: store.load_conversion(pid)) if store.has_conversion(pid) else None
     conv_by = {p.source_pipeline.lower(): p for p in conv.pipelines} if conv else {}
     rec = deploy_record.load(store.project_dir(pid)).get("pipelines", {})
-    verified = verify_mod.load_record(verify_mod.record_path(store.project_dir(pid)))
+    verified = verify_mod.current_record(store.project_dir(pid))
     out: dict[str, dict[str, Any]] = {}
     for p in d.pipelines:
         confs = [x.confidence.value for x in _walk(p.activities)]

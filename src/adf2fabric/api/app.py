@@ -841,8 +841,8 @@ def create_app(settings: Optional[Settings] = None, live: Optional[Container] = 
             names = [p.fabric_pipeline_name for p in conv.pipelines if not wanted or p.source_pipeline.lower() in wanted]
             if not names:
                 raise HTTPException(409, "None of the chosen pipelines is converted.")
-            if not deploy_record.dry_run_ok(ctx.c.store.project_dir(slug), ws or "", names):
-                raise HTTPException(409, "Run a dry run of exactly these pipelines first (it must finish with nothing refused, within the last hour).")
+            if not deploy_record.dry_run_ok(ctx.c.store.project_dir(slug), ws or "", names, allow_unbound=body.allow_unbound):
+                raise HTTPException(409, "Run a dry run of exactly these pipelines first, with the same options (it must finish with nothing refused, within the last hour).")
         if stage == "deploy_apply" and body.allow_unbound:
             ctx.require(P.migration_execute)
         if body.run:

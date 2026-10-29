@@ -44,7 +44,7 @@ def section(api: ApiClient, pid: str, unbound: list[str]) -> None:
                 picked = st.selectbox(f"{i['label']} in Fabric", [CHOOSE, *names], key=f"bind-pick-{i['key']}") if names else CHOOSE
                 pasted = st.text_input("…or paste its id", value="" if names else (i.get("value") or ""), key=f"bind-id-{i['key']}",
                                        help="Fabric: open the item, the id is the last GUID in the address bar (connections: Settings > Manage connections and gateways).")
-                if st.form_submit_button("Save", disabled=not can("plans_generate")):
+                if st.form_submit_button("Save", disabled=not can("plans:generate")):
                     value = pasted.strip() or names.get(picked, "")
                     if not value:
                         st.warning("Choose an item or paste its id.")

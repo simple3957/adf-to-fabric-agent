@@ -27,7 +27,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Iterable, Optional
 
-from adf2fabric.agent.deployment.verify import load_record, record_path
+from adf2fabric.agent.deployment.verify import current_record
 
 MET, UNMET, UNKNOWN, NA = "met", "unmet", "unknown", "not_applicable"
 
@@ -365,7 +365,7 @@ def assess(store: Any, pid: str, now: Optional[datetime] = None) -> dict[str, An
     conv = store.load_conversion(pid)
     project = store.load(pid)
     stale = bool(project.repository and conv.source_commit_sha != project.repository.commit_sha)
-    verification = load_record(record_path(store.project_dir(pid)))
+    verification = current_record(store.project_dir(pid))
     errors: dict[str, list[Any]] = {}
     for f in conv.preflight:
         if f.severity == "error":
