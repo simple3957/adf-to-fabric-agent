@@ -202,6 +202,9 @@ class ConnectionService:
             result.items.append(item)
             if item.bound and not dry_run:
                 bindings[card.name] = item.connection_ids[0]
+                if card.choice is None and item.origin == "auto_matched":  # keep what was matched: without a choice the card would still say "not configured"
+                    self.set_choice(pid, ConnectionChoice(linked_service=card.name, method="existing_connection",
+                                                          values={"connection_id": item.connection_ids[0]}, origin="auto_matched"))
             self._states[(pid, card.name)] = item.state
         if bindings and not dry_run:
             result.resolutions_file = self._merge_resolutions(pid, bindings)

@@ -119,3 +119,18 @@ def test_every_permission_the_ui_asks_about_is_a_real_one():
         for m in re.finditer(r"\bcan\(\s*[\"']([^\"']+)[\"']\s*\)", f.read_text(encoding="utf-8")):
             asked.setdefault(m.group(1), f.name)
     assert not {k: v for k, v in asked.items() if k not in real}, "can() was asked about a permission that does not exist"
+
+
+def test_plan_step_can_be_passed_with_resources_still_to_create():
+    """Provisioning a Spark pool is optional for pipelines: the step must not lock Convert until Fabric has been written to."""
+    import sys
+    from pathlib import Path
+
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "ui"))
+    from journey import plan_facts
+
+    prov = {"available": True, "blockers": [], "summary": {"to_create": 2, "to_configure": 0, "blocked": 0, "conflicts": 0}, "approval": {}, "verification": {}, "run": None}
+    f = plan_facts(prov)
+    assert f.complete and f.attention and "not created" in f.attention
+    blocked = plan_facts({**prov, "blockers": ["no capacity"]})
+    assert not blocked.complete  # a real blocker still stops the step

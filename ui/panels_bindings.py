@@ -20,7 +20,7 @@ def section(api: ApiClient, pid: str, unbound: list[str]) -> None:
     got = call(api.bindings, pid) or {}
     items = got.get("items") or []
     mine = {i["name"] for i in items} | {i["key"] for i in items}
-    elsewhere = [u for u in unbound if u not in mine and not u.startswith("connection:")]
+    elsewhere = [u for u in unbound if u not in mine and not u.startswith("connection:") and u != "workspace"]
     open_ = [i for i in items if not i["bound"]]
     if not items and not elsewhere:
         return
@@ -51,4 +51,4 @@ def section(api: ApiClient, pid: str, unbound: list[str]) -> None:
                     elif call(api.set_binding, pid, i["key"], value) is not None:
                         st.rerun()
     if elsewhere:
-        st.info("Set on the **Connect** step (they belong to linked services): " + ", ".join(f"`{u}`" for u in elsewhere))
+        st.info("Set on the **Connect** step (a linked service's connection; one you skipped there stays open): " + ", ".join(f"`{u}`" for u in elsewhere))

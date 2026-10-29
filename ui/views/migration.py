@@ -41,6 +41,10 @@ provisioning = call(api.provisioning, pid) if discovered else None
 validation = call(api.validation, pid) if discovered else None
 report = call(api.report, pid) if discovered else None
 brief = call(api.brief, pid) if discovered else None
+if deployed is None and report:  # a deploy made earlier (another session, a reload) is on the server: do not make the person deploy again to see it
+    done = [p["name"] for p in report.get("pipelines", []) if p.get("state") in ("deployed", "runtime_validated")]
+    if done:
+        deployed = {"applied": True, "restored": True, "results": [{"name": n, "action": "deployed", "detail": "from the deployment record of an earlier session", "children": []} for n in done]}
 
 facts = {"discover": discover_facts(project, found), "review": review_facts(inventory), "consult": consult_facts(brief),
          "connect": connect_facts(cards),
@@ -156,7 +160,7 @@ with right:
                 (f"Go to {nxt.step.title} →" if nxt else None), True
         elif f.complete:
             icon = "⚠️" if f.attention else "✅"
-            title = f"{cur.step.title} finished" + (f" · {f.attention}" if f.attention else "")
+            title = f.headline or (f"{cur.step.title} finished" + (f" · {f.attention}" if f.attention else ""))
             detail = (f"{f.outcome} Review the issues above, or continue and come back to them." if f.attention
                       else f"{f.outcome} If everything looks right, confirm it to move on.")
             action = (f"Continue to {nxt.step.title} anyway →" if f.attention else f"Looks good, continue to {nxt.step.title} →") \
@@ -168,7 +172,7 @@ with right:
             detail = ("Confirmed earlier, but its results are gone. " if cur.stale else "") + f.waiting
             action, enabled = (f"Continue to {nxt.step.title} →" if nxt else "Finish migration"), False
         with st.container(key="nextbar"):
-            a, b, c = st.columns([5, 1.4, 2.2], vertical_alignment="center")
+            a, b, c = st.columns([4, 1.3, 3.2], vertical_alignment="center")
             a.markdown(f'<div class="ma-next"><span class="ic">{icon}</span><div><strong>{theme.esc(title)}</strong>'
                        f'<span class="muted">{theme.esc(detail)}</span></div></div>',
                        unsafe_allow_html=True)

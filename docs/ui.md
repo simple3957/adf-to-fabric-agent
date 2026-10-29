@@ -92,6 +92,18 @@ Checked against the API routes and the CLI on 2026-10-29. Everything the API exp
 * Completion is the backend's word: the final banner says "Migration verified" only when the validation engine reports `MIGRATION_VERIFIED`
   (a passing runtime stage); otherwise it says the migration is not verified.
 
+## No dead ends (found by running the real workflow, 2026-10-29)
+
+* **Connect**: a matching connection that already exists in Fabric is bound by *Preview / Create* with "reuse" ticked (the default), and the choice is
+  saved, so the card reads "ready" and the step can finish. The step opens on the first service that can be set up, not on an unsupported one.
+* **Plan target**: creating a Spark pool or environment is optional for pipelines, so unapplied items let the step be passed with a warning; real
+  blockers still stop it.
+* **Deploy**: a dry run that refuses pipelines (an unbound connection) offers "Leave out the refused and dry-run the other N". A dry run on its own
+  lets the step be passed with the headline "Dry run done, nothing deployed yet"; the Report still shows those pipelines as not deployed. The real
+  deploy stays locked until a clean dry run of the same pipelines *and options* (the server compares them).
+* A deploy made earlier is read back from the server, so a reload does not say "Deploy needs to run again".
+* A run older than the pipeline's latest deploy never counts as proof (`verify.current_record`).
+
 ## Tests
 
 `tests/test_api_views.py` (authorisation, redaction, failure states, progress, duplicate submissions, production mode),

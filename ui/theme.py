@@ -45,6 +45,10 @@ code { background: var(--surface-3); color: var(--em); }
 .ma-brand { display:flex; align-items:center; gap:10px; font-family: var(--head); font-weight:800; font-size:16.5px; white-space:nowrap; }
 .ma-brand-mark { flex:none; width:30px; height:30px; border-radius:50%; display:grid; place-items:center; color: var(--on-accent); font-size:15px;
   background: var(--grad); box-shadow: 0 0 0 4px var(--em-soft); }
+.ma-legend { display:grid; grid-template-columns:repeat(auto-fill,minmax(190px,1fr)); gap:14px 18px; margin:4px 0 18px; }
+.ma-legend-cell { display:flex; flex-direction:column; gap:6px; min-width:0; }
+.ma-legend-help { font-size:12.5px; line-height:1.45; color: var(--muted); }
+.ma-brand { padding-right:18px; }
 .ma-brand small { font-weight:600; color: var(--muted); font-family: Inter, sans-serif; }
 [data-testid="stPageLink"] a { border-radius: 999px; padding: 2px 12px; }
 .ma-dots { display:flex; gap:12px; font-size:13px; color: var(--muted); }

@@ -625,6 +625,8 @@ def test_apply_reuses_an_existing_connection_and_auto_matches_only_exact_endpoin
     m = next(i for i in matched.items if i.linked_service == "LS_SQL")
     assert (m.action, m.origin, m.bound) == ("reused", "auto_matched", True) and "matched automatically" in m.detail
     assert next(i for i in matched.items if i.linked_service == "LS_PARAM").action != "reused"  # no exact match, so never auto-bound
+    card = next(c for c in s.cards(pid, "sess", FakeFabric(existing=existing[:1])) if c.name == "LS_SQL")  # what was matched is kept: the Connect step shows it done
+    assert card.choice is not None and card.choice.values["connection_id"] == GUID1 and card.state == ConnectionState.connection_configured
 
 
 def test_apply_will_not_create_what_needs_a_gateway_or_a_ui_signin(project):

@@ -41,6 +41,7 @@ class StepFacts:
     outcome: str = ""  # one sentence once complete
     waiting: str = ""  # what is still needed, while not complete
     attention: Optional[str] = None  # short warning, e.g. "2 need manual action"
+    headline: Optional[str] = None  # replaces "<step> finished" when that would overstate it (a dry run is not a deploy)
 
 
 @dataclass
@@ -186,9 +187,12 @@ def plan_facts(prov: Optional[dict]) -> StepFacts:
     ver = prov.get("verification") or {}
     if ver.get("all_verified") and (prov.get("run") or {}).get("dry_run") is False:
         return StepFacts(complete=True, metric=f"{changes} change(s) applied and verified", attention=attention, outcome="Everything approved was created and read back.")
-    approved = (prov.get("approval") or {}).get("current")
-    return StepFacts(metric=f"{changes} to change", attention=attention,
-                     waiting=("Dry run, apply, then verify." if approved else "Approve the steps, dry run, apply, then verify."))
+    # Creating the missing items (a Spark pool, an environment) is optional for converting and deploying pipelines: it only matters to Spark workloads.
+    # So the step can be passed with the gap stated, instead of forcing writes to Fabric just to get to Convert.
+    note = f"{changes} item(s) not created yet"
+    return StepFacts(complete=True, metric=f"{changes} to create", attention=attention or note,
+                     outcome=f"Nothing was created in Fabric: {changes} item(s) the plan lists are still to create. Pipelines can be converted and deployed without them; "
+                             "approve and apply them here before running Spark workloads.")
 
 
 def validate_facts(val: Optional[dict]) -> StepFacts:
@@ -207,7 +211,7 @@ def report_facts(rep: Optional[dict]) -> StepFacts:
         return StepFacts(waiting="Validate the migration to get the report.", metric="Not validated")
     stages = {s["stage"]: s["status"] for s in rep["validation"]["stages"]}
     if stages.get("deployment") in (None, "NOT_RUN"):
-        return StepFacts(waiting="Validate the deployment (it needs a connected workspace).", metric=rep["overall"].replace("_", " ").title())
+        return StepFacts(waiting="Press \"Validate the migration now\" above: it also checks what is deployed in Fabric (needs a connected workspace).", metric=rep["overall"].replace("_", " ").title())
     attention = None if rep["full_success"] else rep["headline"]
     return StepFacts(complete=True, metric=rep["overall"].replace("_", " ").title(), attention=attention, outcome=rep["headline"])
 
@@ -234,9 +238,12 @@ def deploy_facts(result: Optional[dict]) -> StepFacts:
     rows = result.get("results", [])
     failed = sum(1 for r in rows if r.get("action") in ("failed", "refused"))
     if not result.get("applied"):
-        return StepFacts(metric=f"Dry run: {len(rows)} pipeline(s)",
-                         attention=f"{failed} would be refused" if failed else None,
-                         waiting="The dry run is done. Deploy for real to finish.")
+        # A dry run changes nothing, so this step can be passed (the Report then says honestly that nothing is deployed) rather than being a dead end
+        # when pipelines are refused (an unbound connection) and the person wants to see the report first.
+        return StepFacts(complete=True, metric=f"Dry run: {len(rows)} pipeline(s)", headline="Dry run done · nothing deployed yet",
+                         attention=f"{failed} would be refused" if failed else "nothing deployed yet",
+                         outcome=(f"{failed} pipeline(s) would be refused (see the table), and " if failed else "") +
+                                 "nothing is in Fabric yet. Deploy for real to publish; until then the Report shows these as not deployed.")
     return StepFacts(complete=True, metric=f"{len(rows) - failed} of {len(rows)} deployed",
                      attention=f"{failed} failed" if failed else None,
                      outcome=f"Deployed {len(rows) - failed} pipeline(s) to Fabric.")

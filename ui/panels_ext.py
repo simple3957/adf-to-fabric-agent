@@ -38,7 +38,7 @@ def review(api: ApiClient, pid: str, inv: dict | None) -> None:
     comp = inv["completeness"]
     st.markdown(theme.badge("Discovery complete" if comp["complete"] else "Discovery has gaps", "success" if comp["complete"] else "warning"),
                 unsafe_allow_html=True)
-    cols = st.columns(6)
+    cols = st.columns(3) + st.columns(3)  # two rows: six narrow tiles cut "Linked services" off
     for col, (label, key) in zip(cols, (("Pipelines", "pipelines"), ("Activities", "activities"), ("Linked services", "linked_services"),
                                         ("Datasets", "datasets"), ("Triggers", "triggers"), ("Data flows", "data_flows"))):
         col.metric(label, comp[key])
@@ -60,7 +60,10 @@ def review(api: ApiClient, pid: str, inv: dict | None) -> None:
     t_pipes, t_acts, t_waves, t_deps, t_compute, t_compat = st.tabs(["Pipelines", "Activities", "Waves & order", "Dependencies", "Compute", "Compatibility"])
     with t_pipes:
         _table([{"Pipeline": p["name"], "State": f"{state_chip_text(p['state'])}", "Activities": p["activities"], "Calls": ", ".join(p["calls"]),
-                 "Why": "; ".join(p["reasons"])} for p in inv["pipelines"]], "No pipelines.")
+                 "Why": "; ".join(p["reasons"])} for p in inv["pipelines"]], "No pipelines.",
+               column_config={"Pipeline": st.column_config.TextColumn(width="large"), "State": st.column_config.TextColumn(width="medium"),
+                              "Activities": st.column_config.NumberColumn(width="small"), "Calls": st.column_config.TextColumn(width="large"),
+                              "Why": st.column_config.TextColumn(width="large")})
     with t_acts:
         _table([{"Activity type": t, "Count": n} for t, n in inv["activity_types"].items()], "No activities.")
         conf = inv.get("confidence") or {}
@@ -201,7 +204,7 @@ def plan(api: ApiClient, pid: str, dest: dict, prov: dict | None) -> None:
     c[0].metric("To create", s["to_create"])
     c[1].metric("To configure", s["to_configure"])
     c[2].metric("Reused", s["reused"])
-    c[3].metric("Blocked / conflicts", s["blocked"] + s["conflicts"])
+    c[3].metric("Blocked", s["blocked"] + s["conflicts"], help="Steps that cannot run, or that conflict with what already exists.")
     c[4].metric("Unknown", s["unknown"])
     est = prov.get("estimates") or {}
     if est.get("largest_pool_capacity_units"):
@@ -213,9 +216,16 @@ def plan(api: ApiClient, pid: str, dest: dict, prov: dict | None) -> None:
         _table([{"Check": ch["name"] + (" (blocking)" if ch["blocking"] else ""), "Result": CHECK_ICON.get(ch["status"], ch["status"]), "Detail": ch["detail"],
                  "Proved": ch["proved"], "NOT proved": ch["not_proved"], "Do this": ch["action"]} for ch in prov["checks"]], "")
     st.markdown("**Steps, in the order they would run**")
-    _table([{"Action": ACTION_TEXT.get(x["action"], x["action"]), "Resource": x["type"].replace("_", " "), "Name": x["name"],
+    rows = [{"Action": ACTION_TEXT.get(x["action"], x["action"]), "Resource": x["type"].replace("_", " "), "Name": x["name"],
              "Approved": "yes" if x["approved"] else ("needs approval" if x["needs_approval"] else ""), "Result": x["result"] or "",
-             "Verified": x["verification"] or "", "Why / note": "; ".join([*x["blockers"], *x["notes"]])} for x in prov["steps"]], "")
+             "Verified": x["verification"] or "", "Why / note": "; ".join([*x["blockers"], *x["notes"]])} for x in prov["steps"]]
+    for col in ("Result", "Verified"):  # nothing has run yet: two empty columns only push the notes off the screen
+        if not any(r[col] for r in rows):
+            for r in rows:
+                r.pop(col)
+    _table(rows, "", column_config={"Action": st.column_config.TextColumn(width="medium"), "Resource": st.column_config.TextColumn(width="medium"),
+                                    "Name": st.column_config.TextColumn(width="large"), "Approved": st.column_config.TextColumn(width="medium"),
+                                    "Why / note": st.column_config.TextColumn(width="large")})
     _approval_and_apply(api, pid, prov)
 
 
@@ -340,10 +350,14 @@ def report(api: ApiClient, pid: str, rep: dict | None, dest: dict) -> None:
     panels_confidence.confidence_panel(api, pid)
     st.markdown("##### Where each pipeline stands")
     state_legend(rep["states"])
-    _table([{"Pipeline": p["name"], "State": state_chip_text(p["state"]), "Why": "; ".join(p["reasons"])} for p in rep["pipelines"]], "No pipelines.")
+    _table([{"Pipeline": p["name"], "State": state_chip_text(p["state"]), "Why": "; ".join(p["reasons"])} for p in rep["pipelines"]], "No pipelines.",
+           column_config={"Pipeline": st.column_config.TextColumn(width="large"), "State": st.column_config.TextColumn(width="medium"),
+                          "Why": st.column_config.TextColumn(width="large")})
     if rep["unresolved"]:
         st.markdown(f"##### Unresolved ({rep['unresolved_total']})")
-        _table([{"About": u["scope"], "State": u["state"], "Issue": u["issue"], "Do this": u.get("action", "")} for u in rep["unresolved"]], "")
+        _table([{"About": u["scope"], "State": u["state"], "Issue": u["issue"], "Do this": u.get("action", "")} for u in rep["unresolved"]], "",
+               column_config={"About": st.column_config.TextColumn(width="large"), "State": st.column_config.TextColumn(width="small"),
+                              "Issue": st.column_config.TextColumn(width="large"), "Do this": st.column_config.TextColumn(width="large")})
     if rep["validation"].get("available"):
         with st.expander("Validation detail"):
             _validation_body(rep["validation"])

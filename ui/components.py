@@ -53,10 +53,9 @@ def state_chip(state: str) -> str:
 
 def state_legend(counts: dict) -> None:
     """The seven states with how many pipelines are in each and what the word does and does not promise."""
-    cols = st.columns(len(PSTATE_LABEL))
-    for col, key in zip(cols, PSTATE_LABEL):
-        col.markdown(state_chip(key), unsafe_allow_html=True)
-        col.caption(f"{counts.get(key, 0)} · {PSTATE_HELP[key]}")
+    cells = "".join(f'<div class="ma-legend-cell">{state_chip(key)}<div class="ma-legend-help">{counts.get(key, 0)} · {theme.esc(PSTATE_HELP[key])}</div></div>'
+                    for key in PSTATE_LABEL)
+    theme.html_block(f'<div class="ma-legend">{cells}</div>')  # wraps to the width it has; seven columns made the chips touch and overflow
 
 
 def empty_state(title: str, hint: str = "") -> None:
@@ -290,8 +289,9 @@ def account_picker(side: str, who: str, *, hint: str) -> Optional[str]:
     if chosen:
         row = next((a for a in accounts if a["username"] == chosen), {})
         a, b = st.columns([3, 1], vertical_alignment="center")
-        a.caption(f"{row.get('subscription_count', 0)} subscription(s) · "
-                  f"{len(row.get('tenants', []))} director{'y' if len(row.get('tenants', [])) == 1 else 'ies'}")
+        subs, dirs = int(row.get("subscription_count", 0) or 0), len(row.get("tenants", []))
+        a.caption(" · ".join(x for x in (f"{subs} subscription{'' if subs == 1 else 's'}" if subs else "",  # a Fabric-only sign-in has none: say nothing, not "0"
+                                         f"{dirs} director{'y' if dirs == 1 else 'ies'}") if x))
         if b.button("Sign out", key=f"{key}-out", type="tertiary", width="stretch", help=f"Sign {chosen} out on this machine."):
             if call(client().logout, "azure_cli", chosen) is not None:
                 forget("accounts", "subs", "disc", "ws")

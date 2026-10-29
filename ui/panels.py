@@ -182,7 +182,7 @@ def _editor(api: ApiClient, pid: str, card: dict, known: dict[str, str], sibling
             (" …" if len(same_as) > 8 else "") + ". You can still change any of them afterwards.")
         if same_as and left_out:
             st.caption("Not included, because each needs its own answer (a gateway, a server that is not in the source, or no such method): " + ", ".join(left_out[:8]))
-        a, b, _ = st.columns([1, 1.5, 2.5])
+        a, b, _ = st.columns([1, 1.7, 6])
         save = a.form_submit_button("Save")
         save_test = b.form_submit_button("Save and test", type="primary")
         if save or save_test:
@@ -265,14 +265,14 @@ def connect(api: ApiClient, pid: str, cards: list[dict] | None, workspace_id: st
         for m in c.get("existing_matches", []):
             known.setdefault(c.get("fabric_connection_type") or "?", {})[m["display_name"]] = m["id"]
 
-    rows = [{"Linked service": c["name"], "Type": c.get("adf_type") or "?",
-             "Fabric connector": c.get("connector_label") or "none", "Status": state_text(c)} for c in cards]
+    rows = [{"Linked service": c["name"], "Fabric connector": c.get("connector_label") or "none", "Status": state_text(c)} for c in cards]
     event = st.dataframe(rows, hide_index=True, on_select="rerun", selection_mode="single-row", key="conn-table", width="stretch",
-                         column_config={"Linked service": st.column_config.TextColumn(width="medium"),
-                                        "Type": st.column_config.TextColumn(width="small"),
+                         column_config={"Linked service": st.column_config.TextColumn(width="large"),
+                                        "Fabric connector": st.column_config.TextColumn(width="medium"),
                                         "Status": st.column_config.TextColumn(width="medium")})
     picked = event.selection.rows
-    first_open = next((i for i, c in enumerate(cards) if c["state"] not in READY), None)
+    todo = [i for i, c in enumerate(cards) if c["state"] not in READY]
+    first_open = next((i for i in todo if cards[i]["state"] != "manual_action_required"), todo[0] if todo else None)  # start where something can be done
     card = cards[picked[0] if picked else (first_open or 0)]
     if not picked:
         st.caption("Showing the first one still to do. Select a row above to set up another." if first_open is not None
@@ -286,7 +286,11 @@ def connect(api: ApiClient, pid: str, cards: list[dict] | None, workspace_id: st
     if not workspace_id:
         st.warning("Connect a Fabric workspace on the **Connections** page first.")
     names = st.session_state.get("apply-names", [])
-    auto = st.checkbox("Reuse matching connections that already exist in Fabric", key="apply-auto")
+    matching = [c["name"] for c in cards if c.get("existing_matches") and c["state"] not in READY]
+    if matching:
+        st.info(f"{len(matching)} linked service(s) match a connection that already exists in Fabric: {', '.join(matching[:4])}{' …' if len(matching) > 4 else ''}. "
+                "Preview below binds them without creating anything.")
+    auto = st.checkbox("Reuse matching connections that already exist in Fabric", value=True, key="apply-auto")
     sig = (tuple(sorted(names)), auto, workspace_id)
     prev = st.session_state.get("apply_preview")
     valid = bool(prev and prev["sig"] == sig)
@@ -377,9 +381,10 @@ def convert(api: ApiClient, pid: str, result: dict | None) -> None:
                 f"{result.get('compatibility_findings', 0)} compatibility finding(s)")
     counts = result.get("status_counts") or {}
     if counts:
+        short = {"converted_with_differences": "with differences", "manual_required": "manual work"}  # a long label is cut off in a narrow tile
         for col, (k, n) in zip(st.columns(len(counts)), counts.items()):
-            col.metric(k.replace("_", " "), n)
-    st.dataframe([{"pipeline": p["name"], "status": p["status"], "structurally valid": "✅" if p["structurally_valid"] else "❌",
+            col.metric(short.get(k, k.replace("_", " ")), n)
+    st.dataframe([{"pipeline": p["name"], "status": p["status"].replace("_", " "), "structurally valid": "✅" if p["structurally_valid"] else "❌",
                    "ready to run": "✅" if p["runtime_ready"] else "⬜"} for p in result.get("pipelines", [])], hide_index=True)
     triggers = list({t["name"]: t for t in result.get("triggers", [])}.values())
     if triggers:
@@ -390,8 +395,9 @@ def convert(api: ApiClient, pid: str, result: dict | None) -> None:
     for f in result.get("preflight", []):
         show = {"error": st.error, "warning": st.warning}.get(f.get("severity"), st.info)
         show(f"**{f['subject']}**: {f['message']}  \n*Fix:* {f['fix']}")
-    if result.get("unbound"):
-        st.warning(f"{len(result['unbound'])} id(s) are still open: pipelines that need them won't be ready to run.")
+    open_ids = [u for u in result.get("unbound") or [] if u != "workspace"]  # the workspace id is filled in at deploy: not something to set here
+    if open_ids:
+        st.warning(f"{len(open_ids)} item(s) still open ({', '.join(open_ids[:5])}): pipelines that need them won't be ready to run.")
     panels_bindings.section(api, pid, result.get("unbound") or [])
     if result.get("filled_at_deploy"):
         st.caption(f"{len(result['filled_at_deploy'])} child pipeline id(s) are filled in automatically when you deploy.")
@@ -423,6 +429,8 @@ def deploy(api: ApiClient, pid: str, dest: dict, conversion: dict | None, result
     a.markdown(theme.badge("Dry run: changes nothing", "info"), unsafe_allow_html=True)
     if a.button("Dry run", type="primary", key="dep-dry"):
         stage = "deploy_dry_run"
+    if st.session_state.pop("dep-autorun", False):
+        stage = "deploy_dry_run"
     refused = [r["name"] for r in (result or {}).get("results", []) if r.get("action") in ("failed", "refused")]
     sig = (tuple(sorted(pipes)), bool(children), bool(unbound))
     stale_dry = bool(result) and not result.get("applied") and st.session_state.get("deploy_sig", {}).get(pid) != sig
@@ -432,6 +440,14 @@ def deploy(api: ApiClient, pid: str, dest: dict, conversion: dict | None, result
     if result and not result.get("applied") and refused:
         st.warning(f"The dry run refused {len(refused)} pipeline(s): {', '.join(refused[:4])}. Fix the cause shown below (usually an unbound connection) "
                    "and run the dry run again; the real deploy unlocks only after a clean one.")
+        passed = [r["name"] for r in result["results"] if r.get("action") not in ("failed", "refused") and r["name"] in known]
+        if passed:
+            def _only_passed(names=passed):  # set before the picker is drawn on the next run
+                st.session_state[f"dep-pipes-{pid}-{ver}"] = names
+                st.session_state.setdefault("scope", {})[pid] = names
+                st.session_state["dep-autorun"] = True
+            st.button(f"Leave out the refused and dry-run the other {len(passed)}", key="dep-only-passed", on_click=_only_passed,
+                      help="Narrows the scope to the pipelines that passed and runs the dry run again. The refused ones stay unconverted for Fabric until their cause is fixed.")
     b.markdown(theme.badge("Deploy: changes Fabric", "warning"), unsafe_allow_html=True)
     with b:
         sure = typed_confirm("Deploy for real: this creates or updates pipelines in Fabric", "DEPLOY", "dep-sure", disabled=not dry_done)

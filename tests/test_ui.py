@@ -372,7 +372,11 @@ def test_journey_rules():
     cards = [{"state": "connection_tested"}, {"state": "manual_action_required"}, {"state": "resource_discovered"}]
     c = journey.connect_facts(cards)
     assert not c.complete and c.metric == "1 of 3 ready" and c.attention == "1 need attention"
-    assert journey.deploy_facts({"applied": False, "results": [{"action": "create"}]}).complete is False
+    dry = journey.deploy_facts({"applied": False, "results": [{"action": "create"}]})  # a dry run can be passed, but never reads as a deploy
+    assert dry.complete and dry.attention == "nothing deployed yet" and "nothing deployed" in dry.headline
+    refused = journey.deploy_facts({"applied": False, "results": [{"action": "refused"}, {"action": "create"}]})
+    assert refused.complete and refused.attention == "1 would be refused" and "refused" in refused.outcome
+    assert journey.deploy_facts({"applied": True, "results": [{"action": "create"}]}).headline is None  # a real deploy keeps the plain wording
 
 
 def test_importing_from_git_creates_and_selects_the_project(api):
