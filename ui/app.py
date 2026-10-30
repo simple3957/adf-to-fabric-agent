@@ -41,8 +41,32 @@ def _sign_in(api) -> None:
             st.rerun()
 
 
+def _who(api) -> dict:
+    """Reach the service and say who is asking, BEFORE the top bar is drawn: a sign-in form or an error drawn inside the bar's rounded container is
+    squeezed and clipped. Stops the page unless a person is signed in."""
+    try:
+        api.health()
+    except ApiError as err:
+        st.markdown(f'<div class="ma-note">⚠️ <span><strong>The accelerator service is not reachable.</strong> '
+                    f'{theme.esc(err.message)} {theme.esc(" ".join(err.actions))}</span></div>', unsafe_allow_html=True)
+        st.stop()
+    try:
+        return api.me()
+    except ApiError as err:
+        if err.status not in (401, 429):  # never a traceback on the sign-in page: it would show paths
+            st.error(err.message)
+            st.caption(" ".join(err.actions) or "Try again in a moment.")
+            st.stop()
+        st.session_state.pop("permissions", None)
+        if err.status == 429:  # a valid token is never held back by the lockout, so the form still works
+            st.warning("Too many failed sign-in attempts from this machine. Wait a minute. A correct token still signs in.")
+        _sign_in(api)
+        st.stop()
+
+
 def top_bar() -> None:
     api = client()
+    who = _who(api)
     with st.container(key="topbar"):
         brand, links, dots, project, mode_col = st.columns([2.0, 4.4, 1.4, 2.0, 1.3], vertical_alignment="center")
         brand.markdown('<div class="ma-brand"><span class="ma-brand-mark">◆</span>ADF&nbsp;→&nbsp;Fabric&nbsp;<small>Studio</small></div>',
@@ -50,21 +74,6 @@ def top_bar() -> None:
         with links, st.container(horizontal=True, gap="small", vertical_alignment="center"):
             for key in ("setup", "migration", "activity"):
                 st.page_link(PAGES[key], width="content")
-        try:
-            api.health()
-        except ApiError as err:
-            st.markdown(f'<div class="ma-note">⚠️ <span><strong>The accelerator service is not reachable.</strong> '
-                        f'{theme.esc(err.message)} {theme.esc(" ".join(err.actions))}</span></div>', unsafe_allow_html=True)
-            st.stop()
-
-        try:
-            who = api.me()
-        except ApiError as err:
-            if err.status != 401:
-                raise
-            st.session_state.pop("permissions", None)
-            _sign_in(api)
-            st.stop()
         st.session_state.permissions = set(who.get("permissions") or [])
         st.session_state.demo_available = bool(who.get("demo_available", True))
         if who.get("production"):

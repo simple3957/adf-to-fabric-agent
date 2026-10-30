@@ -774,3 +774,17 @@ def test_the_fabric_read_says_whether_connections_could_be_listed_and_never_a_to
     _, empty = s.cards_and_status(pid, "sess", FakeFabric())
     assert empty["state"] == "ok" and empty["connections"] == 0 and "No Fabric connections" in empty["todo"]
     assert [c.name for c in s.cards(pid, "sess")] == [c.name for c in s.cards_and_status(pid, "sess", None)[0]]  # cards() is unchanged
+
+
+def test_a_pasted_connection_id_is_normalised_and_must_be_the_right_type(project):
+    """Found live: an UPPERCASE or {braced} id was 'not found', and an ADLS service accepted a pipelines connection."""
+    s, pid = svc(project)
+    fab = FakeFabric(existing=[conn(GUID1, "Existing SQL", "SQL", "srv1.database.windows.net;db1")])
+    for pasted in (GUID1.upper(), "{" + GUID1 + "}", "  " + GUID1 + "  "):
+        s.set_choice(pid, ConnectionChoice(linked_service="LS_SQL", method="existing_connection", values={"connection_id": pasted}))
+        by = {i.linked_service: i for i in s.apply(pid, "sess", fab).items}
+        assert by["LS_SQL"].action == "reused" and by["LS_SQL"].connection_ids == [GUID1], pasted
+    wrong = FakeFabric(existing=[conn(GUID2, "Pipelines", "FabricDataPipelines", "x")])
+    s.set_choice(pid, ConnectionChoice(linked_service="LS_SQL", method="existing_connection", values={"connection_id": GUID2}))
+    item = next(i for i in s.apply(pid, "sess", wrong).items if i.linked_service == "LS_SQL")
+    assert item.action == "failed" and "FabricDataPipelines" in item.detail and not item.bound

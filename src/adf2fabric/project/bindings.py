@@ -76,7 +76,9 @@ def open_items(store: ProjectStore, pid: str) -> list[dict[str, Any]]:
 
 def set_binding(store: ProjectStore, pid: str, key: str, value: str) -> dict[str, Any]:
     """Record ``key`` -> ``value`` in the resolutions file. Only a key this conversion asks for is accepted, and only a GUID."""
-    value = (value or "").strip()
+    from adf2fabric.connections.catalog import normalize_guid
+
+    value = normalize_guid(value)
     if not _GUID.match(value):
         raise BindingError("That is not a Fabric item id: it should look like 12345678-1234-1234-1234-123456789abc.")
     known = {i["key"].lower(): i["key"] for i in open_items(store, pid)}
