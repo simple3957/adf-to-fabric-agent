@@ -170,3 +170,60 @@ def test_the_score_comes_last_in_the_report_and_follows_the_validation_on_file(p
     md = engine.render(d)
     assert md.rstrip().splitlines()[-1].startswith("| No more than")  # the score section is the end of the report
     assert md.index("## Confidence score") > md.index("## Pipelines")
+
+
+# ---- a linked service the migration does not need is listed, not scored -----------------------------------------------------------------
+
+def _cov(*names):
+    from types import SimpleNamespace as NS
+
+    return NS(connections=[], connector_coverage=[NS(linked_service=n, adf_type="AzureBlobFS", level="created", note="") for n in names])
+
+
+def test_a_linked_service_replaced_by_the_lakehouse_or_used_by_no_pipeline_is_not_needed():
+    uses = {"ls_lake": ["repointed_to_lakehouse", "not_used"], "ls_idle": ["not_used", "not_used"]}
+    lake, idle = engine._service_items(_cov("LS_Lake", "LS_Idle"), {}, uses, all_converted=True)
+    assert "replaced by the lakehouse" in lake.not_needed and not lake.criteria
+    assert "no pipeline uses it" in idle.not_needed
+
+
+def test_a_linked_service_is_still_scored_when_that_is_not_shown():
+    cases = {
+        "ls_inline": ["repointed_to_lakehouse", "inlined"],  # one dataset still reads through its connection
+        "ls_held": ["not_used"],  # unused, but a pipeline was held back from conversion and may need it
+        "ls_vault": [],  # no datasets (Key Vault, compute): its datasets say nothing
+    }
+    for ls, treatments in cases.items():
+        (item,) = engine._service_items(_cov(ls), {}, {ls: treatments}, all_converted=False)
+        assert not item.not_needed and item.criteria, ls
+    (item,) = engine._service_items(_cov("ls_vault"), {}, {}, all_converted=True)
+    assert not item.not_needed
+
+
+def test_a_bound_linked_service_is_never_called_not_needed():
+    from types import SimpleNamespace as NS
+
+    conv = _cov("LS_Lake")
+    conv.connections = [NS(name="LS_Lake", kind="connection", bound=True)]
+    (item,) = engine._service_items(conv, {}, {"ls_lake": ["repointed_to_lakehouse"]}, all_converted=True)
+    assert not item.not_needed  # a generated activity uses its connection: it is needed and scored
+
+
+def test_a_not_needed_linked_service_leaves_the_score_and_is_listed_in_the_report(project):  # noqa: F811
+    store, pid = project
+    run(store)
+    uses, all_converted = engine._dataset_use(store, pid, store.load_conversion(pid))
+    assert all_converted and uses  # read from discovery and the conversion's dataset ledger
+    conv = store.load_conversion(pid)
+    ls = next(c.linked_service for c in conv.connector_coverage if uses.get(c.linked_service.lower()))
+    sem = store.load_adf_semantic_discovery(pid)
+    mine = {d.name.lower() for d in sem.datasets if d.linked_service_ref and d.linked_service_ref.name.lower() == ls.lower()}
+    for e in conv.dataset_ledger:  # as convert --lakehouse records it: the datasets now read the Lakehouse, no activity binds the connection
+        if e.name.lower() in mine:
+            e.treatment = "repointed_to_lakehouse"
+    conv.connections = [q for q in conv.connections if q.name.lower() != ls.lower()]
+    store.save_conversion(pid, conv)
+    d = engine.assess(store, pid)
+    assert [n["name"] for n in d["not_needed"]] == [ls] and "replaced by the lakehouse" in d["not_needed"][0]["reason"]
+    assert ls not in [it["name"] for a in d["areas"].values() for it in a["items"]]  # listed, not scored
+    assert "Not needed by the migration" in engine.render(d)

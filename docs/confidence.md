@@ -34,10 +34,15 @@ Order is a dependency order: deploying, running and comparing cannot be evidence
 rather than `unknown`. A pipeline weighs in its area by its activity count. Areas are weighted pipelines 4, linked services 2.5, compute 2, triggers 1; an
 area the estate does not have is not scored (a project with no triggers is not given credit for them, or marked down).
 
+A linked service no generated activity binds is **not needed**, so listed and not scored, when it has datasets and every one of them is either
+repointed to the Lakehouse ("replaced by the lakehouse") or used by no pipeline while every source pipeline was converted ("no pipeline uses it").
+What became of each dataset comes from the conversion's dataset ledger. A linked service without datasets (Key Vault, compute) or with a dataset
+still read through its connection is scored as before, and so is one whose datasets are unused while a pipeline was held back from conversion.
+
 Each item gets a label, the worst thing in its way: `blocked`, `failing` (a run failed or differs), `needs_input`, `unproven` or `proven`.
 A criterion made unmet only because something it needs is unmet is *gated*: the cause is counted once, on the criterion that holds it up, so a pipeline with an
 open binding is `needs_input`, never `failing` (that word needs a run that failed). A linked service no converted pipeline uses yet is `unproven`, not
-`proven`: nothing says it is bound or needed.
+`proven`: nothing says it is bound or needed (unless it is not needed, above).
 
 ## Questions
 
@@ -63,7 +68,7 @@ The last section of the report (and of the UI's Report step) turns the range int
 
 | Rule | If it does not hold, the grade is at most |
 |---|---|
-| The latest validation is `MIGRATION_VERIFIED` and newer than the last conversion | Medium (Low when the validation `FAILED`) |
+| The latest validation passed every required check (`MIGRATION_VERIFIED`) and is newer than the last conversion | Medium (Low when the validation `FAILED`) |
 | No item is blocked or failing | Low |
 | The source has not changed since the conversion | Low |
 | No more than 25 points are still assumed (the range's gap) | Medium |

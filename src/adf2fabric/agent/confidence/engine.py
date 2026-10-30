@@ -66,6 +66,7 @@ class Item:
     name: str
     weight: float = 1.0  # how much this item counts inside its area (a pipeline by its activities)
     criteria: list[Criterion] = field(default_factory=list)
+    not_needed: str = ""  # why the migration does not need it (then it is listed, not scored)
 
 
 def _apply_gates(criteria: list[Criterion]) -> None:
@@ -193,12 +194,28 @@ def _pipeline_item(p: Any, conv: Any, level_of: dict[str, str], errors: dict[str
     return Item("pipelines", name, max(1.0, float(len(p.activities))), cs)
 
 
-def _service_items(conv: Any, applied: dict[str, dict]) -> list[Item]:
+def _not_needed(treatments: list[str], all_converted: bool) -> str:
+    """Why a linked service that no generated activity binds is not needed, from what became of its datasets; "" when that is not shown.
+    Only a linked service with datasets qualifies: one without (a Key Vault, a compute service) is never judged unneeded from its datasets."""
+    if not treatments or any(t not in ("repointed_to_lakehouse", "not_used") for t in treatments):
+        return ""
+    if "repointed_to_lakehouse" in treatments:
+        return "replaced by the lakehouse: every dataset of it that a pipeline uses reads and writes the Lakehouse (convert --lakehouse)"
+    if all_converted:
+        return "no pipeline uses it: none of its datasets is used, and every source pipeline was converted"
+    return ""  # a pipeline was held back from conversion: it may still need this one
+
+
+def _service_items(conv: Any, applied: dict[str, dict], ls_datasets: Optional[dict[str, list[str]]] = None, all_converted: bool = False) -> list[Item]:
     items: list[Item] = []
     bound = {q.name.lower(): q for q in conv.connections if q.kind == "connection"}
     for c in conv.connector_coverage:
         q = bound.get(c.linked_service.lower())
         ap = applied.get(c.linked_service.lower())
+        why = "" if q is not None else _not_needed((ls_datasets or {}).get(c.linked_service.lower(), []), all_converted)
+        if why:
+            items.append(Item("linked_services", c.linked_service, 1.0, [], not_needed=why))
+            continue
         cs = [Criterion("connector_supported", "Fabric has a connector for it", 3.0,
                         UNMET if c.level == "unsupported" else UNKNOWN if c.level == "unlisted" else MET,
                         {"created": "the tool can create this connection", "manual": "Fabric supports it; the connection is made by hand", "unsupported": "Fabric has no connector for it",
@@ -374,7 +391,7 @@ def assess(store: Any, pid: str, now: Optional[datetime] = None) -> dict[str, An
     level_of = {c.linked_service.lower(): c.level for c in conv.connector_coverage}
     assisted = {n.pipeline for n in conv.assisted}
     items: list[Item] = [_pipeline_item(p, conv, level_of, errors, assisted, verification.get(p.source_pipeline), pid) for p in conv.pipelines]
-    items += _service_items(conv, _applied_connections(store, pid))
+    items += _service_items(conv, _applied_connections(store, pid), *_dataset_use(store, pid, conv))
     items += _trigger_items(conv)
     if store.has_workload_manifest(pid):
         items += _workload_items(store.load_workload_manifest(pid))
@@ -384,6 +401,8 @@ def assess(store: Any, pid: str, now: Optional[datetime] = None) -> dict[str, An
             for c in it.criteria:
                 if c.state == MET:
                     c.state, c.evidence = UNKNOWN, "the source changed after this was evidenced"
+    not_needed = [{"area": AREA_LABEL[it.area], "name": it.name, "reason": it.not_needed} for it in items if it.not_needed]
+    items = [it for it in items if not it.not_needed]  # listed in the report, never scored as met or as missing
     base = _overall(items)
     areas: dict[str, Any] = {}
     weight_total = sum(AREA_WEIGHT[a] for a in AREA_WEIGHT if _pool([it for it in items if it.area == a]))  # as _overall weighs the areas
@@ -404,7 +423,8 @@ def assess(store: Any, pid: str, now: Optional[datetime] = None) -> dict[str, An
     d = {"project": pid, "ready": True, "created_at": now.isoformat(), "note": EVIDENCE_NOTE, "stale": stale,
          "overall": ({"low": _pct_low(base[0]), "high": _pct_high(base[1]), "known": _pct_low(base[2]), "label": overall_label,
                       "gap": _pct_high(base[1]) - _pct_low(base[0])} if base else None),
-         "areas": areas, "absent_areas": [AREA_LABEL[a] for a in AREA_WEIGHT if a not in areas],
+         "areas": areas, "absent_areas": [AREA_LABEL[a] for a in AREA_WEIGHT if a not in areas and not any(n["area"] == AREA_LABEL[a] for n in not_needed)],
+         "not_needed": not_needed,
          "questions": _questions(items, base) if base else []}
     d["score"] = final_score(d, _validation_state(store, pid, conv.updated_at))
     return d
@@ -444,7 +464,7 @@ def final_score(d: dict[str, Any], validation: Optional[dict[str, Any]]) -> Opti
     val_text = ("not run" if not validation else f"{v['overall'].replace('_', ' ')}" + ("" if v.get("current") else ", older than the last conversion"))
     bad = labels.get("blocked", 0) + labels.get("failing", 0)
     rules = [  # (rule, it holds, highest grade allowed when it does not, what was found)
-        ("The latest validation is MIGRATION VERIFIED and newer than the last conversion", bool(verified),
+        ("The latest validation passed every required check and is newer than the last conversion", bool(verified),
          "Low" if v.get("overall") == "FAILED" else "Medium", f"validation: {val_text}"),
         ("No item is blocked or failing", not bad, "Low", f"{bad} item(s) blocked or failing" if bad else "none"),
         ("The source has not changed since the conversion", not d["stale"], "Low", "it changed" if d["stale"] else "unchanged"),
@@ -458,6 +478,21 @@ def final_score(d: dict[str, Any], validation: Optional[dict[str, Any]]) -> Opti
             "rules": [{"rule": r, "passed": holds, "limits_to": None if holds else cap, "found": found} for r, holds, cap, found in rules],
             "breakdown": [{"area": a["title"], "share": a["share"], "established": a["low"], "points": a["points"]} for a in d["areas"].values()],
             "could_reach": o["high"], "validation": val_text}
+
+
+def _dataset_use(store: Any, pid: str, conv: Any) -> tuple[dict[str, list[str]], bool]:
+    """Per linked service, what became of each of its datasets (the conversion's dataset ledger), and whether every source pipeline was converted."""
+    if not store.has_adf_semantic_discovery(pid):
+        return {}, False
+    sem = store.load_adf_semantic_discovery(pid)
+    treatment = {e.name.lower(): e.treatment for e in conv.dataset_ledger}
+    out: dict[str, list[str]] = {}
+    for ds in sem.datasets:
+        ls = ds.linked_service_ref.name.lower() if ds.linked_service_ref else ""
+        if ls:
+            out.setdefault(ls, []).append(treatment.get(ds.name.lower(), "unknown"))
+    converted = {p.source_pipeline.lower() for p in conv.pipelines}
+    return out, all(p.name.lower() in converted for p in sem.pipelines)
 
 
 def _applied_connections(store: Any, pid: str) -> dict[str, dict]:
@@ -486,6 +521,8 @@ def render(d: dict[str, Any]) -> str:
         out.append(f"| {a['title']} | {a['low']}% to {a['high']}% | {a['known']}% | " + ", ".join(f"{n} {k.replace('_', ' ')}" for k, n in sorted(a["labels"].items(), key=lambda x: LABELS.index(x[0]))) + " |")
     if d["absent_areas"]:
         out += ["", "Not in this estate, so not scored: " + ", ".join(d["absent_areas"]) + "."]
+    if d.get("not_needed"):
+        out += ["", "Not needed by the migration, so not scored:", ""] + [f"- {n['name']} ({n['area']}): {n['reason']}" for n in d["not_needed"]]
     if d["questions"]:
         out += ["", "## What to find out first", "", "Each question is an open criterion, with the reason it matters. Answering it favourably raises the range by the points shown.", ""]
         for i, q in enumerate(d["questions"], 1):

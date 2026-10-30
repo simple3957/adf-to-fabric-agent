@@ -41,6 +41,9 @@ def confidence_panel(api: ApiClient, pid: str) -> None:
     st.dataframe(rows, hide_index=True)
     if data.get("absent_areas"):
         st.caption("Not in this estate, so not scored: " + ", ".join(data["absent_areas"]) + ".")
+    if data.get("not_needed"):
+        with st.expander(f"{len(data['not_needed'])} item(s) not needed by the migration, so not scored"):
+            st.dataframe([{"Item": n["name"], "Area": n["area"], "Why it is not needed": n["reason"]} for n in data["not_needed"]], hide_index=True)
     if data["questions"]:
         st.markdown("##### What to find out first")
         for q in data["questions"][:8]:
