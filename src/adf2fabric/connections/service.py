@@ -107,6 +107,8 @@ class ConnectionService:
         for k in list(choice.values):  # a secret field must never arrive through the non-secret values
             if spec and any(f.name == k and f.kind == "secret" for m in spec.methods for f in m.fields):
                 raise catalog.ChoiceError([f"'{k}' is a secret: send it through the secrets endpoint, not as a value."])
+        if "connection_id" in choice.values:  # pasted from a portal: braces, spaces or capitals must not make a good id "not found"
+            choice = choice.model_copy(update={"values": {**choice.values, "connection_id": catalog.normalize_guid(choice.values["connection_id"])}})
         choice = choice.model_copy(update={"linked_service": ls.name})
         choices = self.load_choices(pid)
         choices[ls.name.lower()] = choice
@@ -192,7 +194,7 @@ class ConnectionService:
               names: Optional[list[str]] = None, auto_match: bool = False, dry_run: bool = False) -> ApplyResult:
         want = {n.lower() for n in names} if names else None
         cards = self.cards(pid, session, fabric)
-        existing = {str(c.get("id")): c for c in _soft(fabric.connections) or []}
+        existing = {str(c.get("id")).lower(): c for c in _soft(fabric.connections) or []}
         result = ApplyResult(applied_at=datetime.now(timezone.utc), workspace_id=workspace_id, dry_run=dry_run)
         bindings: dict[str, str] = {}
         for card in cards:
@@ -242,11 +244,18 @@ class ConnectionService:
             return item
         spec = catalog.connector_for(card.adf_type)
         if choice.method == "existing_connection":
-            cid = (choice.values.get("connection_id") or "").strip()
+            cid = catalog.normalize_guid(choice.values.get("connection_id"))
             if cid not in existing:
                 item.action, item.state = "failed", ConnectionState.validation_failed
                 item.detail = f"Connection '{cid}' was not found in Fabric for this account."
                 item.actions = ["Check the connection id, and that this account can see it."]
+                return item
+            actual = str((existing[cid].get("connectionDetails") or {}).get("type") or "")
+            if card.fabric_connection_type and actual and actual.lower() != card.fabric_connection_type.lower():
+                item.action, item.state = "failed", ConnectionState.validation_failed
+                item.detail = (f"'{existing[cid].get('displayName')}' is a {actual} connection, but this linked service needs a "
+                               f"{card.fabric_connection_type} one.")
+                item.actions = [f"Choose a {card.fabric_connection_type} connection."]
                 return item
             item.action, item.connection_ids, item.bound = "reused", [cid], True
             item.state = ConnectionState.connection_configured

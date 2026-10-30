@@ -123,3 +123,10 @@ def test_a_lakehouse_the_convert_step_pointed_at_is_offered_to_bind(tmp_path):
     item = next(i for i in B.open_items(store, pid) if i["key"] == "lakehouse:LH_Migration")
     assert item["item_type"] == "Lakehouse" and item["label"] == "Fabric lakehouse" and item["bound"] is False
     assert B.set_binding(store, pid, "lakehouse:LH_Migration", NB)["changed"] is True
+
+
+def test_a_pasted_binding_id_is_normalised(tmp_path):
+    store, pid, _ = _convert(tmp_path, FILES)
+    _with_notebook(store, pid)
+    assert B.set_binding(store, pid, "notebook:NB_X", "{" + NB.upper() + "}") == {"key": "notebook:NB_X", "changed": True}
+    assert next(i for i in B.open_items(store, pid) if i["key"] == "notebook:NB_X")["value"] == NB

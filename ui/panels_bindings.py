@@ -24,6 +24,8 @@ def section(api: ApiClient, pid: str, unbound: list[str]) -> None:
     open_ = [i for i in items if not i["bound"]]
     if not items and not elsewhere:
         return
+    if note := st.session_state.pop("bind-note", None):
+        st.warning(note)
     st.markdown(f"#### Things you need to set · {len(open_)} open" + (f" · {len(items) - len(open_)} set" if len(items) > len(open_) else ""))
     st.caption("These ids only exist once the item is in Fabric. Pick it from the list (read live from your workspace) or paste its id, then Convert again.")
     if got.get("fabric_note") and open_:
@@ -50,7 +52,9 @@ def section(api: ApiClient, pid: str, unbound: list[str]) -> None:
                     value = pasted.strip() or names.get(picked, "")
                     if not value:
                         st.warning("Choose an item or paste its id.")
-                    elif call(api.set_binding, pid, i["key"], value) is not None:
+                    elif (done := call(api.set_binding, pid, i["key"], value)) is not None:
+                        if done.get("verified") is False:  # kept across the rerun below
+                            st.session_state["bind-note"] = f"'{i['name']}': that connection id is not among the connections this account can see. It is saved; the deploy fails if it does not exist."
                         st.rerun()
     if elsewhere:
         st.info("Set on the **Connect** step (a linked service's connection; one you skipped there stays open): " + ", ".join(f"`{u}`" for u in elsewhere))

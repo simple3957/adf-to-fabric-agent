@@ -14,3 +14,5 @@ jobs:
           cache: pip
       - run: pip install -e ".[api,ui,dev]"
       - run: python -m pytest -q
+      - name: Known-vulnerability scan of the installed dependencies
+        run: pip install pip-audit && pip-audit --skip-editable

@@ -891,3 +891,14 @@ def test_the_rate_limiter_forgets_old_keys():
     t[0] = 7200.0
     assert rl.check("fresh", "b", 5) is None
     assert len(rl._hits) < 25000  # bounded: attackers cannot grow it without limit
+
+
+def test_a_missing_token_is_401_and_does_not_count_toward_the_lockout(world):
+    """The sign-in page calls /me with no token on every load and rerun; those calls must not lock the address out."""
+    for _ in range(20):
+        assert world.call(None, "GET", "/me").status_code == 401  # no token, many times
+    ok = world.call(next(iter(world.tokens)), "GET", "/me")
+    assert ok.status_code == 200
+    for _ in range(12):  # wrong tokens are guesses: those are throttled
+        world.http.get("/me", headers={"Authorization": "Bearer a2f_wrong"})
+    assert world.http.get("/me", headers={"Authorization": "Bearer a2f_wrong"}).status_code == 429

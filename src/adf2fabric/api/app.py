@@ -180,8 +180,13 @@ def create_app(settings: Optional[Settings] = None, live: Optional[Container] = 
             except UserError:  # a damaged user store locks everyone out; it never lets anyone in
                 audit.event("auth.unavailable", "failed", request_id=_rid(request))
                 raise HTTPException(503, "Authentication is temporarily unavailable.") from None
+        if principal is None and not token:
+            # No token is no guess: it cannot be brute-forced and says nothing about who is asking. The sign-in page itself makes such a call on every
+            # load and rerun, so counting it would let anyone sitting on that page lock their own address out.
+            audit.event("auth.failure", "denied", request_id=_rid(request), client=client, reason="missing")
+            raise HTTPException(401, "A valid bearer token is required.", headers={"WWW-Authenticate": "Bearer"})
         if principal is None:
-            # Everything that CAN be guessed is behind the lockout: the static legacy token (which may be weak), and every bad or missing token.
+            # Everything that CAN be guessed is behind the lockout: the static legacy token (which may be weak), and every bad token.
             # Failures from one address lock out that address's guesses, never the real users who share it (a proxy, an office NAT).
             wait = limiter.blocked(f"ip:{client}", "authfail", sec.auth_fail_limit, sec.auth_fail_window)
             if wait is not None:
@@ -194,7 +199,7 @@ def create_app(settings: Optional[Settings] = None, live: Optional[Container] = 
                 limiter.clear(f"ip:{client}", "authfail")
         if principal is None:
             limiter.record(f"ip:{client}", "authfail")
-            audit.event("auth.failure", "denied", request_id=_rid(request), client=client, reason="missing" if not token else "invalid")
+            audit.event("auth.failure", "denied", request_id=_rid(request), client=client, reason="invalid")
             raise HTTPException(401, "A valid bearer token is required.", headers={"WWW-Authenticate": "Bearer"})
         request.state.principal = principal
         return principal
@@ -682,6 +687,7 @@ def create_app(settings: Optional[Settings] = None, live: Optional[Container] = 
 
     @app.put("/projects/{pid}/bindings")
     def set_binding(pid: str, body: S.BindingBody, ctx: Ctx = Depends(), _: Principal = need(P.plans_generate)):
+        from adf2fabric.connections.catalog import normalize_guid
         from adf2fabric.project import bindings as B
 
         slug = ctx.project(pid)
@@ -692,9 +698,26 @@ def create_app(settings: Optional[Settings] = None, live: Optional[Container] = 
             fabric, _why = _fabric_or_why(ctx)
             found, _err = B.candidates(fabric, ctx.session.destination.get("workspace_id"), [item])
             if item["key"] in found:
-                verified = body.value.strip().lower() in {c["id"].lower() for c in found[item["key"]]}
+                verified = normalize_guid(body.value) in {c["id"].lower() for c in found[item["key"]]}
                 if not verified:
                     raise guards.Rejected(f"That id is not a {item['label'].lower()} in the chosen Fabric workspace.")
+        elif item is not None:  # a connection: may be visible to others only, so an unseen id is accepted but reported unverified; a seen one must be the right type
+            fabric, _why = _fabric_or_why(ctx)
+            try:
+                conns = fabric.connections() if fabric is not None else None
+            except Exception:  # noqa: BLE001 - a failed read says nothing about the id
+                conns = None
+            if conns is not None:
+                cid = normalize_guid(body.value)
+                seen = next((c for c in conns if str(c.get("id", "")).lower() == cid), None)
+                if seen is None:
+                    verified = False
+                else:
+                    actual = str((seen.get("connectionDetails") or {}).get("type") or "")
+                    want = B.FABRIC_PIPELINE_CONNECTION if item["name"] == "invoke-pipeline" else None
+                    if want and actual and actual != want:
+                        raise guards.Rejected(f"'{seen.get('displayName')}' is a {actual} connection; Invoke pipeline needs a {want} one.")
+                    verified = True
         try:
             done = B.set_binding(ctx.c.store, slug, body.key, body.value)
         except B.BindingError as exc:
