@@ -54,3 +54,31 @@ def confidence_panel(api: ApiClient, pid: str) -> None:
             for it in a["items"]:
                 st.markdown(f"**{it['name']}**: {it['low']}% to {it['high']}% ({it['label'].replace('_', ' ')})")
                 st.dataframe([{"": STATE_ICON.get(c["state"], ""), "Criterion": c["label"], "Evidence": c["evidence"]} for c in it["criteria"]], hide_index=True)
+
+
+GRADE_TONE = {"High": "success", "Medium": "warning", "Low": "error"}
+
+
+def score_panel(api: ApiClient, pid: str) -> None:
+    """The final confidence score, last on the Report step: one number, its grade, how it adds up and the rules that set the grade."""
+    data = call(api.confidence, pid)
+    s = (data or {}).get("score")
+    if not s:
+        return
+    st.markdown("##### Confidence score")
+    st.markdown(theme.stats([
+        ("Score", f"{s['value']} / 100", "ok" if s["grade"] == "High" else "", "Only what has evidence counts"),
+        ("Grade", s["grade"], {"High": "ok", "Low": "error"}.get(s["grade"], "accent"), "; ".join(s["bands"])),
+        ("Could reach", f"{s['could_reach']}", "", "If every open question goes well"),
+        ("Validation", s["validation"], "", "The latest Validate"),
+    ]), unsafe_allow_html=True)
+    st.markdown(theme.badge(f"{s['grade']} confidence", GRADE_TONE.get(s["grade"], "neutral")), unsafe_allow_html=True)
+    if s["grade"] != s["band_grade"]:
+        st.caption(f"The score alone is {s['band_grade']}; a rule below lowers the grade.")
+    st.markdown("**How the score adds up**")
+    st.dataframe([{"Area": b["area"], "Weight": f"{b['share']}%", "Established": f"{b['established']}%", "Points": b["points"]} for b in s["breakdown"]]
+                 + [{"Area": "Score", "Weight": "100%", "Established": "", "Points": s["value"]}], hide_index=True)
+    st.markdown("**Rules that set the grade**")
+    st.dataframe([{"": "✅" if r["passed"] else "❌", "Rule": r["rule"], "Found": r["found"], "Caps the grade at": r["limits_to"] or "-"} for r in s["rules"]],
+                 hide_index=True)
+

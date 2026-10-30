@@ -124,3 +124,49 @@ def test_a_service_no_converted_pipeline_uses_is_not_called_proven():
     assert label_for(item.criteria) == "unproven"
     lo, hi, _ = bounds(item.criteria)
     assert lo < hi
+
+
+# ---- the final score: one number from the range, and written rules that can only lower its grade ----------------------------------------
+
+def _d(low, high, labels=None, stale=False):
+    return {"overall": {"low": low, "high": high, "gap": high - low}, "stale": stale,
+            "areas": {"pipelines": {"title": "Pipelines", "low": low, "labels": labels or {"proven": 1}, "share": 100.0, "points": float(low)}}}
+
+
+VERIFIED = {"overall": "MIGRATION_VERIFIED", "current": True}
+
+
+def test_the_score_is_the_established_end_of_the_range_and_bands_give_the_grade():
+    assert [(s["value"], s["grade"]) for s in (engine.final_score(_d(v, v + 5), VERIFIED) for v in (90, 85, 84, 60, 59))] == \
+        [(90, "High"), (85, "High"), (84, "Medium"), (60, "Medium"), (59, "Low")]
+    s = engine.final_score(_d(90, 95), VERIFIED)
+    assert s["could_reach"] == 95 and all(r["passed"] for r in s["rules"]) and sum(b["points"] for b in s["breakdown"]) == 90
+
+
+def test_high_needs_a_current_verified_validation():
+    assert engine.final_score(_d(95, 95), None)["grade"] == "Medium"  # never validated
+    assert engine.final_score(_d(95, 95), {"overall": "NOT_VALIDATED", "current": True})["grade"] == "Medium"
+    assert engine.final_score(_d(95, 95), {"overall": "MIGRATION_VERIFIED", "current": False})["grade"] == "Medium"  # older than the conversion
+    s = engine.final_score(_d(95, 95), {"overall": "FAILED", "current": True})
+    assert s["grade"] == "Low" and s["band_grade"] == "High" and "FAILED" in s["validation"]
+
+
+def test_blocked_or_failing_items_a_changed_source_or_a_wide_gap_lower_the_grade():
+    assert engine.final_score(_d(90, 95, {"proven": 3, "failing": 1}), VERIFIED)["grade"] == "Low"
+    assert engine.final_score(_d(90, 95, {"blocked": 1}), VERIFIED)["grade"] == "Low"
+    assert engine.final_score(_d(90, 95, stale=True), VERIFIED)["grade"] == "Low"
+    assert engine.final_score(_d(86, 100), VERIFIED)["grade"] == "High"  # 14 points assumed: within the limit
+    s = engine.final_score(_d(86, 112), VERIFIED)  # 26 points assumed
+    assert s["grade"] == "Medium" and [r["limits_to"] for r in s["rules"] if not r["passed"]] == ["Medium"]
+    assert engine.final_score(_d(50, 60), VERIFIED)["grade"] == "Low"  # a rule never raises a grade
+
+
+def test_the_score_comes_last_in_the_report_and_follows_the_validation_on_file(project):  # noqa: F811
+    store, pid = project
+    run(store)
+    d = engine.assess(store, pid)
+    assert d["score"]["value"] == d["overall"]["low"] and d["score"]["validation"] == "not run" and d["score"]["grade"] != "High"
+    assert abs(sum(b["points"] for b in d["score"]["breakdown"]) - d["overall"]["low"]) < 1.5  # the areas add up to the score
+    md = engine.render(d)
+    assert md.rstrip().splitlines()[-1].startswith("| No more than")  # the score section is the end of the report
+    assert md.index("## Confidence score") > md.index("## Pipelines")

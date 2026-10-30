@@ -2391,6 +2391,9 @@ def confidence_cmd(project_name: str) -> None:
         click.secho("  The source changed after the conversion: nothing proven earlier is assumed to hold.", fg="yellow")
     for i, q in enumerate(d["questions"][:5], 1):
         click.echo(f"  {i}. {q['question']}  (+{q['raises_low_by']} low, +{q['raises_high_by']} high)")
+    if s := d.get("score"):
+        click.echo(f"  CONFIDENCE SCORE: {s['value']}/100 {s['grade']}" + "".join(f"\n    capped at {r['limits_to']}: {r['rule'].lower()} ({r['found']})"
+                                                                         for r in s["rules"] if not r["passed"]))
     click.echo(f"  report: {out / 'confidence.md'}")
 
 

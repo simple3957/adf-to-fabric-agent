@@ -51,3 +51,22 @@ gate stay unmet in that recomputation, so the figure is a floor.
 - If the source changed after the conversion, every `met` becomes `unknown`.
 - Weights are judgement, written down above. They set the ordering of effort, not a probability of success.
 - Data flows are scaffold only, so a pipeline holding one has an unconverted activity and shows as blocked.
+
+## The confidence score
+
+The last section of the report (and of the UI's Report step) turns the range into **one score and a grade**, by written rules:
+
+1. **Score** = the low end of the overall range: the weighted share of criteria that have evidence. Nothing unproven counts. Each area adds
+   its weight share times its established share, and the report lists those points so the total can be checked by hand.
+2. **Grade by score**: High 85 or more, Medium 60 to 84, Low below 60.
+3. **Rules that can only lower the grade** (each is listed with what was found, whether it holds or not):
+
+| Rule | If it does not hold, the grade is at most |
+|---|---|
+| The latest validation is `MIGRATION_VERIFIED` and newer than the last conversion | Medium (Low when the validation `FAILED`) |
+| No item is blocked or failing | Low |
+| The source has not changed since the conversion | Low |
+| No more than 25 points are still assumed (the range's gap) | Medium |
+
+So High needs a current, fully verified validation, real runs that match, and little left unproven. The score is the evidence-only end of the
+range on purpose: it can rise only when evidence is recorded. "Could reach" is the high end, for comparison.

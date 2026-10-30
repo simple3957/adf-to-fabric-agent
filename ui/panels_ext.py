@@ -363,6 +363,7 @@ def report(api: ApiClient, pid: str, rep: dict | None, dest: dict) -> None:
             _validation_body(rep["validation"])
     _run_and_compare(api, pid, rep, ws)
     st.caption("A generated file, a clean check or a successful call is never proof that a pipeline runs correctly: only a recorded real run compared with the source is.")
+    panels_confidence.score_panel(api, pid)
 
 
 def _run_and_compare(api: ApiClient, pid: str, rep: dict, ws: bool) -> None:

@@ -386,6 +386,7 @@ def assess(store: Any, pid: str, now: Optional[datetime] = None) -> dict[str, An
                     c.state, c.evidence = UNKNOWN, "the source changed after this was evidenced"
     base = _overall(items)
     areas: dict[str, Any] = {}
+    weight_total = sum(AREA_WEIGHT[a] for a in AREA_WEIGHT if _pool([it for it in items if it.area == a]))  # as _overall weighs the areas
     for a in AREA_WEIGHT:
         mine = [it for it in items if it.area == a]
         b = _pool(mine)
@@ -396,13 +397,67 @@ def assess(store: Any, pid: str, now: Optional[datetime] = None) -> dict[str, An
             counts[label_for(it.criteria)] = counts.get(label_for(it.criteria), 0) + 1
         areas[a] = {"title": AREA_LABEL[a], "low": _pct_low(b[0]), "high": _pct_high(b[1]), "known": _pct_low(b[2]), "labels": counts,
                     "items": sorted((_item_json(it) for it in mine), key=lambda j: (LABELS.index(j["label"]), j["low"] or 0, j["name"].lower()))}
+        share = AREA_WEIGHT[a] / weight_total
+        areas[a].update(share=round(share * 100, 1), points=round(share * b[0] * 100, 1))  # what the area adds to the score
     labels = [label_for(it.criteria) for it in items]
     overall_label = next((lab for lab in LABELS if lab in labels), "unproven")
-    return {"project": pid, "ready": True, "created_at": now.isoformat(), "note": EVIDENCE_NOTE, "stale": stale,
-            "overall": ({"low": _pct_low(base[0]), "high": _pct_high(base[1]), "known": _pct_low(base[2]), "label": overall_label,
-                         "gap": _pct_high(base[1]) - _pct_low(base[0])} if base else None),
-            "areas": areas, "absent_areas": [AREA_LABEL[a] for a in AREA_WEIGHT if a not in areas],
-            "questions": _questions(items, base) if base else []}
+    d = {"project": pid, "ready": True, "created_at": now.isoformat(), "note": EVIDENCE_NOTE, "stale": stale,
+         "overall": ({"low": _pct_low(base[0]), "high": _pct_high(base[1]), "known": _pct_low(base[2]), "label": overall_label,
+                      "gap": _pct_high(base[1]) - _pct_low(base[0])} if base else None),
+         "areas": areas, "absent_areas": [AREA_LABEL[a] for a in AREA_WEIGHT if a not in areas],
+         "questions": _questions(items, base) if base else []}
+    d["score"] = final_score(d, _validation_state(store, pid, conv.updated_at))
+    return d
+
+
+# ---- the final score --------------------------------------------------------------------------------------------------------------------
+
+GRADES = (("High", 85), ("Medium", 60), ("Low", 0))  # the score at or above which each grade starts
+GRADE_ORDER = ("Low", "Medium", "High")
+MAX_GAP = 25  # more than this many points still assumed and the score cannot be graded High
+BANDS = ["High: 85 or more", "Medium: 60 to 84", "Low: below 60"]
+
+
+def _validation_state(store: Any, pid: str, converted_at: datetime) -> Optional[dict[str, Any]]:
+    """The latest validation's overall status, and whether it is newer than the conversion it judged. None when validate never ran."""
+    try:
+        rep = store.load_validation_report(pid)
+    except Exception:  # no report, or one that no longer reads: either way there is no validation to rely on
+        return None
+    return {"overall": rep.overall, "current": rep.created_at >= converted_at}
+
+
+def final_score(d: dict[str, Any], validation: Optional[dict[str, Any]]) -> Optional[dict[str, Any]]:
+    """One score (0-100) and a grade, from the range above and a few written rules. The score is the established (low) end of the range,
+    so it never counts what has not been proven; each rule can only lower the grade, and every rule is reported, applied or not."""
+    o = d.get("overall")
+    if not o:
+        return None
+    value = o["low"]
+    banded = next(g for g, floor in GRADES if value >= floor)
+    labels: dict[str, int] = {}
+    for a in d["areas"].values():
+        for k, n in a["labels"].items():
+            labels[k] = labels.get(k, 0) + n
+    v = validation or {}
+    verified = v.get("overall") == "MIGRATION_VERIFIED" and v.get("current")
+    val_text = ("not run" if not validation else f"{v['overall'].replace('_', ' ')}" + ("" if v.get("current") else ", older than the last conversion"))
+    bad = labels.get("blocked", 0) + labels.get("failing", 0)
+    rules = [  # (rule, it holds, highest grade allowed when it does not, what was found)
+        ("The latest validation is MIGRATION VERIFIED and newer than the last conversion", bool(verified),
+         "Low" if v.get("overall") == "FAILED" else "Medium", f"validation: {val_text}"),
+        ("No item is blocked or failing", not bad, "Low", f"{bad} item(s) blocked or failing" if bad else "none"),
+        ("The source has not changed since the conversion", not d["stale"], "Low", "it changed" if d["stale"] else "unchanged"),
+        (f"No more than {MAX_GAP} points are still assumed", o["gap"] <= MAX_GAP, "Medium", f"{o['gap']} points assumed"),
+    ]
+    grade = banded
+    for _, holds, cap, _ in rules:
+        if not holds and GRADE_ORDER.index(cap) < GRADE_ORDER.index(grade):
+            grade = cap
+    return {"value": value, "grade": grade, "band_grade": banded, "bands": BANDS,
+            "rules": [{"rule": r, "passed": holds, "limits_to": None if holds else cap, "found": found} for r, holds, cap, found in rules],
+            "breakdown": [{"area": a["title"], "share": a["share"], "established": a["low"], "points": a["points"]} for a in d["areas"].values()],
+            "could_reach": o["high"], "validation": val_text}
 
 
 def _applied_connections(store: Any, pid: str) -> dict[str, dict]:
@@ -442,4 +497,19 @@ def render(d: dict[str, Any]) -> str:
             out += [f"### {it['name']}: {it['low']}% to {it['high']}% ({it['label'].replace('_', ' ')})", "", "| Criterion | State | Evidence |", "|---|---|---|"]
             out += [f"| {c['label']} | {c['state']} | {c['evidence'].replace('|', '/') or '-'} |" for c in it["criteria"]]
             out += [""]
-    return "\n".join(out) + "\n"
+    return "\n".join(out + _render_score(d.get("score"))) + "\n"
+
+
+def _render_score(s: Optional[dict[str, Any]]) -> list[str]:
+    """The final score, last in the report: the number, the grade, how the number adds up and which rules set the grade."""
+    if not s:
+        return []
+    out = ["", "## Confidence score", "", f"**{s['value']} / 100: {s['grade']}**" + (f" (the score alone is {s['band_grade']}; a rule below lowers it)" if s["grade"] != s["band_grade"] else ""), "",
+           f"The score is the established part of the range: only what has evidence counts. If every open question went well it could reach {s['could_reach']}.", "",
+           "| Area | Weight | Established | Points |", "|---|---|---|---|"]
+    out += [f"| {b['area']} | {b['share']}% | {b['established']}% | {b['points']} |" for b in s["breakdown"]]
+    out += [f"| **Score** | 100% | | **{s['value']}** |", "", "Grades: " + "; ".join(s["bands"]) + ". A rule that does not hold caps the grade:", "",
+            "| Rule | Holds | Found | Caps the grade at |", "|---|---|---|---|"]
+    out += [f"| {r['rule']} | {'yes' if r['passed'] else 'no'} | {r['found']} | {r['limits_to'] or '-'} |" for r in s["rules"]]
+    return out
+
