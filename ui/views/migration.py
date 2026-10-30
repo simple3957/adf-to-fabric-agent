@@ -10,7 +10,7 @@ import panels_consult
 import panels_ext
 import theme
 from components import active_jobs, call, client, watch_job
-from journey import (STEPS, connect_facts, consult_facts, convert_facts, deploy_facts, discover_facts, done_count, first_open, plan_facts, report_facts, review_facts,
+from journey import (connect_facts, consult_facts, convert_facts, deploy_facts, discover_facts, done_count, first_open, plan_facts, report_facts, review_facts,
                      statuses, validate_facts)
 
 api = client()

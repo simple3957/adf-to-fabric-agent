@@ -33,7 +33,7 @@ from adf2fabric.connections.models import (
 from adf2fabric import cloud
 from adf2fabric.connections.providers._login import LoginAttempt, LoginManager
 from adf2fabric.connections.redaction import redact
-from adf2fabric.connections.runner import CliResult, Runner, run_cli
+from adf2fabric.connections.runner import Runner, run_cli
 
 ARM = cloud.ARM_ENDPOINT
 ARM_RESOURCE = cloud.ARM_RESOURCE

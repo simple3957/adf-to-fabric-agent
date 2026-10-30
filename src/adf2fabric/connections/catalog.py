@@ -14,19 +14,11 @@ user's Azure sign-in and sends it once (see ``keyvault``).
 
 from __future__ import annotations
 
-import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Optional
 from urllib.parse import urlparse
 
-GUID = re.compile(r"^[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$")
-
-
-def normalize_guid(value: Optional[str]) -> str:
-    """An id as Fabric reports it: no spaces, no {braces}, lower case. Anything that is not a GUID after that is returned trimmed and unchanged,
-    so the caller's own check still says what is wrong with it."""
-    v = (value or "").strip().strip("{}").strip()
-    return v.lower() if GUID.match(v) else (value or "").strip()
+from adf2fabric.ids import GUID, normalize_guid  # noqa: F401 - both re-exported: callers read them from here
 
 
 @dataclass(frozen=True)
@@ -316,13 +308,3 @@ def build_connection_body(spec: ConnectorSpec, method: AuthMethod, endpoint: dic
             "credentialDetails": {"singleSignOnType": "None", "connectionEncryption": "NotEncrypted",
                                   "skipTestConnection": False, "credentials": credentials_object(method, values, secrets)}}
 
-
-def endpoint_key(spec: ConnectorSpec, endpoint: dict[str, str]) -> str:
-    """A normalised address used to match an existing Fabric connection (lower case; trailing dots/slashes removed)."""
-    parts = []
-    for ep in spec.endpoint:
-        v = (endpoint.get(ep.field.name) or "").strip().lower().rstrip("/.")
-        if spec.id == "adls_gen2" and ep.fabric_param == "server" and v and "." not in v:
-            v = f"{v}.dfs.core.windows.net"
-        parts.append(v)
-    return ";".join(parts)

@@ -25,6 +25,7 @@ from adf2fabric.connections.models import Check, CheckStatus, ConnectionState, P
 from adf2fabric.connections.providers._login import LoginAttempt, LoginManager
 from adf2fabric.connections.redaction import redact
 from adf2fabric.connections.runner import Runner, run_cli
+from adf2fabric.ids import GUID as _GUID
 
 EXE_ENV = "ADF2FABRIC_FAB_PATH"  # optional: full path to fab when it is not on PATH
 INSTALL_HINT = "Install the Fabric CLI (`pip install ms-fabric-cli`), then run `fab auth login`."
@@ -39,7 +40,6 @@ UNSUPPORTED_LOGIN_METHODS = {
                                  "other processes on this machine can read. Use a certificate, a managed identity, or the "
                                  "interactive sign-in."),
 }
-_GUID = re.compile(r"^[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$")
 
 
 class FabricCliProvider:

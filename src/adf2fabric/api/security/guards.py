@@ -10,12 +10,12 @@ import ipaddress
 import re
 import socket
 from pathlib import Path
-from typing import Callable, Iterable, Optional
+from typing import Callable, Iterable
 from urllib.parse import urlsplit
+from adf2fabric.ids import GUID as GUID
 
 ID = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 _.\-]{0,127}$")  # a project / linked-service / factory display name: no separators, no traversal
-GUID = re.compile(r"^[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}$")
 RESOURCE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.()\- ]{0,89}$")  # Azure resource group / factory names
 _ABS_PATH = re.compile(r"([A-Za-z]:[\\/][^\s'\"<>|]*|(?<![\w:/])/(?:home|Users|tmp|var|etc|opt|usr|mnt|private)[^\s'\"<>|]*)")
 _BLOCKED_HOSTS = {"localhost", "metadata.google.internal", "metadata", "instance-data"}

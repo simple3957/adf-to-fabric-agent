@@ -24,7 +24,7 @@ from adf2fabric.agent.deployment import verify as verify_mod
 from adf2fabric.agent.provisioning.transport import FabricGateway, ProvisionError
 from adf2fabric.agent.validation import views
 from adf2fabric.agent.validation.diffing import diff
-from adf2fabric.agent.validation.static import Collector, Inputs, _TOKEN, _connection_values, _lakehouse_artifacts
+from adf2fabric.agent.validation.static import Collector, Inputs, _connection_values, _lakehouse_artifacts
 from adf2fabric.project.validation import Category as K, ComponentStatus as S, Result as R, Stage
 
 _GUID_LEN = 36

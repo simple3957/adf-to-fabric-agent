@@ -10,13 +10,12 @@ the item is created in Fabric. This module lists those open items from the conve
 from __future__ import annotations
 
 import json
-import re
 from typing import Any, Optional
 
 from adf2fabric.project.locks import lock_for, write_atomic
 from adf2fabric.project.store import ProjectStore
+from adf2fabric.ids import GUID as _GUID
 
-_GUID = re.compile(r"^[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$")
 
 # item kind in a binding key -> (what to call it, the Fabric item type to list candidates from)
 ITEM_KINDS: dict[str, tuple[str, str]] = {

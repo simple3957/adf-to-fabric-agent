@@ -14,7 +14,7 @@ from typing import Any, Optional
 
 from adf2fabric.agent.discovery import DiscoveryAgent, DiscoveryRequest
 from adf2fabric.agent.discovery.adf_semantic import AdfSemanticDiscoverer, AdfSemanticDiscoveryRequest
-from adf2fabric.api.container import Container, Session, Settings
+from adf2fabric.api.container import Container, Settings
 from adf2fabric.api.demo_target import DemoFabricHttp
 from adf2fabric.connections.fabric import FabricService
 from adf2fabric.connections.models import (
@@ -113,10 +113,6 @@ def seed_project(store: ProjectStore, pid: str = DEMO_PROJECT) -> None:
 
 
 # ---- canned providers ----------------------------------------------------------------------------------------------
-
-
-class _Attempt(LoginAttempt):
-    pass
 
 
 class _DemoLogins:

@@ -9,7 +9,6 @@ from urllib.parse import urlparse
 
 from adf2fabric.agent.conversion import connectors
 from adf2fabric.agent.conversion.context import ActivityBuilder
-from adf2fabric.agent.conversion.expr_convert import is_expression
 from adf2fabric.project.conversion import ConversionStrategy, Impact, IssueSeverity
 from adf2fabric.project.discovery import AdfIO
 
@@ -267,10 +266,6 @@ def downgrade_if_not_direct(cx: ActivityBuilder) -> None:
 def literal_text(v: Any) -> Optional[str]:
     """A plain string value (not dynamic content), else None."""
     return v if isinstance(v, str) else None
-
-
-def expr_or_literal(v: Any) -> Any:
-    return v["value"] if is_expression(v) else v
 
 
 def block(cx: ActivityBuilder, code: str, reason: str, *alternatives: str, disposition: Optional[str] = None) -> None:

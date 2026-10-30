@@ -15,9 +15,7 @@ error detail is redacted.
 
 from __future__ import annotations
 
-import json
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any, Callable
 
 from adf2fabric.agent.discovery.adls.filesystems import (
@@ -36,6 +34,7 @@ from adf2fabric.project.discovery import (
 )
 from adf2fabric.project.store import ProjectNotFoundError, ProjectStore, slugify
 from adf2fabric.repository import authentication
+from adf2fabric.project.semantic import semantic as _semantic
 
 _PROVENANCE = {
     "storage_account": "explicit_cli_input",
@@ -202,9 +201,3 @@ def _classify_error(exc: Exception) -> AdlsDiscoveryStatus:
     return AdlsDiscoveryStatus.connectivity_failed
 
 
-def _semantic(discovery: AdlsDiscovery) -> dict:
-    """Discovery content used to detect meaningful change (excludes timestamps)."""
-    data = json.loads(discovery.model_dump_json())
-    data.pop("created_at", None)
-    data.pop("updated_at", None)
-    return data

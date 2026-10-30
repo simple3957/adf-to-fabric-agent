@@ -38,6 +38,7 @@ from adf2fabric.project.conversion import (
 from adf2fabric.project.discovery import UNPROCESSED_LOSS_REASONS, AdfSemanticDiscovery, AdfSemanticStatus
 from adf2fabric.project.reconstruction import Proposal
 from adf2fabric.project.store import ProjectNotFoundError, ProjectPathError, ProjectStore, slugify
+from adf2fabric.project.semantic import semantic as _semantic
 
 _PROVENANCE = {
     "input": "adf_semantic_discovery",
@@ -278,8 +279,3 @@ class ConversionAgent:
         return conv
 
 
-def _semantic(c: ProjectConversion) -> dict:
-    data = json.loads(c.model_dump_json())
-    data.pop("created_at", None)
-    data.pop("updated_at", None)
-    return data

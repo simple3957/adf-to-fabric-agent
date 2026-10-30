@@ -21,15 +21,14 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from datetime import datetime
 from typing import Any, Optional
 
 from adf2fabric.agent.deployment import compute_deploy
 from adf2fabric.agent.provisioning import requirements as rq
-from adf2fabric.agent.provisioning.state import ARM_CAPACITY_API, arm_capacity_path
+from adf2fabric.agent.provisioning.state import arm_capacity_path
 from adf2fabric.agent.provisioning.transport import ArmGateway, FabricGateway, ProvisionError
 from adf2fabric.project.compute import FabricEnvironmentProposal, FabricPoolProposal
-from adf2fabric.project.provisioning import (Action, Api, Existence, ExistingResource, ProvisionStep, Requirement, ResourceType as T,
+from adf2fabric.project.provisioning import (Action, Api, ExistingResource, ProvisionStep, Requirement, ResourceType as T,
                                              StepStatus, TargetSpec, TargetState, VerifiedResource)
 
 _CAP_NAME = re.compile(r"^[a-z][a-z0-9]{2,62}$")
@@ -58,9 +57,6 @@ class Ctx:
             self.sleep = time.sleep
 
     # -- what planning may conclude from the recorded state ---------------------------------------------------------------
-    def workspace_will_exist_after_plan(self) -> bool:
-        return self.state.workspace is not None or "workspace" in self.state.unread
-
     def children_readable(self, key: str) -> Optional[str]:
         """None if children of this kind can be judged from the state; else the reason they cannot (so they are 'unknown')."""
         if self.state.workspace is None:

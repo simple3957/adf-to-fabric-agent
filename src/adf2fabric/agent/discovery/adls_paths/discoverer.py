@@ -18,7 +18,6 @@ error detail is redacted. No ADF<->ADLS reconciliation.
 
 from __future__ import annotations
 
-import json
 from datetime import datetime, timezone
 from typing import Any, Callable
 
@@ -31,11 +30,11 @@ from adf2fabric.connectivity._azure import CredentialUnavailable, build_credenti
 from adf2fabric.project.discovery import (
     AdlsDiscoveryStatus,
     AdlsFilesystemPaths,
-    AdlsPath,
     AdlsPathsDiscovery,
 )
 from adf2fabric.project.store import ProjectNotFoundError, ProjectStore, slugify
 from adf2fabric.repository import authentication
+from adf2fabric.project.semantic import semantic as _semantic
 
 _PROVENANCE = {
     "storage_account": "adls_phase1_discovery",
@@ -222,9 +221,3 @@ def _classify_error(exc: Exception) -> AdlsDiscoveryStatus:
     return AdlsDiscoveryStatus.connectivity_failed
 
 
-def _semantic(discovery: AdlsPathsDiscovery) -> dict:
-    """Discovery content used to detect meaningful change (excludes timestamps)."""
-    data = json.loads(discovery.model_dump_json())
-    data.pop("created_at", None)
-    data.pop("updated_at", None)
-    return data

@@ -16,7 +16,6 @@ Security posture (details and limits in docs/security.md):
 import hmac
 import json
 import re
-import shutil
 import tempfile
 import threading
 import uuid
@@ -41,9 +40,8 @@ from adf2fabric.api.jobs import JobConflict
 from adf2fabric.api.security import AuditLog, Grants, LOCAL, Permission as P, Principal, ProjectAccess, SecuritySettings, UserError, UserStore
 from adf2fabric.api.security import guards
 from adf2fabric.api.security.audit import addr_hash
-from adf2fabric.api.security.config import LOOPBACK_HOSTS
 from adf2fabric.api.security.middleware import SecurityMiddleware
-from adf2fabric.api.security.permissions import ROLES, permissions_for, valid_role
+from adf2fabric.api.security.permissions import permissions_for
 from adf2fabric.api.security.principals import WILDCARD, make_principal
 from adf2fabric.api.security.ratelimit import RateLimiter
 from adf2fabric.api.stages import STAGES, StageError, run_stage
@@ -269,9 +267,6 @@ def create_app(settings: Optional[Settings] = None, live: Optional[Container] = 
         def audit(self, action: str, outcome: str = "ok", resource: str = "", resource_id: str = "", **detail: Any) -> None:
             audit.event(action, outcome, actor=self.principal.id, org=self.principal.org, resource=resource, resource_id=resource_id,
                         request_id=_rid(self.request), **detail)
-
-    def _guid(value: Optional[str], what: str) -> Optional[str]:
-        return guards.valid_guid(value, what) if value else value
 
     # ---- health + identity + mode ---------------------------------------------------------------------------------------
     @app.get("/health")

@@ -25,7 +25,7 @@ it does not execute anything, and the Fabric rule itself is not verified here.
 
 from __future__ import annotations
 
-from typing import Any, Iterator, Optional
+from typing import Iterator, Optional
 
 from adf2fabric.agent.discovery.adf_semantic.pipeline_analysis import walk
 from adf2fabric.project.conversion import ActivityConversion, ConversionIssue, Impact, IssueSeverity

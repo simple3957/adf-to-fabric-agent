@@ -26,7 +26,6 @@ from adf2fabric.agent.deployment import record as deploy_record
 from adf2fabric.agent.deployment import verify as verify_mod
 from adf2fabric.api.security.guards import scrub
 from adf2fabric.connections.redaction import redact
-from adf2fabric.project.discovery import AdfConfidence
 from adf2fabric.project.store import ProjectNotFoundError, ProjectStore
 
 STATES = ("discovered", "inferred", "unsupported", "blocked", "converted", "deployed", "runtime_validated")
@@ -198,7 +197,6 @@ def waves(store: ProjectStore, pid: str, roots: tuple[Path, ...] = ()) -> dict[s
     if inv is None:
         return {"available": False, "needs": "Run 'Resolve dependencies' on the Review step: the waves and the order are built from the references it resolves."}
     states = pipeline_states(store, pid)
-    kind_of = {w.number: w.kind for w in inv.waves}
     wave_of: dict[str, int] = {}
     for w in inv.waves:
         for item in w.items:  # most items are 'type:name'; the pipeline waves list plain pipeline names

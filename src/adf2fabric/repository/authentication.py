@@ -14,22 +14,6 @@ import os
 DEFAULT_TOKEN_ENV = "GITHUB_TOKEN"
 
 
-class MissingTokenError(Exception):
-    """Raised when the expected token environment variable is not set."""
-
-
-def resolve_token(env_var: str = DEFAULT_TOKEN_ENV) -> str:
-    """Return the token from ``env_var`` or raise a clear, secret-free error."""
-    token = os.environ.get(env_var)
-    if not token:
-        raise MissingTokenError(
-            f"No GitHub token found. Set the {env_var} environment variable to a "
-            "token with read access to the repository. The token is used only for "
-            "the git operation and is never stored."
-        )
-    return token
-
-
 def optional_token(env_var: str = DEFAULT_TOKEN_ENV) -> str | None:
     """The token from ``env_var``, or None: a public repository (or one git can already reach) needs none."""
     return os.environ.get(env_var) or None

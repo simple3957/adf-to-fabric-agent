@@ -21,7 +21,6 @@ instead of looking finished.
 from __future__ import annotations
 
 import ast
-import re
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -195,7 +194,6 @@ def transform(cells: list[Cell], analysis: Analysis, platform: str, secret_map: 
             continue
         if lang == "python":
             code = cell.code
-            first_magic = cell.magic
             stripped = "\n".join("" if l.lstrip().startswith(("%", "!")) else l for l in code.split("\n"))
             try:
                 tree = ast.parse(stripped)

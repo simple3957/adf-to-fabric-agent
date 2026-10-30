@@ -36,8 +36,8 @@ from adf2fabric.agent.conversion.fabric_schema import (
 )
 from adf2fabric.agent.discovery.adf_semantic.expressions import analyze_expression
 from adf2fabric.project.conversion import ConversionIssue, Impact, IssueSeverity
+from adf2fabric.ids import GUID as _GUID
 
-_GUID = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
 _TOKEN = re.compile(r"^<(connection|item|workspace-id|gateway|database)[:>].*>?$")
 _TIMESPAN = re.compile(r"^(\d+\.)?\d{1,2}:\d{2}:\d{2}$")
 _NESTED = ("activities", "ifTrueActivities", "ifFalseActivities", "defaultActivities")

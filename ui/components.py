@@ -393,9 +393,3 @@ def short_source(url: Optional[str]) -> str:
 def current_project() -> Optional[str]:
     return st.session_state.get("project_id")
 
-
-def require_project() -> Optional[str]:
-    pid = current_project()
-    if not pid:
-        st.warning("Pick a project in the sidebar, or import one on the **Source** page.")
-    return pid

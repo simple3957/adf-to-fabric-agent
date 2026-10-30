@@ -52,6 +52,7 @@ from adf2fabric.project.discovery import (
     UNPROCESSED_LOSS_REASONS,
 )
 from adf2fabric.project.source import SourceManifest
+from adf2fabric.project.semantic import semantic
 
 AUTO_RESOLVE = "autoresolveintegrationruntime"
 _SQL_PORT = 1433
@@ -288,11 +289,7 @@ def build_inventory(d: AdfSemanticDiscovery, manifest: Optional[SourceManifest] 
 
 
 def _comparable(inv: DependencyInventory) -> dict:
-    import json
-
-    data = json.loads(inv.model_dump_json())
-    data.pop("created_at", None)
-    data.pop("updated_at", None)
+    data = semantic(inv)
     for c in data.get("checks", []):
         c.pop("checked_at", None)
     for dep in data.get("dependencies", []):

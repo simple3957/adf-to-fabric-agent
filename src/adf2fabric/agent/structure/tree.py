@@ -8,13 +8,12 @@ puts the ADF side and the deployed Fabric side next to each other.
 
 from __future__ import annotations
 
-import re
 from collections import Counter
 from dataclasses import dataclass, field
 from typing import Any, Iterator, Optional
+from adf2fabric.ids import GUID as _GUID
 
 NESTED_LISTS = ("activities", "ifTrueActivities", "ifFalseActivities", "defaultActivities")
-_GUID = re.compile(r"^[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$")
 
 
 @dataclass

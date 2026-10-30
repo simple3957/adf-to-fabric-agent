@@ -19,10 +19,10 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from typing import Iterable, Optional
+from typing import Iterable
+from adf2fabric.ids import GUID as _GUID
 
 ONELAKE_HOST = "onelake.dfs.fabric.microsoft.com"
-_GUID = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
 _NAME = re.compile(r"^[A-Za-z0-9_.\-]{1,256}$")  # no spaces or special characters: the abfs form does not allow them
 _ACCOUNT = r"[a-z0-9]{3,24}"
 _CONTAINER = r"[a-z0-9](?:[a-z0-9-]{1,61}[a-z0-9])?"

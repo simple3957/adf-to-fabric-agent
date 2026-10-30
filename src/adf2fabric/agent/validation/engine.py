@@ -15,13 +15,11 @@ static pass can never produce it by themselves.
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Optional
 
 from adf2fabric.agent.provisioning.transport import FabricGateway
 from adf2fabric.agent.validation import remote, static, views
 from adf2fabric.project.provisioning import VerificationReport as ProvVerification
-from adf2fabric.project.source import SourceManifest
 from adf2fabric.project.store import ProjectNotFoundError, ProjectStore
 from adf2fabric.project.validation import (Category as K, CheckResult, ComponentStatus as S, InventoryCounts, Result as R, Stage, StageSummary, ValidationReport)
 
@@ -65,7 +63,6 @@ def _assisted_sources(store: ProjectStore, pid: str, src: views.SourceScan) -> l
 
 
 def load_inputs(store: ProjectStore, pid: str) -> static.Inputs:
-    pdir = store.project_dir(pid)
     src = views.scan_source(store.source_dir(pid))
     tgt = views.scan_target(store.conversion_dir(pid))
     assisted = _assisted_sources(store, pid, src)

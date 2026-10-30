@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import copy
 import json
-import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Optional
@@ -44,8 +43,8 @@ from adf2fabric.project.discovery import (
     AdfPipeline,
     AdfTrigger,
 )
+from adf2fabric.ids import GUID as _GUID
 
-_GUID = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
 NESTED_KEYS = ("activities", "ifTrueActivities", "ifFalseActivities", "defaultActivities")
 AUTO_RESOLVE_IR = "autoresolveintegrationruntime"
 

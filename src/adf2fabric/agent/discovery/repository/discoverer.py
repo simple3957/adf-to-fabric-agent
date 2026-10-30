@@ -20,7 +20,6 @@ commit SHA.
 
 from __future__ import annotations
 
-import json
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -35,6 +34,7 @@ from adf2fabric.project.discovery import (
 from adf2fabric.project.models import Project
 from adf2fabric.project.store import ProjectNotFoundError, ProjectStore, slugify
 from adf2fabric.repository import git
+from adf2fabric.project.semantic import semantic as _semantic
 
 _PROVENANCE = {
     "source": "intake_metadata",
@@ -171,9 +171,3 @@ class RepositoryDiscoverer:
         return discovery
 
 
-def _semantic(discovery: RepositoryDiscovery) -> dict:
-    """Inventory content used to detect meaningful change (excludes timestamps)."""
-    data = json.loads(discovery.model_dump_json())
-    data.pop("created_at", None)
-    data.pop("updated_at", None)
-    return data

@@ -20,7 +20,6 @@ schema", not "the service accepted it". Runtime executability is tracked separat
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Optional
 
 SOURCES = (
     "https://learn.microsoft.com/en-us/rest/api/fabric/articles/item-management/definitions/datapipeline-definition",
@@ -194,6 +193,3 @@ INFERRED: tuple[str, ...] = (
     "newClusterSparkConf and policyId follow the same naming, unconfirmed)",
 )
 
-
-def schema_for(fabric_type: str) -> Optional[FabricActivitySchema]:
-    return FABRIC_ACTIVITIES.get(fabric_type)

@@ -23,7 +23,6 @@ modifies them. Connectivity answers "can I reach the factory?"; Discovery answer
 
 from __future__ import annotations
 
-import json
 from datetime import datetime, timezone
 from typing import Any, Callable
 
@@ -43,6 +42,7 @@ from adf2fabric.project.discovery import (
 from adf2fabric.project.models import AdfAccess, ConnectivityStatus
 from adf2fabric.project.store import ProjectNotFoundError, ProjectStore, slugify
 from adf2fabric.repository import authentication
+from adf2fabric.project.semantic import semantic as _semantic
 
 _PROVENANCE = {
     "subscription_id": "explicit_cli_input",
@@ -321,9 +321,3 @@ def _http_detail(status_code: int | None, factory: str) -> str:
     )
 
 
-def _semantic(discovery: AdfDiscovery) -> dict:
-    """Discovery content used to detect meaningful change (excludes timestamps)."""
-    data = json.loads(discovery.model_dump_json())
-    data.pop("created_at", None)
-    data.pop("updated_at", None)
-    return data

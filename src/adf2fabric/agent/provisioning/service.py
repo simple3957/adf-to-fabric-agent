@@ -16,8 +16,7 @@ from adf2fabric.agent.provisioning.planner import make_plan_and_state
 from adf2fabric.agent.provisioning.report import render_plan, render_verification
 from adf2fabric.agent.provisioning.transport import ArmGateway, FabricGateway
 from adf2fabric.agent.provisioning.verifier import mark_run, verify_plan
-from adf2fabric.project.provisioning import (Action, ProvisioningApproval, ProvisioningPlan, ProvisioningRun, StepStatus, TargetSpec, TargetState,
-                                             VerificationReport)
+from adf2fabric.project.provisioning import (Action, ProvisioningApproval, ProvisioningPlan, ProvisioningRun, TargetSpec, VerificationReport)
 from adf2fabric.project.store import ProjectStore
 
 

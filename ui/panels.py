@@ -13,6 +13,7 @@ from api_client import ApiClient
 import options
 from components import STATE_LABELS, call, can, empty_state, intent, run_job, short_source, state_badge, status_badge, test_report, typed_confirm
 import panels_assist
+from journey import PROBLEM_STATES, READY_STATES
 import panels_bindings
 
 
@@ -44,8 +45,7 @@ def discover(api: ApiClient, pid: str, project: dict | None, found: dict | None)
 
 
 # ---- 2. connect -----------------------------------------------------------------------------------------------------------
-READY = ("connection_tested", "connection_configured", "skipped")
-PROBLEM = ("manual_action_required", "validation_failed")
+READY, PROBLEM = READY_STATES, PROBLEM_STATES  # one definition of which connection states count as done / needing attention (journey.py)
 
 
 def _grid(items: list, render) -> None:

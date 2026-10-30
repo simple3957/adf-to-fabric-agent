@@ -18,7 +18,6 @@ require network access (that is its purpose).
 
 from __future__ import annotations
 
-import json
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -44,6 +43,7 @@ from adf2fabric.project.models import (
     UnsupportedRequirement,
 )
 from adf2fabric.project.store import ProjectNotFoundError, ProjectStore, slugify
+from adf2fabric.project.semantic import semantic
 
 # Connectivity statuses that mean the config + credential references were
 # actually supplied (validation may still have failed afterwards).
@@ -289,9 +289,7 @@ def _semantic(consultation: Consultation) -> dict:
     Excludes the timestamps and every volatile ``validated_at`` so that
     re-running with identical input is recognised as *unchanged*.
     """
-    data = json.loads(consultation.model_dump_json())
-    data.pop("created_at", None)
-    data.pop("updated_at", None)
+    data = semantic(consultation)
     for conn in data.get("connectivity", []):
         conn.pop("validated_at", None)
     for req in data.get("access", []):

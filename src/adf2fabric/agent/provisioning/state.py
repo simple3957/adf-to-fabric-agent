@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from typing import Any, Optional
 
 from adf2fabric.agent.provisioning.transport import ArmGateway, FabricGateway, ProvisionError
-from adf2fabric.project.provisioning import Existence, ExistingResource, TargetSpec, TargetState
+from adf2fabric.project.provisioning import ExistingResource, TargetSpec, TargetState
 
 ARM_CAPACITY_API = "2023-11-01"
 ITEM_TYPES = ("Lakehouse", "Warehouse", "Environment", "Notebook", "SparkJobDefinition")

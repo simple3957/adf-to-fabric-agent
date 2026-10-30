@@ -35,6 +35,7 @@ from adf2fabric.project.discovery import (
     UNPROCESSED_LOSS_REASONS as _LOSS_REASONS,
 )
 from adf2fabric.project.store import ProjectNotFoundError, ProjectStore, slugify
+from adf2fabric.project.semantic import semantic as _semantic
 
 _PROVENANCE = {
     "source": "repository_source_immutable",
@@ -54,7 +55,6 @@ _RELEVANT_KINDS = {
     AdfArtifactKind.change_data_capture,
     AdfArtifactKind.dataflow,
 }
-
 
 
 class AdfSemanticDiscoverer:
@@ -435,9 +435,3 @@ def _sum_counts(pipelines) -> dict:
     return {k: total[k] for k in sorted(total)}
 
 
-def _semantic(discovery: AdfSemanticDiscovery) -> dict:
-    """Discovery content used to detect meaningful change (excludes timestamps)."""
-    data = json.loads(discovery.model_dump_json())
-    data.pop("created_at", None)
-    data.pop("updated_at", None)
-    return data

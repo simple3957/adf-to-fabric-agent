@@ -7,7 +7,6 @@ children-first logic the CLI uses); item assembly mirrors ``cli.py``'s deploy co
 from __future__ import annotations
 
 import json
-from pathlib import Path
 from typing import Any, Callable, Optional
 
 from adf2fabric.agent.conversion import ConversionAgent, ConversionRequest
@@ -17,7 +16,7 @@ from adf2fabric.agent.discovery import DiscoveryAgent, DiscoveryRequest
 from adf2fabric.agent.discovery.adf_semantic import AdfSemanticDiscoveryRequest
 from adf2fabric.agent.reconstruction.agent import ReconstructionAgent
 from adf2fabric.agent.reconstruction.models import ReconstructionRequest
-from adf2fabric.api.container import FABRIC_RESOURCE, Container, Session
+from adf2fabric.api.container import Container, Session
 from adf2fabric.project.store import ProjectStore
 
 STAGES = ("discovery", "semantic", "dependencies", "workloads", "reconstruct", "convert", "compute", "validate", "deploy_dry_run", "deploy_apply", "verify")
@@ -144,7 +143,7 @@ def _verify(c: Container, session: Session, pid: str, options: dict, log: Log) -
     from adf2fabric.connections.providers.azure_cli import ProviderError
 
     try:
-        token = c.fabric_token(session)
+        c.fabric_token(session)  # signed in to Fabric? (raises when not); the run helper reads its own token
     except ProviderError as exc:
         raise StageError(str(exc), getattr(exc, "actions", None) or ["Sign in to Fabric on the Connections page."]) from None
     try:

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from adf2fabric.project.dependencies import AccessStatus, DependencyInventory, Severity
+from adf2fabric.project.dependencies import DependencyInventory
 
 
 def _cell(text: str) -> str:

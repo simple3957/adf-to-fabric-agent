@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 from urllib.parse import urlparse
 
-from adf2fabric.agent.conversion.compute_plan import (DATABRICKS_TYPES, SYNAPSE_TYPES, ComputeSources, build_compute_plan,
+from adf2fabric.agent.conversion.compute_plan import (ComputeSources, build_compute_plan,
                                                       suggest_runtime)
 from adf2fabric.agent.dependencies.access import TokenSource
 from adf2fabric.agent.deployment import sjd_deploy
@@ -30,9 +30,8 @@ from adf2fabric.agent.workloads.source import Code, SourceResolver
 from adf2fabric.project.compute import ComputeUse
 from adf2fabric.project.discovery import AdfActivity, AdfSemanticDiscovery
 from adf2fabric.project.store import ProjectStore
-from adf2fabric.project.workloads import (AlternativeOption, Approval, Classification as K, CodeSource, CodeStatus as C, ExecutionEnvironment,
-                                          ExecutionEvidence, Finding, FindingCategory as F, GeneratedArtifact, GenerationEvidence,
-                                          LibraryResolution, OutputContract, ParameterContract, RequiredResource, Rewrite, Severity as S,
+from adf2fabric.project.workloads import (AlternativeOption, Classification as K, CodeSource, CodeStatus as C, ExecutionEnvironment,
+                                          Finding, FindingCategory as F, GeneratedArtifact, LibraryResolution, OutputContract, ParameterContract, RequiredResource, Rewrite, Severity as S,
                                           StaticCheck, WorkloadEntry, WorkloadKind as W, WorkloadManifest, WorkloadSummary)
 
 # Where a notebook's exit value is in the Fabric pipeline activity output, and whether a live run confirmed it.

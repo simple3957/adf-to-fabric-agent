@@ -17,7 +17,7 @@ from adf2fabric.agent.conversion.fabric_schema import FABRIC_ACTIVITIES
 from adf2fabric.agent.conversion.registry import rule_for
 from adf2fabric.agent.conversion.validation import validate_content
 from adf2fabric.agent.validation import views
-from adf2fabric.agent.validation.diffing import diff, has_plaintext_secret, redact_value
+from adf2fabric.agent.validation.diffing import has_plaintext_secret, redact_value
 from adf2fabric.agent.validation.views import ActView, SourceScan, TargetPipeline, TargetScan
 from adf2fabric.project.discovery import AdfSemanticDiscovery
 from adf2fabric.project.source import SourceManifest
@@ -25,7 +25,6 @@ from adf2fabric.project.validation import Category as K, CheckResult, ComponentC
 from adf2fabric.project.workloads import WorkloadManifest
 
 _TOKEN = re.compile(r"^<(connection|item|workspace-id|gateway|database)[:>]")
-_GUID = re.compile(r"^[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}$")
 _PARAM = re.compile(r"pipeline\(\)\.parameters\.([A-Za-z_]\w*)", re.I)
 _VAR = re.compile(r"variables\('([^']+)'\)", re.I)
 _ACT = re.compile(r"activity\('([^']+)'\)", re.I)

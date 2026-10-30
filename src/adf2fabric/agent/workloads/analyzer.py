@@ -18,7 +18,6 @@ import re
 import sys
 from dataclasses import dataclass, field
 from typing import Iterable, Optional
-from urllib.parse import urlparse
 
 from adf2fabric.agent.workloads.notebook_format import Cell
 from adf2fabric.project.workloads import Finding, FindingCategory as K, Severity as S
@@ -413,7 +412,6 @@ def _fallback_python(c: _Collector, cell: Cell, platform: str) -> None:
 def _special_lines(c: _Collector, cell: Cell, platform: str) -> None:
     """Magic and command lines that ``ast`` cannot see."""
     for off, line in enumerate(cell.code.split("\n")):
-        n = cell.start_line + off
         m = _RE_PIP.match(line)
         if m:
             c.a.pip_requirements += [p for p in re.split(r"\s+", m.group(1).strip()) if p and not p.startswith("-")]

@@ -104,7 +104,7 @@ def _explorer(data: dict) -> None:
         tags = f"{n['type'].replace('_', ' ')} · Wave {n['wave']}"
         st.caption(tags)
         if n.get("state"):
-            from components import PSTATE_ICON, PSTATE_LABEL
+            from components import PSTATE_LABEL
             st.markdown(theme.badge(PSTATE_LABEL.get(n["state"], n["state"]), "info"), unsafe_allow_html=True)
         elif n.get("category"):
             st.markdown(theme.badge(n["category"].replace("_", " "), "warning" if n.get("blocks") else "neutral"), unsafe_allow_html=True)

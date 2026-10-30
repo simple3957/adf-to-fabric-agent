@@ -32,12 +32,12 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
 
 from adf2fabric import cloud
+from adf2fabric.ids import GUID as _GUID
 
 FABRIC_API = cloud.FABRIC_API
 FABRIC_SCOPE = cloud.FABRIC_SCOPE
 _PLACEHOLDER = re.compile(r"<(connection|gateway|item|workspace-id|database)[:>][^\"]*>")
 _CHILD = re.compile(r"<item:pipeline:([^>\"]+)>")
-_GUID = re.compile(r"^[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$")
 _MAX_POLLS = 60
 
 

@@ -35,6 +35,7 @@ from adf2fabric.project.reconstruction import (
     Severity,
 )
 from adf2fabric.project.store import ProjectNotFoundError, ProjectStore, slugify
+from adf2fabric.project.semantic import semantic as _semantic
 
 COMPLETED_SEMANTIC = "adf-semantic.completed.yaml"
 _PROVENANCE = {
@@ -157,8 +158,3 @@ class ReconstructionAgent:
         return rec
 
 
-def _semantic(r: ProjectReconstruction) -> dict:
-    data = json.loads(r.model_dump_json())
-    data.pop("created_at", None)
-    data.pop("updated_at", None)
-    return data

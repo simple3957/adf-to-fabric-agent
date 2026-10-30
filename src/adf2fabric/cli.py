@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import sys
 from pathlib import Path
+from typing import Optional
 
 import click
 
@@ -1668,7 +1669,6 @@ def deploy_cmd(project_name: str, workspace_id: str, pipelines: tuple[str, ...],
         DeployError, DeployItem, FabricClient, child_refs, deploy,
     )
     from adf2fabric.connectivity._azure import CredentialUnavailable, build_credential
-    from adf2fabric.project.models import AzureCredentialRef
 
     store = ProjectStore(projects_root(load_config()))
     try:

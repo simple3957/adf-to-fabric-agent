@@ -68,7 +68,6 @@ def assess(entry: dict[str, Any], conv_pipeline: Any, checks: list[dict], verifi
 
     # --- conversion -----------------------------------------------------------------------------------------------------------
     acts = list(getattr(conv_pipeline, "activities", []) or [])
-    statuses = [a.status.value for a in acts]
     needs = [a.source_name for a in acts if a.status.value in ("manual_required", "blocked")]
     diffs = [a.source_name for a in acts if a.status.value == "converted_with_differences"]
     if conv_pipeline is None:

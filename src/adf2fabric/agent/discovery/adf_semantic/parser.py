@@ -21,7 +21,6 @@ from typing import Any, Optional
 
 from adf2fabric.agent.discovery.repository.artifacts import _SECRET_KEY_HINTS
 from adf2fabric.project.discovery import (
-    NOT_EXTRACTED,
     AdfChangeDataCapture,
     AdfColumn,
     AdfArtifactKind,

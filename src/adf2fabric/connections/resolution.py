@@ -109,7 +109,6 @@ def usage(d: AdfSemanticDiscovery, ls_name: str) -> tuple[list[str], list[dict[s
     """(datasets using it, activities using it, literal LS-parameter arguments seen in datasets and activity IO)."""
     low = ls_name.lower()
     ds_names, acts, args = [], [], {}
-    ds_by = {x.name.lower(): x for x in d.datasets}
     for ds in d.datasets:
         if ds.linked_service_ref and ds.linked_service_ref.name.lower() == low:
             ds_names.append(ds.name)
