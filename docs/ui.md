@@ -103,6 +103,11 @@ Checked against the API routes and the CLI on 2026-10-29. Everything the API exp
   deploy stays locked until a clean dry run of the same pipelines *and options* (the server compares them).
 * A deploy made earlier is read back from the server, so a reload does not say "Deploy needs to run again".
 * A run older than the pipeline's latest deploy never counts as proof (`verify.current_record`).
+* **Connection ids** (Connect: "existing connection"; Convert: Invoke-pipeline and lakehouse): a pasted id is normalised (spaces, `{braces}`, capitals,
+  `catalog.normalize_guid`). An existing connection must be the type the linked service needs. The Convert step checks a connection against the ones the
+  account can see: a wrong type is refused, an id it cannot see is saved and shown as unverified.
+* **Sign-in page**: drawn before, and outside, the top bar. A lockout or service error is a message, never a traceback; a valid token still signs in during a
+  lockout, and a request with no token does not count toward it.
 
 ## Tests
 

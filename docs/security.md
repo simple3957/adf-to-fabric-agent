@@ -30,7 +30,8 @@ it (`azure:use`) acts through that session, restricted to the subscriptions, ten
   token is not attributable to a person.
 * Failed sign-ins lock a client's guesses out after 8 attempts for 5 minutes (per client address hash) and are audited. A valid per-user
   token is never held back by that lockout (it cannot be guessed, and a proxy or office address must not lock out real users); the shared
-  legacy token can be guessed, so it stays behind it. A damaged user store refuses everyone (503); it never lets anyone in.
+  legacy token can be guessed, so it stays behind it. A request with no token at all is a plain 401 and is neither counted nor locked out: nothing can be
+  guessed without a token, and the UI's sign-in page sends one on every load. A damaged user store refuses everyone (503); it never lets anyone in.
 * The Host header must be a plain host (and numeric port) on the allow-list: `127.0.0.1:8765@evil.example` is refused.
 * A brief cannot be approved by the person who submitted it (four eyes; the single user of an unauthenticated local install is exempt).
 * Brief, journey and notes records are changed under a per-file lock (a thread lock plus an OS file lock on a `.lock` sidecar) with unique
