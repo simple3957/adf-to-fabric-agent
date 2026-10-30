@@ -425,6 +425,13 @@ def test_secret_detection_ignores_references_and_expressions():
     assert diffing.has_plaintext_secret({"accountKey": "abcdefabcdef"}) == ["accountKey"]
 
 
+def test_an_adf_encrypted_credential_is_not_a_plaintext_secret_but_stays_redacted():
+    blob = "ew0KICAiVmVyc2lvbiI6ICIyMDE3LTExLTMwIiwNCiAgIlByb3RlY3Rpb25Nb2RlIjogIktleSIsDQo="  # how ADF writes it into Git
+    assert diffing.has_plaintext_secret({"typeProperties": {"url": "https://a.dfs.core.windows.net", "encryptedCredential": blob}}) == []
+    assert diffing.has_plaintext_secret({"typeProperties": {"encryptedCredential": blob, "accountKey": "abcdefabcdef"}}) == ["typeProperties.accountKey"]
+    assert blob not in diffing.redact_value("encryptedCredential", blob)  # never shown in a diff or report
+
+
 # =====================================================================================================================
 # API and deployment stages (a fake service that records every request)
 # =====================================================================================================================
@@ -769,3 +776,43 @@ def test_an_activity_whose_every_dataset_is_repointed_says_it_reads_through_the_
     r = run(store, pid)
     rows = check(r, "connections_secrets.linked_service", "linked_service:LS_LAKE")
     assert {c.result for c in rows} == {R.PASS} and "lakehouse shortcut" in " ".join(c.summary for c in rows)
+
+
+@pytest.fixture(scope="module")
+def dynamic_folder(tmp_path_factory):
+    """A Copy whose sink folder is a pipeline parameter passed to the dataset: the case whose expression convert --lakehouse rewrites."""
+    tmp = tmp_path_factory.mktemp("val_dyn")
+    files = {**FILES, "pipeline/PL_Dyn.json": pipe(copy_activity("Copy_Dyn", outputs=[ref("Dataset", "DS_LAKE", folder=expr("@pipeline().parameters.dst"))]),
+                                                    name="PL_Dyn", parameters=["dst"])}
+    store, pid = _make_project(tmp, files)
+    AdfSemanticDiscoverer(store).run(AdfSemanticDiscoveryRequest(project_name="test-proj"))
+    res = tmp / "res.json"
+    res.write_text(json.dumps(RESOLUTIONS), encoding="utf-8")
+    assert ConversionAgent(store).run(ConversionRequest(project_name="test-proj", resolutions_path=str(res))).success
+    return store, pid
+
+
+def _sink_folder(location_type, folder):
+    def edit(data):
+        copy = next(a for a in acts(data) if a.name == "Copy_Dyn").raw
+        copy["typeProperties"]["sink"]["datasetSettings"]["typeProperties"]["location"] = {"type": location_type, "folderPath": expr(folder),
+                                                                                           "fileName": "data.parquet"}
+    return edit
+
+
+@pytest.mark.parametrize("location, folder, status", [
+    ("LakehouseLocation", "@concat('raw/', pipeline().parameters.dst)", S.transformed),  # the shortcut in front: the repoint's own rewrite
+    ("LakehouseLocation", "@concat('raw/', toUpper(pipeline().parameters.dst))", S.altered),  # the expression itself changed
+    ("AzureBlobFSLocation", "@concat('raw/', pipeline().parameters.dst)", S.altered),  # not a Lakehouse folder: no repoint explains it
+])
+def test_a_lakehouse_folder_with_the_shortcut_in_front_is_a_transformation_not_an_alteration(dynamic_folder, tmp_path, location, folder, status):
+    from adf2fabric.project.store import ProjectStore
+
+    base, pid = dynamic_folder
+    shutil.copytree(base.projects_root, tmp_path / "projects")
+    store = ProjectStore(tmp_path / "projects")
+    assert {x.id: x for x in run(store, pid).components}["pipeline:PL_Dyn"].status is S.matched  # before the edit the expression is carried verbatim
+    edit_target(store, pid, "PL_Dyn", _sink_folder(location, folder))
+    r = run(store, pid)
+    assert {x.id: x for x in r.components}["pipeline:PL_Dyn/activity:Copy_Dyn"].status is status
+    assert results(r, "expression_preservation.expressions", "pipeline:PL_Dyn") == {R.PASS}

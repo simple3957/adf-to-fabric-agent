@@ -22,6 +22,8 @@ SECRET_KEY = re.compile(r"(?i)(password|passwd|pwd|secret|token|apikey|api_key|a
 _SECRET_VALUE = re.compile(r"(?i)(bearer\s+[\w\-.~+/=]+|eyJ[\w\-.]{20,}|AccountKey=[^;\s]+|SharedAccessSignature=[^;\s]+|sig=[^&\s]+|"
                            r"password=[^;&\s]+|[A-Za-z0-9+/]{40,}={0,2})")
 _SAFE_KEYS = {"secretname", "secretversion", "secretpermissions", "secretbase", "tokenaudience"}  # names/references, not values
+# Encrypted by ADF for its own factory (the integration runtime's credential manager): not plaintext, and unreadable anywhere else. Still redacted.
+_ENCRYPTED_KEYS = {"encryptedcredential"}
 MAX = 120
 
 
@@ -74,7 +76,7 @@ def has_plaintext_secret(node: Any) -> list[str]:
         if not isinstance(v, str) or not v:
             continue
         last = re.split(r"[.\[\]]", path.rstrip("]"))[-1].lower()
-        if v.startswith(("@", "<")) or last in _SAFE_KEYS:
+        if v.startswith(("@", "<")) or last in _SAFE_KEYS or last in _ENCRYPTED_KEYS:
             continue
         if SECRET_KEY.search(last) and not re.fullmatch(r"[0-9a-fA-F-]{36}", v) and last not in ("tokenaudience",) and not _looks_like_reference(path, v):
             hits.append(path)

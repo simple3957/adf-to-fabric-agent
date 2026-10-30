@@ -388,6 +388,12 @@ def _expressions(inp: Inputs, c: Collector, tp: TargetPipeline, s_acts: list[Act
         t_ex = [views.normalise_expression(x) for _, x in views.expressions({"typeProperties": t_own.get("typeProperties"), "inputs": t_own.get("inputs"), "outputs": t_own.get("outputs")})]
         blob = "\n".join(t_ex)
         lost = [x for _, x in s_ex if x not in blob]
+        folders = _lakehouse_folders(t_own)
+        prefixed = [x for x in lost if _shortcut_prefixed(x, folders)]
+        if prefixed:  # the expected rewrite of convert --lakehouse: carried, with the shortcut folder in front
+            lost = [x for x in lost if x not in prefixed]
+            c.comp(f"pipeline:{tp.name}/activity:{a.name}", "activity", S.transformed, note="OneLake shortcut folder put in front (convert --lakehouse)",
+                   diff_=[f"~ {p}: {redact_value(p, x)[:80]}" for p, x in s_ex if x in prefixed])
         if not lost:
             kept += len(s_ex)
         elif len(t_ex) >= len(s_ex):
@@ -406,6 +412,33 @@ def _expressions(inp: Inputs, c: Collector, tp: TargetPipeline, s_acts: list[Act
            f"Every source expression is carried ({kept} identical" + (f", {len(altered)} rewritten: review them" if altered else "") + ")."),
           component=comp, evidence=evid, remediation="Reproduce the dropped dynamic content in Fabric; a lost expression changes behaviour." if dropped else
           ("Rewritten expressions are listed as evidence: confirm each one means the same." if altered else ""))
+
+
+def _lakehouse_folders(node: Any) -> list[str]:
+    """The folder expressions of the Lakehouse locations a generated activity writes (convert --lakehouse puts the shortcut in front of them)."""
+    out: list[str] = []
+    stack = [node]
+    while stack:
+        cur = stack.pop()
+        if isinstance(cur, dict):
+            if cur.get("type") == "LakehouseLocation":
+                f = cur.get("folderPath")
+                v = f.get("value") if isinstance(f, dict) else f
+                if isinstance(v, str):
+                    out.append(views.normalise_expression(v))
+            stack.extend(cur.values())
+        elif isinstance(cur, list):
+            stack.extend(cur)
+    return out
+
+
+def _shortcut_prefixed(expr: str, folders: list[str]) -> bool:
+    """True when ``expr`` is a Lakehouse folder with only the OneLake shortcut in front: ``@expr`` -> ``@concat('<shortcut>/', expr)``, the one
+    rewrite ``conversion/handlers/_common._prefixed_folder`` makes. An interpolated folder keeps the source text whole, so it never reaches here."""
+    if not expr.startswith("@") or expr.startswith("@{") or expr.startswith("@@"):
+        return False
+    pat = re.compile(r"@concat\('[^']+/', " + re.escape(expr[1:]) + r"\)")
+    return any(pat.fullmatch(f) for f in folders)
 
 
 def _unused_dataset_parameter(own: dict, path: str, datasets: dict[str, str]) -> bool:
