@@ -1,0 +1,6 @@
+# Source is stored with LF line endings whatever the machine (a Windows checkout with autocrlf made 250 of 252 files CRLF on disk).
+* text=auto eol=lf
+*.bat text eol=crlf
+*.ps1 text eol=crlf
+*.png binary
+*.pdf binary

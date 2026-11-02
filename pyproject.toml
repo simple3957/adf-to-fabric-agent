@@ -52,6 +52,9 @@ adf2fabric = "adf2fabric.cli:cli"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+adf2fabric = ["agent/assist/prompts/*.md"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 filterwarnings = ["ignore:Field name .* shadows an attribute in parent:UserWarning"]

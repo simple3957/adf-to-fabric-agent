@@ -40,7 +40,13 @@ class AssistError(Exception):
 
 
 def prompts_dir() -> Path:
-    return Path(os.environ.get("ADF2FABRIC_PROMPTS_DIR") or REPO_ROOT / "prompts" / "assist")
+    """The prompt templates: ``ADF2FABRIC_PROMPTS_DIR``, else a team's own ``prompts/assist`` next to the projects when it exists, else the ones shipped inside
+    the package (so a plain ``pip install`` has them too)."""
+    env = os.environ.get("ADF2FABRIC_PROMPTS_DIR")
+    if env:
+        return Path(env)
+    own = REPO_ROOT / "prompts" / "assist"
+    return own if own.is_dir() else Path(__file__).parent / "prompts"
 
 
 def _now() -> str:

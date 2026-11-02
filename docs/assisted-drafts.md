@@ -56,9 +56,9 @@ The same flow is on the Convert step (a section **Model-assisted drafts (optiona
 | `ADF2FABRIC_LLM_TIMEOUT` | `180` | Seconds allowed for one draft. |
 | `ADF2FABRIC_LLM_WORKERS` | `2` | Drafts generated at the same time (API). |
 | `CLAUDE_CLI` | `claude` on `PATH` | Path to the CLI. |
-| `ADF2FABRIC_PROMPTS_DIR` | `prompts/assist` | Where the templates are read from. |
+| `ADF2FABRIC_PROMPTS_DIR` | the templates shipped in `src/adf2fabric/agent/assist/prompts/` | Where the templates are read from. A `prompts/assist/` folder next to `projects/` is used instead when it exists (copy the shipped ones there to customise them). |
 
-`prompts/assist/base.md` is the frame of every prompt, `pipeline.md` says how to fix a pipeline, and `project.md` holds the migration team's requirements (they
+`base.md` (in the prompts folder) is the frame of every prompt, `pipeline.md` says how to fix a pipeline, and `project.md` holds the migration team's requirements (they
 take priority). The files support `{{placeholders}}` (`object.name`, `target.workspace`), `{{#if x}} ... {{else}} ... {{/if}}` and `<!-- comments -->`; edits apply
 to the next draft with no restart.
 
