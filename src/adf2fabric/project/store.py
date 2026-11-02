@@ -23,7 +23,7 @@ import yaml
 from pydantic import BaseModel
 
 from adf2fabric.paths import repo_root
-from adf2fabric.project.locks import write_atomic
+from adf2fabric.project.locks import open_text, read_text_retry, write_atomic
 from adf2fabric.project.dependencies import DependencyInventory
 from adf2fabric.project.validation import ValidationReport
 from adf2fabric.project.workloads import WorkloadManifest
@@ -125,7 +125,7 @@ class ProjectStore:
                 f"No source manifest for '{project_id}' under {self.projects_root}. "
                 "Run `adf2fabric intake` first."
             )
-        with path.open(encoding="utf-8") as f:
+        with open_text(path) as f:
             data = _safe_load(f)
         return SourceManifest.model_validate(data)
 
@@ -165,7 +165,7 @@ class ProjectStore:
                 f"No project '{project_id}' under {self.projects_root}. "
                 "Run `adf2fabric intake` first."
             )
-        with path.open(encoding="utf-8") as f:
+        with open_text(path) as f:
             data = _safe_load(f)
         return Project.model_validate(data)
 
@@ -203,7 +203,7 @@ class ProjectStore:
                 f"No consultation for '{project_id}' under {self.projects_root}. "
                 "Run `adf2fabric consultation` first."
             )
-        with path.open(encoding="utf-8") as f:
+        with open_text(path) as f:
             data = _safe_load(f)
         return Consultation.model_validate(data)
 
@@ -237,7 +237,7 @@ class ProjectStore:
                 f"No repository discovery for '{project_id}' under "
                 f"{self.projects_root}. Run `adf2fabric discovery` first."
             )
-        with path.open(encoding="utf-8") as f:
+        with open_text(path) as f:
             data = _safe_load(f)
         return RepositoryDiscovery.model_validate(data)
 
@@ -266,7 +266,7 @@ class ProjectStore:
                 f"No ADLS discovery for '{project_id}' under {self.projects_root}. "
                 "Run `adf2fabric discovery-adls` first."
             )
-        with path.open(encoding="utf-8") as f:
+        with open_text(path) as f:
             data = _safe_load(f)
         return AdlsDiscovery.model_validate(data)
 
@@ -297,7 +297,7 @@ class ProjectStore:
                 f"No ADLS path discovery for '{project_id}' under "
                 f"{self.projects_root}. Run `adf2fabric discovery-adls-paths` first."
             )
-        with path.open(encoding="utf-8") as f:
+        with open_text(path) as f:
             data = _safe_load(f)
         return AdlsPathsDiscovery.model_validate(data)
 
@@ -326,7 +326,7 @@ class ProjectStore:
                 f"No SQL discovery for '{project_id}' under {self.projects_root}. "
                 "Run `adf2fabric discovery-sql` first."
             )
-        with path.open(encoding="utf-8") as f:
+        with open_text(path) as f:
             data = _safe_load(f)
         return SqlDiscovery.model_validate(data)
 
@@ -357,7 +357,7 @@ class ProjectStore:
                 f"No SQL structural discovery for '{project_id}' under "
                 f"{self.projects_root}. Run `adf2fabric discovery-sql-structural` first."
             )
-        with path.open(encoding="utf-8") as f:
+        with open_text(path) as f:
             data = _safe_load(f)
         return SqlStructuralDiscovery.model_validate(data)
 
@@ -386,7 +386,7 @@ class ProjectStore:
                 f"No ADF discovery for '{project_id}' under {self.projects_root}. "
                 "Run `adf2fabric discovery-adf` first."
             )
-        with path.open(encoding="utf-8") as f:
+        with open_text(path) as f:
             data = _safe_load(f)
         return AdfDiscovery.model_validate(data)
 
@@ -417,7 +417,7 @@ class ProjectStore:
                 f"No ADF semantic discovery for '{project_id}' under "
                 f"{self.projects_root}. Run `adf2fabric discovery-adf-semantic` first."
             )
-        with path.open(encoding="utf-8") as f:
+        with open_text(path) as f:
             data = _safe_load(f)
         return AdfSemanticDiscovery.model_validate(data)
 
@@ -446,7 +446,7 @@ class ProjectStore:
             raise ProjectNotFoundError(
                 f"No dependency inventory for '{project_id}' under {self.projects_root}. "
                 "Run `adf2fabric discovery-dependencies` first.")
-        with path.open(encoding="utf-8") as f:
+        with open_text(path) as f:
             return DependencyInventory.model_validate(_safe_load(f))
 
     # --- Workload migration manifest (Spark workloads: assessment, generated Fabric artifacts, evidence) ------------
@@ -477,7 +477,7 @@ class ProjectStore:
             raise ProjectNotFoundError(
                 f"No workload manifest for '{project_id}' under {self.projects_root}. "
                 "Run `adf2fabric workloads-assess` first.")
-        with path.open(encoding="utf-8") as f:
+        with open_text(path) as f:
             return WorkloadManifest.model_validate(_safe_load(f))
 
     # --- Migration validation report -----------------------------------------------------------------------------
@@ -495,7 +495,7 @@ class ProjectStore:
         path = self.validation_path(project_id)
         if not path.exists():
             raise ProjectNotFoundError(f"No validation report for '{project_id}'. Run `adf2fabric validate` first.")
-        with path.open(encoding="utf-8") as f:
+        with open_text(path) as f:
             return ValidationReport.model_validate(_safe_load(f))
 
     # --- Fabric target provisioning records (target spec, state, plan, approval, run journal, verification) -------
@@ -520,7 +520,7 @@ class ProjectStore:
         path = self.provisioning_path(project_id, name)
         if not path.exists():
             raise ProjectNotFoundError(f"No provisioning '{name}' for '{project_id}'. Run `adf2fabric provision-plan` first.")
-        with path.open(encoding="utf-8") as f:
+        with open_text(path) as f:
             return cls.model_validate(_safe_load(f))
 
     # --- Conversion record + generated Fabric artifacts ----------------------
@@ -550,7 +550,7 @@ class ProjectStore:
                 f"No conversion for '{project_id}' under {self.projects_root}. "
                 "Run `adf2fabric convert` first."
             )
-        with path.open(encoding="utf-8") as f:
+        with open_text(path) as f:
             data = _safe_load(f)
         return ProjectConversion.model_validate(data)
 
@@ -563,7 +563,7 @@ class ProjectStore:
         try:
             target.parent.mkdir(parents=True, exist_ok=True)
             # An unchanged file is left alone so its timestamp still says when its content last changed (runtime evidence is judged against it).
-            if target.is_file() and target.read_text(encoding="utf-8") == text:
+            if target.is_file() and read_text_retry(target) == text:
                 return target
             target.write_text(text, encoding="utf-8")
         except OSError as exc:
@@ -595,7 +595,7 @@ class ProjectStore:
                 f"No reconstruction for '{project_id}' under {self.projects_root}. "
                 "Run `adf2fabric reconstruct` first."
             )
-        with path.open(encoding="utf-8") as f:
+        with open_text(path) as f:
             data = _safe_load(f)
         return ProjectReconstruction.model_validate(data)
 

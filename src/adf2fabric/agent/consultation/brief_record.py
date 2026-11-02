@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from adf2fabric.agent.consultation import brief as B
-from adf2fabric.project.locks import lock_for, write_atomic
+from adf2fabric.project.locks import lock_for, read_text_retry, write_atomic
 
 
 class BriefError(ValueError):
@@ -35,7 +35,7 @@ def load(store: Any, pid: str) -> dict[str, Any]:
     data: dict[str, Any] = {}
     if p.exists():
         try:
-            data = json.loads(p.read_text(encoding="utf-8"))
+            data = json.loads(read_text_retry(p))
         except (OSError, ValueError):
             data = {}
     return {"answers": dict(data.get("answers") or {}), "notes": list(data.get("notes") or []), "versions": list(data.get("versions") or []),

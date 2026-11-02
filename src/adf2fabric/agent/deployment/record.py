@@ -13,6 +13,8 @@ import time
 from pathlib import Path
 from typing import Any, Iterable, Optional
 
+from adf2fabric.project.locks import read_text_retry, write_atomic
+
 _NAME = "deployment-record.json"
 
 
@@ -22,18 +24,14 @@ def path(project_dir: Path) -> Path:
 
 def load(project_dir: Path) -> dict[str, Any]:
     try:
-        data = json.loads(path(project_dir).read_text(encoding="utf-8"))
+        data = json.loads(read_text_retry(path(project_dir)))
         return data if isinstance(data, dict) else {}
     except (OSError, ValueError):
         return {}
 
 
 def _write(project_dir: Path, data: dict[str, Any]) -> None:
-    p = path(project_dir)
-    p.parent.mkdir(parents=True, exist_ok=True)
-    tmp = p.with_suffix(".tmp")
-    tmp.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")
-    tmp.replace(p)
+    write_atomic(path(project_dir), json.dumps(data, indent=2, sort_keys=True))
 
 
 def note_dry_run(project_dir: Path, workspace: str, pipelines: Iterable[str], failed: int, now: Optional[float] = None,

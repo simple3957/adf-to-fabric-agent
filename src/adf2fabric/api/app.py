@@ -53,7 +53,7 @@ from adf2fabric.connections.providers.zip_source import ZipRejected
 from adf2fabric.connections.redaction import redact
 from adf2fabric.connections.resolution import ConnectionChoice
 from adf2fabric.connections.service import SCOPE
-from adf2fabric.project.locks import lock_for, write_atomic
+from adf2fabric.project.locks import lock_for, read_text_retry, write_atomic
 from adf2fabric.project.store import ProjectNotFoundError, slugify
 
 SESSION_HEADER = "x-session-id"
@@ -970,7 +970,7 @@ def create_app(settings: Optional[Settings] = None, live: Optional[Container] = 
     def _journey_read(ctx: Ctx, slug: str) -> list[str]:
         f = _journey_file(ctx, slug)
         try:
-            return [s for s in json.loads(f.read_text(encoding="utf-8")).get("confirmed", []) if s in JOURNEY_STEPS] if f.exists() else []
+            return [s for s in json.loads(read_text_retry(f)).get("confirmed", []) if s in JOURNEY_STEPS] if f.exists() else []
         except (OSError, ValueError):
             return []
 

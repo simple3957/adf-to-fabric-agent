@@ -21,7 +21,7 @@ from typing import Any, Optional
 from adf2fabric.agent.assist import checks, context, model as model_mod, templates
 from adf2fabric.agent.assist.model import ModelError
 from adf2fabric.paths import repo_root
-from adf2fabric.project.locks import lock_for, write_atomic
+from adf2fabric.project.locks import lock_for, read_text_retry, write_atomic
 
 MAX_NAMES = 25
 MAX_ACCEPT_BYTES = 1024 * 1024
@@ -59,7 +59,7 @@ class AssistStore:
 
     def get(self, name: str) -> dict[str, Any]:
         try:
-            return json.loads(self.path(name).read_text(encoding="utf-8"))
+            return json.loads(read_text_retry(self.path(name)))
         except (OSError, ValueError):
             return {"pipeline": name, "draft": None, "accepted": None}
 
@@ -75,7 +75,7 @@ class AssistStore:
         out = []
         for f in sorted(self.directory.glob("*.json")) if self.directory.is_dir() else []:
             try:
-                out.append(json.loads(f.read_text(encoding="utf-8")))
+                out.append(json.loads(read_text_retry(f)))
             except (OSError, ValueError):
                 continue
         return out

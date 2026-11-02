@@ -94,12 +94,36 @@ def lock_for(path: Path) -> _FileLock:
         return _locks[key]
 
 
+def _retry_windows(fn, attempts: int = 100, delay: float = 0.02):
+    """Windows refuses to open or replace a file while another handle is replacing or reading it (WinError 5); the moment passes in milliseconds.
+    Retry for about two seconds there. Elsewhere the call is made once: a refusal there is a real one."""
+    if os.name != "nt":
+        return fn()
+    for i in range(attempts):
+        try:
+            return fn()
+        except PermissionError:
+            if i == attempts - 1:
+                raise
+            time.sleep(delay)
+
+
+def read_text_retry(path: Path) -> str:
+    """``path.read_text`` that rides out a concurrent atomic replace of the same file."""
+    return _retry_windows(lambda: Path(path).read_text(encoding="utf-8"))
+
+
+def open_text(path: Path):
+    """``path.open`` for text, that rides out a concurrent atomic replace of the same file."""
+    return _retry_windows(lambda: Path(path).open(encoding="utf-8"))
+
+
 def write_atomic(path: Path, text: str) -> None:
     """Write through a temp file with a name no other writer shares, then replace: readers never see half a file."""
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(f"{path.name}.{uuid.uuid4().hex[:8]}.tmp")
     try:
         tmp.write_text(text, encoding="utf-8")
-        tmp.replace(path)
+        _retry_windows(lambda: tmp.replace(path))  # a reader holding the old file open blocks the replace for a moment
     finally:
         tmp.unlink(missing_ok=True)

@@ -12,7 +12,7 @@ from __future__ import annotations
 import json
 from typing import Any, Optional
 
-from adf2fabric.project.locks import lock_for, write_atomic
+from adf2fabric.project.locks import lock_for, read_text_retry, write_atomic
 from adf2fabric.project.store import ProjectStore
 from adf2fabric.ids import GUID as _GUID
 
@@ -34,7 +34,7 @@ class BindingError(ValueError):
 def _resolution_entries(store: ProjectStore, pid: str) -> list[dict]:
     path = store.conversion_dir(pid) / "resolutions.json"
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
+        data = json.loads(read_text_retry(path))
     except (OSError, ValueError):
         return []
     return [e for e in data if isinstance(e, dict)] if isinstance(data, list) else []

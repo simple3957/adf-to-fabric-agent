@@ -203,3 +203,39 @@ def test_processes_arriving_together_at_a_record_that_has_no_lock_file_yet_all_g
         start = time.time() + 0.6
         procs = [subprocess.Popen([sys.executable, "-W", "ignore", "-c", code, str(target), str(start)]) for _ in range(6)]
         assert [p.wait(timeout=60) for p in procs] == [0] * 6, f"trial {trial}"
+
+
+def test_a_record_can_be_replaced_while_other_threads_read_it(tmp_path):
+    """Found as a 500 from the journey route in the full suite: on Windows a replace fails while another handle has the file open (WinError 5), and a read
+    fails while the replace is in flight. Four writers replace one record while four readers poll it; neither side may see an error."""
+    import threading
+    import time
+
+    from adf2fabric.project.locks import read_text_retry, write_atomic
+
+    target = tmp_path / "record.json"
+    write_atomic(target, "0")
+    stop = time.time() + 2.0
+    errors: list[str] = []
+
+    def writer(n: int) -> None:
+        i = 0
+        while time.time() < stop:
+            try:
+                write_atomic(target, f"{n}-{i}" * 50)
+            except Exception as exc:  # noqa: BLE001
+                errors.append(f"write {type(exc).__name__}")
+            i += 1
+
+    def reader() -> None:
+        while time.time() < stop:
+            try:
+                assert read_text_retry(target)  # never empty, never a half file
+            except Exception as exc:  # noqa: BLE001
+                errors.append(f"read {type(exc).__name__}")
+            time.sleep(0.001)
+
+    threads = [threading.Thread(target=writer, args=(n,)) for n in range(4)] + [threading.Thread(target=reader) for _ in range(4)]
+    [t.start() for t in threads]
+    [t.join() for t in threads]
+    assert not errors, sorted(set(errors))
