@@ -151,3 +151,66 @@ def test_the_connect_form_starts_where_the_person_said_secrets_come_from():
     assert panels.vault_default("vault_url", card, {"key_vault_url": "https://other.vault.azure.net"}) == "https://kv-prod.vault.azure.net"  # ADF's own vault first
     assert panels.vault_default("vault_url", {}, {"key_vault_url": "https://kv1.vault.azure.net"}) == "https://kv1.vault.azure.net"
     assert panels.vault_default("secret_name", card, None) == "sql-password" and panels.vault_default("secret_name", {}, None) == ""
+
+
+def test_a_page_read_is_reused_until_this_session_changes_something():
+    """Every click reran the page and re-read all nine steps' facts (4.6 s on a real project, cards alone ask Fabric). A read now lasts until a change."""
+    import sys
+    from pathlib import Path
+
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "ui"))
+    from streamlit.testing.v1 import AppTest
+
+    def script():
+        import streamlit as st
+        from components import read
+
+        if "api" not in st.session_state:
+            class Api:
+                version = 0
+                n = 0
+
+                def thing(self, pid):
+                    self.n += 1
+                    return {"n": self.n}
+
+            st.session_state.api = Api()
+        api = st.session_state.api
+        st.session_state.out = [read(api, "thing", "p")["n"], read(api, "thing", "p")["n"]]
+
+    at = AppTest.from_function(script).run()
+    assert at.session_state.out == [1, 1]  # asked once, used twice
+    at.run()
+    assert at.session_state.out == [1, 1]  # a rerun (a click) asks nothing
+    at.session_state.api.version += 1  # this session changed something (a save, a finished job)
+    at.run()
+    assert at.session_state.out == [2, 2]  # asked again, once
+
+
+def test_the_client_counts_the_changes_it_makes_and_not_the_reads():
+    import sys
+    from pathlib import Path
+
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "ui"))
+    from api_client import ApiClient
+
+    class Http:
+        def request(self, method, url, **kw):
+            class R:
+                status_code, content = 200, b"{}"
+                headers: dict = {}
+
+                def json(self):
+                    return {}
+
+            return R()
+
+    api = ApiClient("s", base_url="http://x", http=Http())
+    api._request("GET", "/a")
+    api._request("GET", "/b")
+    assert api.version == 0
+    api._request("POST", "/c")
+    api._request("PUT", "/d")
+    assert api.version == 2
+    api.bump()
+    assert api.version == 3

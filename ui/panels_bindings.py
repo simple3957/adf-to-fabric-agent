@@ -10,14 +10,14 @@ from __future__ import annotations
 import streamlit as st
 
 from api_client import ApiClient
-from components import call, can
+from components import call, can, read
 
 CHOOSE = "- choose a Fabric item -"
 
 
 def section(api: ApiClient, pid: str, unbound: list[str]) -> None:
     """``unbound``: names the conversion still reports as open (some belong to the Connect step, not to this list)."""
-    got = call(api.bindings, pid) or {}
+    got = read(api, "bindings", pid) or {}
     if got.get("workspace_note"):  # bindings made for one workspace, the person is working in another
         st.warning(got["workspace_note"])
     items = got.get("items") or []

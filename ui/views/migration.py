@@ -9,7 +9,7 @@ import panels
 import panels_consult
 import panels_ext
 import theme
-from components import active_jobs, call, client, watch_job
+from components import active_jobs, call, client, read, watch_job
 from journey import (connect_facts, consult_facts, convert_facts, deploy_facts, discover_facts, done_count, first_open, plan_facts, report_facts, review_facts,
                      statuses, validate_facts)
 
@@ -22,10 +22,10 @@ if not pid:
     st.stop()
 
 # ---- facts from the API ---------------------------------------------------------------------------------------------------
-project = call(api.project, pid)
+project = read(api, "project", pid)
 discovered = bool(project and project.get("has_semantic"))
-found = call(api.linked_services, pid) if discovered else None
-cards = call(api.cards, pid) if discovered else None
+found = read(api, "linked_services", pid) if discovered else None
+cards = read(api, "cards", pid) if discovered else None
 session = call(api.session) or {}
 dest = session.get("destination") or {}
 conversion = st.session_state.get("conversion", {}).get(pid)
@@ -36,11 +36,11 @@ if conversion is None and discovered and project.get("has_conversion") and pid n
     elif saved:
         st.session_state.setdefault("stale_conv", set()).add(pid)  # asked once; converting again replaces it
 deployed = st.session_state.get("deploy", {}).get(pid)
-inventory = call(api.inventory, pid) if discovered else None
-provisioning = call(api.provisioning, pid) if discovered else None
-validation = call(api.validation, pid) if discovered else None
-report = call(api.report, pid) if discovered else None
-brief = call(api.brief, pid) if discovered else None
+inventory = read(api, "inventory", pid) if discovered else None
+provisioning = read(api, "provisioning", pid) if discovered else None
+validation = read(api, "validation", pid) if discovered else None
+report = read(api, "report", pid) if discovered else None
+brief = read(api, "brief", pid) if discovered else None
 if deployed is None and report:  # a deploy made earlier (another session, a reload) is on the server: do not make the person deploy again to see it
     done = [p["name"] for p in report.get("pipelines", []) if p.get("state") in ("deployed", "runtime_validated")]
     if done:

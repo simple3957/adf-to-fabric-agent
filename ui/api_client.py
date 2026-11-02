@@ -38,10 +38,17 @@ class ApiClient:
         self._token = token if token is not None else os.environ.get("ADF2FABRIC_API_TOKEN")
         self._http = http or requests.Session()
         self.timeout = timeout
+        self.version = 0  # up by one with every request that can change something (anything but a GET) and when a job ends: a cached read is only reused while it holds
+
+    def bump(self) -> None:
+        """Something changed on the server (a job finished): reads cached before it are stale."""
+        self.version += 1
 
     # ---- transport -----------------------------------------------------------------------------------------------------
     def _request(self, method: str, path: str, *, json: Any = None, params: Optional[dict] = None,
                  data: Optional[bytes] = None, content_type: Optional[str] = None, idempotency_key: Optional[str] = None) -> Any:
+        if method.upper() != "GET":
+            self.version += 1
         headers = {"X-Session-Id": self.session_id}
         if idempotency_key:
             headers["Idempotency-Key"] = idempotency_key  # a repeated submission of the same intent returns the first job instead of starting another

@@ -15,7 +15,7 @@ import streamlit as st
 
 import theme
 from api_client import ApiClient
-from components import call
+from components import read
 
 ITEM_NAME = re.compile(r"^[A-Za-z0-9_.\-]{1,256}$")
 
@@ -31,7 +31,7 @@ def card(key: str, title: str, note: str = "", source: str = "") -> Iterator[Non
 
 def agreed(api: ApiClient, pid: str) -> Optional[dict]:
     """The settings of the approved, current consultation brief (with its version), or None: the defaults a card starts from."""
-    v = call(api.brief, pid)
+    v = read(api, "brief", pid)
     if not v or not v.get("settings"):
         return None
     return {**v["settings"], "version": v["current_version"]["version"]}

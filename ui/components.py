@@ -103,6 +103,22 @@ def call(fn: Callable[..., Any], *args: Any, **kwargs: Any) -> Optional[Any]:
         return None
 
 
+def read(api: ApiClient, name: str, pid: str, ttl: float = 30.0) -> Optional[Any]:
+    """``api.<name>(pid)`` for a page, reused until something changes.
+
+    Every click reruns the whole page, and the migration page reads the facts of all nine steps each time (cards alone ask Fabric): about 4.6 s per click on
+    a real project. A read is kept while ``api.version`` holds still, i.e. while this session has changed nothing and no job has ended; ``ttl`` bounds how
+    stale it can be when something else (the CLI, another tab) changes the project. A failed call is never kept."""
+    if st.session_state.get("_read_version") != api.version:
+        forget("read:")  # everything read before the change is dropped, not just the one key
+        st.session_state["_read_version"] = api.version
+    try:
+        return cached(f"read:{name}:{pid}", ttl, lambda: getattr(api, name)(pid))
+    except ApiError as err:
+        show_error(err)
+        return None
+
+
 def state_badge(state: Optional[str]) -> str:
     label, color = STATE_LABELS.get(state or "", (state or "unknown", "gray"))
     return f":{color}-badge[{label}]"
@@ -178,6 +194,7 @@ def watch_job(job: dict, label: str, intent_name: Optional[str] = None) -> Optio
         else:
             box.update(label=f"{label}: failed after {final.get('elapsed', 0):g}s", state="error")
             st.error(final.get("error") or "The job failed.")
+    client().bump()  # the job changed the project on the server: nothing read before it holds
     history = st.session_state.setdefault("job_history", [])
     history.insert(0, final)
     del history[50:]  # a long session does not keep every job's result in memory
