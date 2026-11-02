@@ -27,6 +27,7 @@ from typing import Any, Callable, Optional
 from urllib.parse import urlsplit
 
 from adf2fabric.agent.deployment.fabric_deploy import DeployError, FabricClient
+from adf2fabric.project.locks import lock_for, read_text_retry, write_atomic
 from adf2fabric.agent.deployment.fabric_run import ActivityRun, RunResult, latest_run, recent_runs, run_pipeline, runs_started_by
 from adf2fabric.cloud import ARM_ENDPOINT
 
@@ -559,8 +560,8 @@ def record_path(project_dir: Path) -> Path:
 
 def load_record(path: Path) -> dict[str, dict]:
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+        data = json.loads(read_text_retry(path))
+    except (FileNotFoundError, ValueError):  # none yet, or damaged: empty. Any other read error (permissions) is not "no record": it is raised.
         return {}
     return data if isinstance(data, dict) else {}
 
@@ -622,6 +623,11 @@ def _pin_artifacts(record: dict[str, dict], project_dir: Path) -> None:
 def save_record(path: Path, results: list[Verification]) -> dict[str, dict]:
     """Merge results into the record. Each pipeline keeps its latest result and, separately, its last completed run, so
     a failed run never takes away the baseline the next run is compared with."""
+    with lock_for(path):  # read, merge and write as one step: two verifications finishing together must not drop each other's results
+        return _save_record_locked(path, results)
+
+
+def _save_record_locked(path: Path, results: list[Verification]) -> dict[str, dict]:
     record = load_record(path)
     for v in results:
         if v.verdict == "not_run":
@@ -635,8 +641,7 @@ def save_record(path: Path, results: list[Verification]) -> dict[str, dict]:
                                    if good else None)
         record[v.pipeline] = entry
     _pin_artifacts(record, path.parent.parent)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    write_atomic(path, json.dumps(record, indent=2, sort_keys=True) + "\n")
     return record
 
 

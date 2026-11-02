@@ -13,6 +13,8 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from pathlib import Path
 
+from adf2fabric.project.locks import lock_for, write_atomic
+
 import yaml
 
 from adf2fabric.api.security.principals import Principal
@@ -37,10 +39,11 @@ class ProjectAccess:
     def record(self, pid: str, principal: Principal) -> None:
         """Record the owner of a NEW project. An existing record is never overwritten (a re-import keeps its owner)."""
         p = self._path(pid)
-        if p.exists():
-            return
         p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(yaml.safe_dump({"org": principal.org, "created_by": principal.id, "created_at": datetime.now(timezone.utc).isoformat()}), encoding="utf-8")
+        with lock_for(p):  # two imports of one new project: the first owner stays
+            if p.exists():
+                return
+            write_atomic(p, yaml.safe_dump({"org": principal.org, "created_by": principal.id, "created_at": datetime.now(timezone.utc).isoformat()}))
 
     def allowed(self, principal: Principal, pid: str) -> bool:
         return self.owner_org(pid) == principal.org

@@ -803,3 +803,15 @@ def test_a_service_that_read_its_secret_from_a_vault_in_adf_carries_the_vault_an
     two = NS(key_vault_refs=[NS(store_linked_service="LS_Vault", secret_name="a"), NS(store_linked_service="LS_Vault", secret_name="b")])
     assert vault_hint(d, two) == {"vault_url": "https://kv-prod.vault.azure.net"}  # two secrets: the vault is known, which secret is not guessed
     assert vault_hint(d, NS(key_vault_refs=[])) == {}
+
+
+def test_a_damaged_resolutions_file_is_kept_aside_not_overwritten_with_nothing(project):
+    """The merge used to treat unreadable JSON as empty and write only the new binding, silently dropping every notebook and item binding."""
+    s, pid = svc(project)
+    path = s.store.conversion_dir(pid) / "resolutions.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("[ {\"type\": \"ItemToId\", ", encoding="utf-8")  # half a write
+    s._merge_resolutions(pid, {"LS_SQL": GUID1})
+    kept = list(path.parent.glob("resolutions.json.damaged-*"))
+    assert len(kept) == 1 and "ItemToId" in kept[0].read_text(encoding="utf-8")  # evidence for a person
+    assert [e["key"] for e in json.loads(path.read_text(encoding="utf-8"))] == ["LS_SQL"]

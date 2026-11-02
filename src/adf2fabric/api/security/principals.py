@@ -30,6 +30,7 @@ import yaml
 from pydantic import BaseModel, ConfigDict, Field
 
 from adf2fabric.api.security.permissions import Permission, permissions_for, valid_role
+from adf2fabric.project.locks import write_atomic
 
 WILDCARD = "*"
 TOKEN_PREFIX = "a2f_"
@@ -135,14 +136,11 @@ class UserStore:
             raise UserError(f"The user store {self.path.name} cannot be read ({type(exc).__name__}); refusing all sign-ins until it is fixed.") from None
 
     def _save(self, users: dict[str, UserRecord]) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = self.path.with_suffix(".yaml.tmp")
-        tmp.write_text(yaml.safe_dump({"users": [yaml.safe_load(u.model_dump_json()) for u in users.values()]}, sort_keys=False), encoding="utf-8")
+        write_atomic(self.path, yaml.safe_dump({"users": [yaml.safe_load(u.model_dump_json()) for u in users.values()]}, sort_keys=False))
         try:
-            tmp.chmod(0o600)  # owner-only where the platform supports it (hashes, but still not for everyone to read)
+            self.path.chmod(0o600)  # owner-only where the platform supports it (hashes, but still not for everyone to read)
         except OSError:
             pass
-        tmp.replace(self.path)
         self._cache = None  # a write in this process is never hidden by a timestamp that did not move
 
     def has_users(self) -> bool:

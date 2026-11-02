@@ -239,3 +239,50 @@ def test_a_record_can_be_replaced_while_other_threads_read_it(tmp_path):
     [t.start() for t in threads]
     [t.join() for t in threads]
     assert not errors, sorted(set(errors))
+
+
+# ---- shared files: no lost updates, no torn chain ---------------------------------------------------------------------------
+
+
+def test_many_notebook_deploys_at_once_lose_no_binding(tmp_path):
+    """bind_resolutions was an unlocked read-modify-write on the file the connections merge and the bindings list also edit."""
+    import json
+    from concurrent.futures import ThreadPoolExecutor
+
+    from adf2fabric.agent.deployment.notebook_deploy import bind_resolutions
+
+    path = tmp_path / "resolutions.json"
+    ids = {f"NB_{i}": f"{i:08d}-0000-4000-8000-000000000000" for i in range(12)}
+    with ThreadPoolExecutor(12) as ex:
+        list(ex.map(lambda kv: bind_resolutions(path, kv[0], kv[1], "53d67e72-8124-4ca3-ae55-c4b266935faa"), ids.items()))
+    rows = json.loads(path.read_text(encoding="utf-8"))
+    assert {r["key"]: r["value"] for r in rows if r["type"] == "ItemToId"} == {f"notebook:{k}": v for k, v in ids.items()}
+    assert sum(1 for r in rows if r["type"] == "WorkspaceId") == 1
+
+
+def test_two_verifications_finishing_together_keep_each_others_results(tmp_path):
+    import json
+    from concurrent.futures import ThreadPoolExecutor
+
+    from adf2fabric.agent.deployment import verify as V
+
+    path = tmp_path / "verification" / "verification.json"
+
+    def one(n):
+        v = V.Verification(f"PL_{n}", "matches", fabric_status="Completed", job_id=f"job-{n}", ran_at="2026-11-02T00:00:00")
+        V.save_record(path, [v])
+
+    with ThreadPoolExecutor(10) as ex:
+        list(ex.map(one, range(10)))
+    assert sorted(json.loads(path.read_text(encoding="utf-8"))) == sorted(f"PL_{n}" for n in range(10))
+
+
+def test_the_audit_chain_stays_intact_when_two_writers_append_to_it(tmp_path):
+    """The CLI and the API are two writers of one hash chain: each used to remember its own last hash, so the other's events broke the chain."""
+    from adf2fabric.api.security.audit import AuditLog
+
+    api, cli = AuditLog(tmp_path), AuditLog(tmp_path)
+    for i in range(20):
+        (api if i % 2 == 0 else cli).event("test.event", "ok", actor=f"w{i % 2}", resource_id=str(i))
+    assert api.verify() is None and cli.verify() is None
+    assert len(api.read(limit=100)) == 20

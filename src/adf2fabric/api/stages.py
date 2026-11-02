@@ -112,7 +112,9 @@ def _write_storage_map(c: Container, pid: str, lakehouse: str) -> None:
     except StorageMapError:  # a chosen name no longer fits what discovery found: plan the default names
         m = build_storage_map(disc, lakehouse)
     out.mkdir(parents=True, exist_ok=True)
-    existing.write_text(_json.dumps(m.to_dict(), indent=2, default=str), encoding="utf-8")
+    from adf2fabric.project.locks import write_atomic
+
+    write_atomic(existing, _json.dumps(m.to_dict(), indent=2, default=str))
 
 
 def _verify(c: Container, session: Session, pid: str, options: dict, log: Log) -> dict[str, Any]:

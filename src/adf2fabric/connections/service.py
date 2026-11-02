@@ -16,6 +16,8 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 
 import yaml
+
+from adf2fabric.project.locks import lock_for, read_text_retry, write_atomic
 from pydantic import BaseModel, ConfigDict, Field
 
 from adf2fabric.connections import catalog
@@ -80,12 +82,12 @@ class ConnectionService:
         f = self._dir(pid) / "choices.yaml"
         if not f.exists():
             return {}
-        raw = yaml.safe_load(f.read_text(encoding="utf-8")) or {}
+        raw = yaml.safe_load(read_text_retry(f)) or {}
         return {k.lower(): ConnectionChoice.model_validate(v) for k, v in raw.items()}
 
     def _save_choices(self, pid: str, choices: dict[str, ConnectionChoice]) -> None:
         data = {c.linked_service: json.loads(c.model_dump_json()) for c in choices.values()}
-        (self._dir(pid) / "choices.yaml").write_text(yaml.safe_dump(data, sort_keys=True), encoding="utf-8")
+        write_atomic(self._dir(pid) / "choices.yaml", yaml.safe_dump(data, sort_keys=True))
 
     def semantic(self, pid: str) -> AdfSemanticDiscovery:
         return self.store.load_adf_semantic_discovery(pid)
@@ -211,8 +213,7 @@ class ConnectionService:
         if bindings and not dry_run:
             result.resolutions_file = self._merge_resolutions(pid, bindings)
         if not dry_run:
-            (self._dir(pid) / "apply.yaml").write_text(yaml.safe_dump(json.loads(result.model_dump_json()), sort_keys=False),
-                                                      encoding="utf-8")
+            write_atomic(self._dir(pid) / "apply.yaml", yaml.safe_dump(json.loads(result.model_dump_json()), sort_keys=False))
         return result
 
     def _apply_one(self, pid, session, fabric, card: LinkedServiceCard, existing: dict, auto_match: bool, dry_run: bool) -> ApplyItem:
@@ -326,16 +327,18 @@ class ConnectionService:
     def _merge_resolutions(self, pid: str, bindings: dict[str, str]) -> str:
         path = self.store.conversion_dir(pid) / "resolutions.json"
         path.parent.mkdir(parents=True, exist_ok=True)
-        entries: list[dict] = []
-        if path.exists():
-            try:
-                entries = json.loads(path.read_text(encoding="utf-8"))
-            except ValueError:
-                entries = []
-        keep = [e for e in entries if not (e.get("type") == "LinkedServiceToConnectionId"
-                                           and str(e.get("key", "")).lower() in {k.lower() for k in bindings})]
-        keep += [{"type": "LinkedServiceToConnectionId", "key": k, "value": v} for k, v in sorted(bindings.items())]
-        path.write_text(json.dumps(keep, indent=2) + "\n", encoding="utf-8")
+        with lock_for(path):  # the notebook deploy, the bindings list and this all edit the one file
+            entries: list[dict] = []
+            if path.exists():
+                try:
+                    entries = json.loads(read_text_retry(path))
+                except ValueError:  # damaged: keep it aside for a person, never overwrite every binding with nothing
+                    path.replace(path.with_name(f"resolutions.json.damaged-{int(time.time())}"))
+                    entries = []
+            keep = [e for e in entries if not (e.get("type") == "LinkedServiceToConnectionId"
+                                               and str(e.get("key", "")).lower() in {k.lower() for k in bindings})]
+            keep += [{"type": "LinkedServiceToConnectionId", "key": k, "value": v} for k, v in sorted(bindings.items())]
+            write_atomic(path, json.dumps(keep, indent=2) + "\n")
         return "resolutions.json"
 
     def provision_identity(self, fabric: FabricService, workspace_id: str) -> dict:

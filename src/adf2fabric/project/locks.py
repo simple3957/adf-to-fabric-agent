@@ -94,7 +94,7 @@ def lock_for(path: Path) -> _FileLock:
         return _locks[key]
 
 
-def _retry_windows(fn, attempts: int = 100, delay: float = 0.02):
+def retry_windows(fn, attempts: int = 100, delay: float = 0.02):
     """Windows refuses to open or replace a file while another handle is replacing or reading it (WinError 5); the moment passes in milliseconds.
     Retry for about two seconds there. Elsewhere the call is made once: a refusal there is a real one."""
     if os.name != "nt":
@@ -106,6 +106,9 @@ def _retry_windows(fn, attempts: int = 100, delay: float = 0.02):
             if i == attempts - 1:
                 raise
             time.sleep(delay)
+
+
+_retry_windows = retry_windows  # the name the helpers below used first
 
 
 def read_text_retry(path: Path) -> str:

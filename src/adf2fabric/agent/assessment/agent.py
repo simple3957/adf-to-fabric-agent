@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+
+from adf2fabric.project.locks import write_atomic
 from typing import Any, Callable, Optional
 
 from pydantic import BaseModel
@@ -75,8 +77,8 @@ class ComputeAgent:
         out = assessment_dir(self.store, pid)
         out.mkdir(parents=True, exist_ok=True)
         jpath, mpath = out / "compute-report.json", out / "compute-report.md"
-        jpath.write_text(json.dumps(json.loads(a.model_dump_json()), indent=2) + "\n", encoding="utf-8")
-        mpath.write_text(render_markdown(a), encoding="utf-8")
+        write_atomic(jpath, json.dumps(json.loads(a.model_dump_json()), indent=2) + "\n")
+        write_atomic(mpath, render_markdown(a))
         return ComputeResult(success=True, assessment=a, report_json=str(jpath), report_markdown=str(mpath),
                              message=f"{len(a.pipelines)} pipeline(s): {a.cu_hours_per_day:g} CU-hours/day, "
                                      f"recommended {a.recommended_sku}.")

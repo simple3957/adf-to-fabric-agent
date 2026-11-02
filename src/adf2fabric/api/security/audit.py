@@ -17,6 +17,8 @@ import json
 import threading
 import time
 from pathlib import Path
+
+from adf2fabric.project.locks import lock_for, retry_windows
 from typing import Any, Optional
 
 from adf2fabric.connections.redaction import redact
@@ -44,13 +46,12 @@ class AuditLog:
         rec = {"ts": round(time.time(), 3), "request_id": request_id, "actor": self._clean(actor), "org": self._clean(org), "action": action,
                "outcome": outcome, "resource": resource, "resource_id": self._clean(resource_id),
                "detail": {str(k)[:40]: self._clean(v) for k, v in list(detail.items())[:_ALLOWED_DETAIL]}}
-        with self._lock:
+        with self._lock, lock_for(self.path):  # the CLI and the API append to the same chain: a file lock, not only this process's
             self.path.parent.mkdir(parents=True, exist_ok=True)
             if self.path.exists() and self.path.stat().st_size > MAX_BYTES:
-                self.path.replace(self.path.with_name(f"audit-{int(time.time())}.jsonl"))
-                self._last = ""
-            if not self._last:
-                self._last = self._tail_hash()
+                rotated = self.path.with_name(f"audit-{int(time.time())}.jsonl")
+                retry_windows(lambda: self.path.replace(rotated))  # a reader holding the log open blocks the rename for a moment
+            self._last = self._tail_hash()  # another process may have appended since our last event
             rec["prev"] = self._last
             line = json.dumps(rec, sort_keys=True, separators=(",", ":"))
             with self.path.open("a", encoding="utf-8") as f:
@@ -66,12 +67,12 @@ class AuditLog:
     def _tail_hash(self) -> str:
         if not self.path.exists():
             return ""
-        last = ""
-        with self.path.open(encoding="utf-8") as f:
-            for line in f:
-                if line.strip():
-                    last = line.rstrip("\n")
-        return hashlib.sha256(last.encode("utf-8")).hexdigest() if last else ""
+        with self.path.open("rb") as f:  # the last line only: reading the whole log on every event grew with the log
+            f.seek(0, 2)
+            f.seek(max(0, f.tell() - 65536))
+            tail = f.read()
+        lines = [x.rstrip(b"\r") for x in tail.split(b"\n") if x.strip()]
+        return hashlib.sha256(lines[-1]).hexdigest() if lines else ""
 
     def read(self, limit: int = 200, org: Optional[str] = None) -> list[dict[str, Any]]:
         if not self.path.exists():

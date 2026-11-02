@@ -20,6 +20,8 @@ import base64
 import json
 from dataclasses import dataclass
 from pathlib import Path
+
+from adf2fabric.project.locks import lock_for, read_text_retry, write_atomic
 from typing import Any, Optional
 
 from adf2fabric.agent.deployment.fabric_deploy import FABRIC_API, DeployError, FabricClient, _GUID, _error_text
@@ -117,10 +119,15 @@ def bind_resolutions(path: Path, source_name: str, item_id: str, workspace: str)
     Returns what changed, for display. The file is created if it does not exist.
     """
     path = Path(path)
+    with lock_for(path):  # the same file the connections merge and the bindings list edit: read, change and write as one step
+        return _bind_resolutions_locked(path, source_name, item_id, workspace)
+
+
+def _bind_resolutions_locked(path: Path, source_name: str, item_id: str, workspace: str) -> list[str]:
     entries: list[Any] = []
     if path.exists():
         try:
-            loaded = json.loads(path.read_text(encoding="utf-8"))
+            loaded = json.loads(read_text_retry(path))
         except (OSError, json.JSONDecodeError) as exc:
             raise DeployError(f"The resolutions file cannot be read ({type(exc).__name__}); not changed.") from None
         if not isinstance(loaded, list):
@@ -141,5 +148,5 @@ def bind_resolutions(path: Path, source_name: str, item_id: str, workspace: str)
     upsert("ItemToId", f"notebook:{source_name}", item_id)
     upsert("WorkspaceId", "*", workspace)
     if changes:
-        path.write_text(json.dumps(entries, indent=2), encoding="utf-8")
+        write_atomic(path, json.dumps(entries, indent=2))
     return changes
