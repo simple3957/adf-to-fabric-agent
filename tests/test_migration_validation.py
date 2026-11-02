@@ -640,6 +640,19 @@ def test_a_run_older_than_the_generated_file_does_not_vouch_for_it(project):
     assert c.result is R.BLOCKED and "older than" in c.summary
 
 
+def test_a_run_pinned_to_the_file_still_counts_when_the_same_content_is_saved_again(project):
+    """An answer changed and changed back converts to the same bytes again: the save time moves, the content does not."""
+    from adf2fabric.agent.deployment import verify as v
+
+    store, pid = project
+    art = v.artifact_file(store.project_dir(pid), "PL_Main")
+    record(store, pid, "PL_Main", ran_at="2000-01-01T00:00:00+00:00", artifact_sha=v.file_sha(art))
+    assert results(rt(store, pid), "runtime.execution", "pipeline:PL_Main") == {R.PASS}
+    edit_target(store, pid, "PL_Main", lambda d: d["properties"].update(description="changed"))
+    c = check(rt(store, pid), "runtime.execution", "pipeline:PL_Main")[0]
+    assert c.result is R.BLOCKED and "older than" in c.summary
+
+
 # =====================================================================================================================
 # the overall decision and the report
 # =====================================================================================================================

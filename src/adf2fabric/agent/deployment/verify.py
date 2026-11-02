@@ -526,6 +526,33 @@ def last_completed(entry: Optional[dict]) -> Optional[dict]:
     return entry if entry.get("fabric_status") == "Completed" else None  # records written before last_completed existed
 
 
+def artifact_file(project_dir: Path, pipeline: str) -> Path:
+    return project_dir / "conversion" / "pipelines" / f"{pipeline}.DataPipeline" / "pipeline-content.json"
+
+
+def file_sha(path: Path) -> Optional[str]:
+    try:
+        return hashlib.sha256(path.read_bytes()).hexdigest()[:16]
+    except OSError:
+        return None
+
+
+def _pin_artifacts(record: dict[str, dict], project_dir: Path) -> None:
+    """Pin each run to the generated file it ran: a file saved before the run ended is the one it vouches for. Validation then compares
+    contents, not save times, so converting again to the same output (an answer changed and changed back) keeps the run's evidence.
+    A file saved after the run is left unpinned: the save time decides, as before."""
+    for name, entry in record.items():
+        if entry.get("artifact_sha"):
+            continue
+        ran, f = _parse(entry.get("ran_at")), artifact_file(project_dir, name)
+        try:
+            saved = f.stat().st_mtime
+        except OSError:
+            continue
+        if ran is not None and saved <= ran.timestamp() and (sha := file_sha(f)):
+            entry["artifact_sha"] = sha
+
+
 def save_record(path: Path, results: list[Verification]) -> dict[str, dict]:
     """Merge results into the record. Each pipeline keeps its latest result and, separately, its last completed run, so
     a failed run never takes away the baseline the next run is compared with."""
@@ -541,6 +568,7 @@ def save_record(path: Path, results: list[Verification]) -> dict[str, dict]:
         entry["last_completed"] = ({k: good.get(k) for k in ("job_id", "ran_at", "fabric_status", "activities")}
                                    if good else None)
         record[v.pipeline] = entry
+    _pin_artifacts(record, path.parent.parent)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return record

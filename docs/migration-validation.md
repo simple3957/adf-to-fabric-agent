@@ -21,7 +21,10 @@ checks are marked and never decide a stage or the overall status.
 | runtime | `--runtime` and a recorded run | a real run completed and matched its baseline (status, copy counts, lookup results) | anything about pipelines never run |
 
 Runtime never starts a run. It reads the run-and-compare record written by `adf2fabric verify` / `run --apply`, and refuses a run
-older than the generated file it is supposed to vouch for.
+older than the generated file it is supposed to vouch for. Each saved run is pinned to a hash of the generated file it ran (only when
+that file was saved before the run ended; `verify` adds the pin to older records too). For a pinned run the content decides, not the
+save time: converting again to the same output, such as a consultation answer changed and changed back, keeps the run's evidence,
+while any real change to the file still blocks it.
 
 ## The ten categories
 

@@ -135,6 +135,26 @@ def test_the_record_keeps_the_last_verified_run_and_skips_not_run(tmp_path):
     assert "| `A` | **matches**" in V.render_report(rec)
 
 
+def test_a_run_is_pinned_only_to_a_file_saved_before_it(tmp_path):
+    import os
+
+    project_dir = tmp_path / "p"
+    path = V.record_path(project_dir)
+    for name in ("Old", "New"):
+        f = V.artifact_file(project_dir, name)
+        f.parent.mkdir(parents=True)
+        f.write_text(json.dumps({"name": name}), encoding="utf-8")
+    os.utime(V.artifact_file(project_dir, "New"), (4102444800, 4102444800))  # saved in 2100: after the run
+    rec = V.save_record(path, [V.Verification(n, "matches", fabric_status="Completed", job_id=n, ran_at="2050-01-01T00:00:00Z") for n in ("Old", "New")])
+    assert rec["Old"]["artifact_sha"] == V.file_sha(V.artifact_file(project_dir, "Old"))
+    assert "artifact_sha" not in rec["New"]  # the run did not see this file: the save time decides, as before
+    # a record written before pinning existed gets its pin on the next save, by the same rule
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    del raw["Old"]["artifact_sha"]
+    path.write_text(json.dumps(raw), encoding="utf-8")
+    assert V.save_record(path, [])["Old"]["artifact_sha"] == V.file_sha(V.artifact_file(project_dir, "Old"))
+
+
 def test_the_arm_token_is_never_sent_elsewhere():
     adf = V.AdfRuns(V.Factory("s", "r", "f"), "tok", session=object())
     with pytest.raises(DeployError, match="non-ARM"):

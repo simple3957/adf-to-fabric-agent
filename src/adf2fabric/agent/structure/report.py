@@ -134,7 +134,8 @@ def collect(store: Any, pid: str, workspace: str, make_client: Callable[[], Fabr
     assisted = {n.pipeline.lower() for n in (conv.assisted if conv else [])}
     for r in rows:
         r["confidence"] = conf.assess(r, by_conv.get(r["pipeline"].lower()), (val.get("checks") or []) if isinstance(val, dict) else [],
-                                      ver.get(r["pipeline"]) if isinstance(ver, dict) else None, conf.generated_mtime(project_dir, r["pipeline"]),
+                                      ver.get(r["pipeline"]) if isinstance(ver, dict) else None,
+                                      conf.generated_mtime(project_dir, r["pipeline"], ver.get(r["pipeline"]) if isinstance(ver, dict) else None),
                                       assisted=r["pipeline"].lower() in assisted)
     data["confidence"] = conf.estate([r["confidence"] for r in rows])
     return data

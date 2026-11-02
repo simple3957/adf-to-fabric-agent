@@ -229,7 +229,10 @@ def runtime(inp: Inputs, c: Collector, project_dir: Path, requested: bool) -> No
         try:
             ran = datetime.fromisoformat(str(e.get("ran_at", "")).replace("Z", "+00:00"))
             ran = ran if ran.tzinfo else ran.replace(tzinfo=timezone.utc)
-            stale = art.is_file() and datetime.fromtimestamp(art.stat().st_mtime, timezone.utc) > ran
+            if e.get("artifact_sha") and art.is_file():  # the run is pinned to the file it ran: the same content saved again still counts
+                stale = verify_mod.file_sha(art) != e["artifact_sha"]
+            else:
+                stale = art.is_file() and datetime.fromtimestamp(art.stat().st_mtime, timezone.utc) > ran
         except ValueError:
             ran = None
         verdict, status = str(e.get("verdict", "")), str(e.get("fabric_status", ""))

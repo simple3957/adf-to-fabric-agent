@@ -217,8 +217,13 @@ def estate(rows: list[Confidence]) -> dict[str, Any]:
             "activities": total, "activities_exercised": ran, "exercised_share": round(100 * ran / total) if total else 0}
 
 
-def generated_mtime(project_dir: Path, name: str) -> Optional[float]:
+def generated_mtime(project_dir: Path, name: str, verification: Optional[dict] = None) -> Optional[float]:
+    """When the generated file last changed; None when a recorded run is pinned to its current content (it was saved again unchanged)."""
+    from adf2fabric.agent.deployment.verify import file_sha
+
     f = project_dir / "conversion" / "pipelines" / f"{name}.DataPipeline" / "pipeline-content.json"
+    if verification and verification.get("artifact_sha") and file_sha(f) == verification["artifact_sha"]:
+        return None
     try:
         return f.stat().st_mtime
     except OSError:
