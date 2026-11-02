@@ -791,3 +791,17 @@ def test_an_explicit_choice_beats_the_approved_brief_and_none_follows_it(world, 
     assert run(world, "ann", "convert", {"lakehouse": "LH_Mine"})["result"]["lakehouse"] == "LH_Mine"  # chosen: the person's
     assert run(world, "ann", "convert", {"lakehouse": ""})["result"]["lakehouse"] is None  # "none" is chosen too
     assert seen == ["LH_Brief", "LH_Mine"]
+
+
+def test_the_target_plan_follows_the_approved_brief_on_where_spark_runs(world):
+    from adf2fabric.project.provisioning import TargetSpec
+
+    store = world.demo.store
+    prepare(world)
+    plan(world)
+    assert store.load_provisioning("demo-estate", "target", TargetSpec).spark_compute is None  # no approved brief: planned as before
+    _fill_brief(world, "ann")
+    fp = world.call("ann", "POST", f"{B}/submit").json()["fingerprint"]
+    assert world.call("abe", "POST", f"{B}/approve", json_body={"fingerprint": fp}).status_code == 200
+    plan(world)
+    assert store.load_provisioning("demo-estate", "target", TargetSpec).spark_compute == "keep"  # the brief keeps Spark where it runs

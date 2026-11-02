@@ -1177,10 +1177,15 @@ def create_app(settings: Optional[Settings] = None, live: Optional[Container] = 
     def provisioning_plan(pid: str, body: S.ProvisionPlanBody, ctx: Ctx = Depends(), _: Principal = need(P.plans_generate, P.azure_use)):
         slug = ctx.project(pid)
         spec = _target_spec(ctx, body)
+        settings = brief_record.approved_settings(ctx.c.store, slug, ctx.session.destination) if ctx.c.store.has_adf_semantic_discovery(slug) else None
+        if settings is not None:  # an approved, current brief decides where Spark runs; without one the compute plan is followed as before
+            spec.spark_compute = "fabric" if settings.get("workloads_to_fabric") else "keep"
         ctx.audit("provisioning.plan", "requested", resource="project", resource_id=slug)
 
         def work(log) -> dict[str, Any]:
             fab, _arm = ctx.c.gateways(ctx.session)
+            if spec.spark_compute:
+                log("Following the approved consultation brief: Spark " + ("moves to Fabric" if spec.spark_compute == "fabric" else "stays on its source compute") + ".")
             log("reading the target (read-only) and planning")
             plan = prov.plan(ctx.c.store, slug, spec, fab, None)
             return {"message": "Plan ready: nothing was created.", "steps": plan.summary.total, "to_create": plan.summary.to_create,

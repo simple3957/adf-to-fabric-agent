@@ -249,7 +249,7 @@ def make_plan_and_state(store, project_id: str, spec: TargetSpec, fab: FabricGat
     reqs, notes = rq.build_requirements(spec, inputs)
     state = read_state(fab, arm, spec, now)
     ctx = Ctx(spec=spec, state=state, fab=fab, arm=arm, sleep=sleep)
-    est = rq.estimates(inputs)
+    est = rq.estimates(inputs) if spec.spark_compute != "keep" else {}  # no Fabric pool is planned, so none is sized
     checks = preflight(ctx, spec, est, {r.type for r in reqs})
     checks += arm_checks(arm, spec, ctx)  # fills ctx.sku_regions, which the capacity step's plan then uses
     steps = [HANDLERS[r.type].plan(ctx, r) for r in reqs]
@@ -263,7 +263,7 @@ def make_plan_and_state(store, project_id: str, spec: TargetSpec, fab: FabricGat
     for s in steps:
         if s.action is Action.blocked:
             blockers += [f"{s.type.value} '{s.name}': {b}" for b in s.blockers[:2]]
-    if not est:
+    if not est and spec.spark_compute != "keep":
         notes.append("No Spark compute was found in the compute plan, so no capacity size is estimated.")
     if not any(s.type in (T.spark_pool, T.environment) for s in steps) and inputs.compute is None:
         notes.append("No compute plan exists for this project (run convert); pools and environments are not part of this plan.")

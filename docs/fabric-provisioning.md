@@ -30,6 +30,11 @@ compute); a notebook / Spark job definition per generated workload; a Fabric con
 inventory marks `needs_connection`; a lakehouse when workloads need one (never invented: you name it, otherwise the step is
 blocked); and whatever you ask for explicitly (capacity, workspace, identity, role assignments, warehouses).
 
+Where Spark runs decides the pool and Environment. When Spark stays on Databricks / Synapse (`--spark-compute keep`, or an
+approved consultation brief that keeps the source compute), none is planned and the plan says why, and no capacity is sized for
+it. `--spark-compute fabric`, or a brief that moves Spark to Fabric, plans them. With neither, the compute plan's proposals are
+planned, as before. The API's plan follows an approved, current brief automatically; the choice is recorded in `target.yaml`.
+
 ## Which API does what (none assumed to cover another)
 
 | Resource | API | Operation |

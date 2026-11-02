@@ -120,7 +120,11 @@ def build_requirements(spec: TargetSpec, inputs: Inputs) -> tuple[list[Requireme
 
     c = inputs.compute
     pool_ids: dict[str, str] = {}
-    if c is not None:
+    if c is not None and spec.spark_compute == "keep" and (c.pools or c.environments):
+        notes.append(f"Spark keeps running on its source compute (Databricks / Synapse), as chosen for this plan, so the {len(c.pools)} proposed "
+                     f"Spark pool(s) and {len(c.environments)} environment(s) are not planned. Choose Fabric Spark (the consultation brief, "
+                     "or --spark-compute fabric) to plan them.")
+    elif c is not None:
         env_pool = {e.name: e.pool for e in c.environments}
         for p in c.pools:
             if p.status != "proposed" or not p.request_body:

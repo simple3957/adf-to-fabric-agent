@@ -273,6 +273,18 @@ def test_a_project_without_spark_compute_gets_no_pool_or_environment(tmp_path):
     assert not {r.type for r in reqs} & {T.spark_pool, T.environment, T.notebook, T.spark_job_definition, T.connection}
 
 
+def test_spark_kept_on_its_source_compute_plans_no_pool_or_environment(project):
+    store, pid = project
+    inputs = rq.load_inputs(store, pid)
+    assert inputs.compute is not None and inputs.compute.pools  # the compute plan does propose a pool
+    for undecided_or_fabric in (spec(), spec(spark_compute="fabric")):
+        assert T.spark_pool in {r.type for r in rq.build_requirements(undecided_or_fabric, inputs)[0]}
+    reqs, notes = rq.build_requirements(spec(spark_compute="keep"), inputs)
+    assert not {r.type for r in reqs} & {T.spark_pool, T.environment}
+    assert any("keeps running on its source compute" in n for n in notes)
+    assert {T.workspace, T.capacity_assignment, T.lakehouse} <= {r.type for r in reqs}  # everything else is still planned
+
+
 def test_capacity_estimate_follows_the_documented_ratio():
     assert rq.sku_units("F64") == 64 and rq.sku_units("FTL64") is None and rq.sku_units("P1") is None
     assert rq.recommended_sku(12) == "F16" and rq.recommended_sku(0.5) == "F2" and rq.recommended_sku(5000) == "F2048"
@@ -562,6 +574,15 @@ def _planned(prov, svc, **spec_kw):
     fab, arm, sleeps = _gateways(svc, spec_kw.pop("arm", False))
     p = service.plan(store, pid, spec(**spec_kw), fab, arm, NOW)
     return store, pid, fab, arm, sleeps, p
+
+
+def test_a_plan_that_keeps_spark_on_its_source_compute_sizes_and_creates_no_pool(prov):
+    svc = FakeService()
+    _workspace(svc)
+    store, pid, _, _, _, p = _planned(prov, svc, spark_compute="keep")
+    assert not [s for s in p.steps if s.type in (T.spark_pool, T.environment)]
+    assert p.estimates == {} and not any("No Spark compute was found" in n for n in p.notes)
+    assert service.load_spec(store, pid).spark_compute == "keep"  # recorded with the target, so a re-plan says the same
 
 
 def test_apply_refuses_without_approval_and_writes_nothing(prov):

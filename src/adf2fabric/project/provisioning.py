@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from enum import Enum
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -133,6 +133,9 @@ class TargetSpec(_Strict):
     warehouse_names: list[str] = Field(default_factory=list)
     lakehouse_schemas_enabled: bool = False
     pipelines: list[str] = Field(default_factory=list)  # limit requirements to these pipelines (empty = all)
+    # where Spark runs after migration: "keep" (Databricks / Synapse, so no Fabric pool or environment is planned),
+    # "fabric" (the compute plan's pools and environments are planned), None (not decided: planned, as before)
+    spark_compute: Optional[Literal["keep", "fabric"]] = None
 
 
 class ProvisionStep(_Strict):

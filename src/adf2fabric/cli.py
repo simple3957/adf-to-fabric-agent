@@ -941,10 +941,12 @@ def _provision_gateways(auth: str, auth_env: dict, need_arm: bool):
 @click.option("--lakehouse", "lakehouses", multiple=True, help="A lakehouse to create or reuse. Repeatable.")
 @click.option("--lakehouse-schemas", is_flag=True, help="Create lakehouses with schemas enabled (preview).")
 @click.option("--warehouse", "warehouses", multiple=True, help="A warehouse to create or reuse. Repeatable.")
+@click.option("--spark-compute", type=click.Choice(["keep", "fabric"]), default=None,
+              help="keep: Spark stays on Databricks / Synapse, so no Fabric pool or environment is planned. fabric: plan them. Default: plan what the compute plan proposes.")
 @azure_auth_options()
 def provision_plan(project_name, tenant_id, workspace_name, workspace_id, capacity_id, capacity_name, create_capacity, azure_subscription,
                    azure_resource_group, azure_capacity_name, azure_region, azure_sku, capacity_admins, provision_identity, roles, lakehouses,
-                   lakehouse_schemas, warehouses, auth, **auth_env) -> None:
+                   lakehouse_schemas, warehouses, spark_compute, auth, **auth_env) -> None:
     """Discover what exists and plan what the migration needs in Fabric. Read-only: nothing is created."""
     from adf2fabric.agent.provisioning import service
     from adf2fabric.project.provisioning import TargetSpec
@@ -957,14 +959,14 @@ def provision_plan(project_name, tenant_id, workspace_name, workspace_id, capaci
             raise click.UsageError(f"--role must look like PRINCIPAL_ID:TYPE:ROLE, got '{r}'.")
         role_list.append({"principal_id": parts[0], "principal_type": parts[1], "role": parts[2]})
     given = any([tenant_id, workspace_name, workspace_id, capacity_id, capacity_name, create_capacity, azure_subscription, provision_identity,
-                 roles, lakehouses, warehouses])
+                 roles, lakehouses, warehouses, spark_compute])
     spec = service.load_spec(store, project_name) if not given else None
     if spec is None:
         spec = TargetSpec(tenant_id=tenant_id, workspace_name=workspace_name, workspace_id=workspace_id, capacity_id=capacity_id, capacity_name=capacity_name,
                           create_capacity=create_capacity, azure_subscription_id=azure_subscription, azure_resource_group=azure_resource_group,
                           azure_capacity_name=azure_capacity_name, azure_region=azure_region, azure_sku=azure_sku, capacity_admins=list(capacity_admins),
                           provision_workspace_identity=provision_identity, role_assignments=role_list, lakehouse_names=list(lakehouses),
-                          warehouse_names=list(warehouses), lakehouse_schemas_enabled=lakehouse_schemas)
+                          warehouse_names=list(warehouses), lakehouse_schemas_enabled=lakehouse_schemas, spark_compute=spark_compute)
     try:
         fab, arm = _provision_gateways(auth, auth_env, need_arm=bool(spec.create_capacity or spec.azure_subscription_id))
         p = service.plan(store, project_name, spec, fab, arm)
