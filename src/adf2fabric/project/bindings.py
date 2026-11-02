@@ -35,7 +35,7 @@ def _resolution_entries(store: ProjectStore, pid: str) -> list[dict]:
     path = store.conversion_dir(pid) / "resolutions.json"
     try:
         data = json.loads(read_text_retry(path))
-    except (OSError, ValueError):
+    except (FileNotFoundError, ValueError):
         return []
     return [e for e in data if isinstance(e, dict)] if isinstance(data, list) else []
 

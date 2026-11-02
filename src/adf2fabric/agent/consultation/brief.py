@@ -72,6 +72,7 @@ class Facts:
     lakehouse_bound: Optional[str] = None  # a lakehouse bound in the resolutions
     invoke_connection_bound: bool = False
     not_recorded: list[str] = field(default_factory=lambda: list(NOT_RECORDED))
+    unreadable: list[str] = field(default_factory=list)  # records that exist but could not be read: the questions about them are not asked, and this says so
 
     @property
     def notebook_activities(self) -> int:
@@ -120,14 +121,14 @@ def read_facts(store: Any, pid: str, destination: Optional[dict] = None) -> Fact
 
         sm = build_storage_map(d)
         f.file_datasets, f.storage_undecided, f.shortcuts_planned = sm.summary["file_datasets"], sm.summary["needs_decision"], sm.summary["shortcuts"]
-    except Exception:  # noqa: BLE001 - the storage questions are then not asked, never guessed
-        pass
+    except Exception as exc:  # noqa: BLE001 - one unreadable record hides nothing else; it is named, not dropped
+        f.unreadable.append(f"the storage map ({type(exc).__name__})")
     try:
         if store.has_dependency_inventory(pid):
             inv = store.load_dependency_inventory(pid)
             f.pipeline_waves = [list(w.items) for w in inv.waves if w.kind == "pipelines" and w.items]
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception as exc:  # noqa: BLE001 - one unreadable record hides nothing else; it is named, not dropped
+        f.unreadable.append(f"the dependency inventory ({type(exc).__name__})")
     try:  # from the conversion rules by activity type, over the whole estate: not from the last conversion (which may cover a subset)
         import adf2fabric.agent.conversion.engine  # noqa: F401 - registers every handler
         from adf2fabric.agent.conversion.registry import rule_for
@@ -140,20 +141,20 @@ def read_facts(store: Any, pid: str, destination: Optional[dict] = None) -> Fact
         per = {p.name: sum(1 for a in walk(p.activities) if a.type and no_route(a.type)) for p in d.pipelines}
         f.blocked_activities = sum(per.values())
         f.blocked_pipelines = sorted(n for n, k in per.items() if k)
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception as exc:  # noqa: BLE001 - one unreadable record hides nothing else; it is named, not dropped
+        f.unreadable.append(f"the conversion rules ({type(exc).__name__})")
     try:
         if store.has_reconstruction(pid):
             f.reconstruction_proposals = int(store.load_reconstruction(pid).safe_proposal_count or 0)
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception as exc:  # noqa: BLE001 - one unreadable record hides nothing else; it is named, not dropped
+        f.unreadable.append(f"the reconstruction record ({type(exc).__name__})")
     try:
         if store.has_workload_manifest(pid):
             ws = store.load_workload_manifest(pid).workloads
             f.notebooks_with_storage_paths = sum(1 for w in ws if any(x.code in ("adls_direct_path", "blob_direct_path") for x in w.findings))
             f.notebooks_with_secrets = sum(1 for w in ws if any("secret" in x.code for x in w.findings))
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception as exc:  # noqa: BLE001 - one unreadable record hides nothing else; it is named, not dropped
+        f.unreadable.append(f"the workload manifest ({type(exc).__name__})")
     try:
         res = store.conversion_dir(pid) / "resolutions.json"
         entries = json.loads(res.read_text(encoding="utf-8")) if res.exists() else []
@@ -163,8 +164,8 @@ def read_facts(store: Any, pid: str, destination: Optional[dict] = None) -> Fact
                 f.lakehouse_bound = str(e["key"]).split(":", 1)[1]
             if key == "connection:invoke-pipeline":
                 f.invoke_connection_bound = True
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception as exc:  # noqa: BLE001 - one unreadable record hides nothing else; it is named, not dropped
+        f.unreadable.append(f"the saved bindings ({type(exc).__name__})")
     return f
 
 

@@ -33,6 +33,9 @@ def consult(api: ApiClient, pid: str, brief: dict | None) -> None:
     if not brief:
         empty_state("Nothing to ask yet", "Run discovery first: the consultation asks only about what discovery found.")
         return
+    unread = (brief.get("facts") or {}).get("unreadable") or []
+    if unread:  # a question about something that could not be read is not asked: say so, rather than let it look like there was nothing to ask
+        st.warning("Some records could not be read, so the questions about them are not asked: " + ", ".join(unread) + ". Run discovery again, or check the project folder.")
     if brief.get("mode") == "simple":
         _simple(api, pid, brief)
         return

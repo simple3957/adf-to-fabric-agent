@@ -26,7 +26,7 @@ def load(project_dir: Path) -> dict[str, Any]:
     try:
         data = json.loads(read_text_retry(path(project_dir)))
         return data if isinstance(data, dict) else {}
-    except (OSError, ValueError):
+    except (FileNotFoundError, ValueError):
         return {}
 
 

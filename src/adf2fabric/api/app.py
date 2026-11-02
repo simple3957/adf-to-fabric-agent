@@ -972,7 +972,7 @@ def create_app(settings: Optional[Settings] = None, live: Optional[Container] = 
         f = _journey_file(ctx, slug)
         try:
             return [s for s in json.loads(read_text_retry(f)).get("confirmed", []) if s in JOURNEY_STEPS] if f.exists() else []
-        except (OSError, ValueError):
+        except (FileNotFoundError, ValueError):
             return []
 
     def _journey_write(ctx: Ctx, slug: str, steps: list[str]) -> None:

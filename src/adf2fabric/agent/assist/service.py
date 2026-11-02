@@ -66,7 +66,7 @@ class AssistStore:
     def get(self, name: str) -> dict[str, Any]:
         try:
             return json.loads(read_text_retry(self.path(name)))
-        except (OSError, ValueError):
+        except (FileNotFoundError, ValueError):
             return {"pipeline": name, "draft": None, "accepted": None}
 
     def put(self, record: dict[str, Any]) -> None:
@@ -82,7 +82,7 @@ class AssistStore:
         for f in sorted(self.directory.glob("*.json")) if self.directory.is_dir() else []:
             try:
                 out.append(json.loads(read_text_retry(f)))
-            except (OSError, ValueError):
+            except (FileNotFoundError, ValueError):
                 continue
         return out
 

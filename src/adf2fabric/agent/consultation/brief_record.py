@@ -36,7 +36,7 @@ def load(store: Any, pid: str) -> dict[str, Any]:
     if p.exists():
         try:
             data = json.loads(read_text_retry(p))
-        except (OSError, ValueError):
+        except (FileNotFoundError, ValueError):  # missing or damaged: empty. A permissions error is raised, not shown as "no answers"
             data = {}
     return {"answers": dict(data.get("answers") or {}), "notes": list(data.get("notes") or []), "versions": list(data.get("versions") or []),
             "config": dict(data.get("config") or {})}

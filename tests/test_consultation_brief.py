@@ -366,3 +366,22 @@ def test_the_settings_carry_where_secrets_come_from_and_the_tenancy():
     assert any("Key Vault" in p and "kv1.vault.azure.net" in p for p in s.prerequisites) and any("other tenant" in p for p in s.prerequisites)
     plain = B.settings_from(f, B.resolve(f, {}))
     assert (plain.secrets_from, plain.key_vault_url, plain.cross_tenant) == ("person", None, False)
+
+
+def test_a_record_that_cannot_be_read_is_named_not_silently_dropped(tmp_path, monkeypatch):
+    """The six fact reads used to swallow every error: an unreadable record just made its questions vanish, as if there was nothing to ask."""
+    from adf2fabric.project.store import ProjectStore
+    from tests.test_conversion_agent import FILES
+    from tests.test_partial_source import _convert
+
+    store, pid, _ = _convert(tmp_path, FILES)
+    store.load_adf_semantic_discovery(pid)  # discovery exists
+
+    def boom(*a, **k):
+        raise PermissionError("Access is denied")
+
+    monkeypatch.setattr(ProjectStore, "has_workload_manifest", lambda self, p: True)
+    monkeypatch.setattr(ProjectStore, "load_workload_manifest", boom)
+    f = B.read_facts(store, pid)
+    assert f.discovered and any("workload manifest" in x and "PermissionError" in x for x in f.unreadable)
+    assert B.read_facts(*[store, pid]).to_dict()["unreadable"] == f.unreadable  # it travels with the brief the screens show
