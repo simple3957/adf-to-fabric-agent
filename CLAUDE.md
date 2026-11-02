@@ -8,6 +8,9 @@ Start with [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the stage map and [d
 
 ```bash
 pip install -e ".[api]"                 # plus dev extras for tests
+pip install --require-hashes -r requirements.lock && pip install -e . --no-deps   # the same, with every package pinned
+# regenerate the lock after changing pyproject.toml:
+#   pip install pip-tools && pip-compile pyproject.toml --extra api --extra ui --extra dev --generate-hashes -o requirements.lock
 python -m pytest -q                     # ~4.5 min; offline, mocked Azure/Fabric
 python -m adf2fabric.api                # API on 127.0.0.1:8765
 streamlit run ui/app.py                 # UI on http://localhost:8501 (add ?demo=1 for the bundled sample)
