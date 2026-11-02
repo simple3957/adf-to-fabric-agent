@@ -188,6 +188,28 @@ def test_a_pipeline_that_is_not_deployed_is_reported_as_such_not_hidden(tmp_path
     assert data["progress"]["deployed"] == 1
 
 
+class ParentStartsChild(FakeFabric):
+    """PL_Main's run invoked PL_Child once (job 41); a minute earlier PL_Child was started by hand and failed (job 42)."""
+
+    def _call(self, method, url, body=None):
+        R_ = self._R
+        if f"/items/{G(11)}/jobs/instances" in url:
+            return R_(200, {"value": [{"id": G(41), "status": "Completed", "startTimeUtc": "2026-10-26T01:00:10Z"},
+                                      {"id": G(42), "status": "Failed", "startTimeUtc": "2026-10-26T00:59:00Z"}]})
+        if f"/pipelineruns/{G(40)}/queryactivityruns" in url:
+            self.calls.append((method, url))
+            return R_(200, [{"activityName": "Run_Child", "activityType": "InvokePipeline", "status": "Succeeded",
+                             "output": {"id": G(41), "itemId": G(11), "status": "Completed", "startTimeUtc": "2026-10-26T01:00:10Z"}}])
+        return super()._call(method, url, body)
+
+
+def test_a_called_pipeline_is_read_as_the_runs_its_callers_run_started(tmp_path):
+    store, pid, _ = _deployed_project(tmp_path)
+    data = R.collect(store, pid, "w", lambda: ParentStartsChild(store, pid, {"PL_Main": G(10), "PL_Child": G(11)}), workers=2)
+    run = next(r for r in data["pipelines"] if r["pipeline"] == "PL_Child")["run"]
+    assert run["status"] == "Completed" and run["runs"] == 1 and run["job_id"] == G(41)  # the run started by hand is not taken in
+
+
 def test_nothing_in_the_report_run_writes_to_fabric(tmp_path):
     store, pid, _ = _deployed_project(tmp_path)
     fake = FakeFabric(store, pid, {"PL_Main": G(10), "PL_Child": G(11)})

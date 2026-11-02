@@ -15,7 +15,8 @@ and `.json`.
    are listed as *documented*; anything else is a *difference*. Verdicts: `equivalent`, `equivalent with documented differences`, `differs`.
 3. **How did it behave in the latest Fabric run?** Status, duration, every activity's status, duration, rows read and copied and any error;
    which activities did not execute (a branch not taken); slowest activities across the estate; failed activities. A pipeline another one calls
-   once per item (for example a ForEach child) is read as the batch of runs that started together, as `verify` does.
+   once per item (for example a ForEach child) is read as the batch of runs its caller's latest run started (the child job ids in
+   its InvokePipeline outputs), as `verify` does; only when no caller run names any is it the runs that started within 10 minutes.
 
 The first section is **Progress**: pipelines deployed, structure equal, latest run completed, matches its ADF baseline (from `verify`), and the
 validation engine's overall status.
