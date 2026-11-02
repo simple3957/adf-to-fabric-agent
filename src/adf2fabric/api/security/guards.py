@@ -50,15 +50,6 @@ def valid_resource_name(value: object, what: str = "resource name") -> str:
     return value
 
 
-def safe_child(base: Path, *parts: str) -> Path:
-    """``base / parts`` guaranteed to stay inside ``base`` (no traversal through ``..``, absolute parts or symlinks)."""
-    base_r = base.resolve()
-    target = base_r.joinpath(*parts).resolve()
-    if base_r != target and base_r not in target.parents:
-        raise Rejected("That path is outside the allowed folder.")
-    return target
-
-
 # --- SSRF -----------------------------------------------------------------------------------------------------------------
 
 

@@ -48,3 +48,13 @@ def test_the_ui_has_one_list_of_ready_connection_states():
     import panels
 
     assert set(panels.READY) == set(journey.READY_STATES) and set(panels.PROBLEM) == set(journey.PROBLEM_STATES)
+
+
+def test_the_documentation_lists_every_cli_command():
+    """CLAUDE.md's command list had drifted: three warehouse commands existed and were not in it. It is read from the code now, so it cannot."""
+    from adf2fabric.cli import cli
+
+    doc = (ROOT / "CLAUDE.md").read_text(encoding="utf-8")
+    listed = set(re.findall(r"`([a-z][a-z0-9-]+)`", doc[doc.index("CLI commands"):doc.index("Each takes")]))
+    assert set(cli.commands) <= listed, sorted(set(cli.commands) - listed)
+    assert listed <= set(cli.commands), sorted(listed - set(cli.commands))  # and it names nothing that is gone
