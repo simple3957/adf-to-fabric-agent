@@ -68,7 +68,7 @@ class Container:
         self.fabric_cli = fabric_cli or FabricCliProvider()
         self.git = git or GitProvider()
         self.vault = SecretVault()
-        self.jobs = JobRegistry()
+        self.jobs = JobRegistry(store=Path(self.store.projects_root) / "_jobs")  # next to _audit: the Activity page survives a restart
         self.sessions: dict[str, Session] = {}
         self._vault_reader = vault_reader
         self._fabric_factory = fabric_factory

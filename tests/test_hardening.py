@@ -114,3 +114,44 @@ def test_a_run_older_than_the_latest_deploy_does_not_prove_the_new_definition(tm
     deploy_record.note_apply(tmp_path, "ws", [type("R", (), {"name": "PL_A", "action": "update"})()], now=time.time())
     got = verify.current_record(tmp_path)["PL_A"]
     assert got["verdict"] == "not_run" and got["stale_run"] and "deploy" in got["detail"]
+
+
+# ---- jobs survive a restart ---------------------------------------------------------------------------------------------------
+
+
+def test_finished_jobs_are_still_listed_after_a_restart(tmp_path):
+    first = jobs_mod.JobRegistry(workers=2, store=tmp_path)
+    ok = first.submit("convert", "proj", lambda log: (log("converting"), {"pipelines": 10})[1], org="acme", owner="u1")
+    first.wait(ok.id)
+    bad = first.submit("deploy", "other", lambda log: (_ for _ in ()).throw(RuntimeError("boom")), org="acme")
+    first.wait(bad.id)
+    second = jobs_mod.JobRegistry(workers=1, store=tmp_path)  # a new server over the same folder
+    got = {j.id: j for j in second.list(org="acme")}
+    assert got[ok.id].state == jobs_mod.SUCCEEDED and got[ok.id].result == {"pipelines": 10} and got[ok.id].owner == "u1"
+    assert [e["message"] for e in got[ok.id].events] == ["converting"]
+    assert got[bad.id].state == jobs_mod.FAILED and "boom" in got[bad.id].error
+    assert second.list(org="someone-else") == []  # still scoped to the organisation that started it
+
+
+def test_a_job_that_was_running_when_the_server_stopped_is_shown_as_interrupted(tmp_path):
+    import json
+
+    (tmp_path / "abcdef012345.json").write_text(json.dumps({"id": "abcdef012345", "kind": "deploy_apply", "project_id": "p", "state": "running", "events": [],
+                                                           "created": 1.0, "org": "acme"}), encoding="utf-8")
+    reg = jobs_mod.JobRegistry(store=tmp_path)
+    job = reg.get("abcdef012345")
+    assert job.state == jobs_mod.FAILED and "Interrupted" in job.error and job.finished
+    assert json.loads((tmp_path / "abcdef012345.json").read_text(encoding="utf-8"))["state"] == "failed"  # said once, kept
+    assert reg.submit("convert", "p", lambda log: {}).id  # and it does not block the project: nothing is "already running"
+
+
+def test_saved_jobs_beyond_the_limit_are_deleted_and_a_damaged_file_hides_nothing(tmp_path, monkeypatch):
+    monkeypatch.setattr(jobs_mod, "KEEP_FINISHED", 3)
+    (tmp_path / "000000000000.json").write_text("{not json", encoding="utf-8")
+    reg = jobs_mod.JobRegistry(workers=2, store=tmp_path)
+    for _ in range(6):
+        reg.wait(reg.submit("x", None, lambda log: {}).id)
+    reg.submit("x", None, lambda log: {})  # evicts
+    again = jobs_mod.JobRegistry(store=tmp_path)
+    assert len([j for j in again.list() if j.state == jobs_mod.SUCCEEDED]) <= 4
+    assert len(list(tmp_path.glob("*.json"))) <= 6  # the evicted ones were removed from disk too

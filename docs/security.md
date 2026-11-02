@@ -142,7 +142,7 @@ The CLI commands (`provision-*`, `workloads-*`, `validate`) still rely on the op
   process must not be given `ADF2FABRIC_API_TOKEN` when shared (that token is then everyone's). Put it behind your own access control.
 * **TLS is not terminated here.** Tokens cross the network in clear unless you terminate TLS in front (required beyond loopback).
   Client addresses are taken from the socket, not forwarded headers, so behind a proxy all clients look alike to the lockout and limits.
-* **Rate limits and lockouts are per process and in memory.** Multiple instances, or a restart, reset them.
+* **Rate limits and lockouts are per process and in memory.** Multiple instances, or a restart, reset them. Idempotency keys are the same. Jobs are saved under `projects/_jobs/` as they start and end, so the Activity page survives a restart and a job that was running when the server stopped shows as interrupted (it does not block the project).
 * **The Azure CLI session is shared by everyone the server serves.** Grants limit what each person may target, but all calls run as the
   server's signed-in identity; Azure's audit log shows that identity, not the API user (our audit log does).
 * **SSRF is checked at request time.** DNS can change before `git` fetches; use the allow-list where you can.

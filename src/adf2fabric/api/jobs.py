@@ -2,12 +2,15 @@
 
 Agents have no progress hooks, so progress is stage-level: a job is a function that may call ``log`` between steps. At most one
 job per project runs at a time (a second request gets a conflict, not a race), results are secret-free summaries, and every
-event passes through the redactor. Jobs live in memory; a restart forgets them (they are not a source of truth: the project
-files are).
+event passes through the redactor. Jobs live in memory and, when the registry is given a folder, each is also saved there as it starts and as it
+ends, so the Activity page survives a restart and a job that was running when the server stopped is shown as interrupted, not as if it never
+existed. They are still not a source of truth: the project files are.
 """
 
 from __future__ import annotations
 
+import json
+import re
 import threading
 import time
 import uuid
@@ -17,6 +20,8 @@ from typing import Any, Callable, Optional
 
 import tempfile
 from pathlib import Path
+
+from adf2fabric.project.locks import read_text_retry, write_atomic
 
 from adf2fabric.api.security.guards import scrub
 from adf2fabric.connections.redaction import redact, redact_mapping
@@ -46,6 +51,17 @@ class Job:
     org: Optional[str] = None  # the organisation that started it: only that organisation can see it
     owner: Optional[str] = None
 
+    def record(self) -> dict[str, Any]:
+        """Everything the job holds, as saved (the log, the result and the error were redacted when they were recorded)."""
+        return {"id": self.id, "kind": self.kind, "project_id": self.project_id, "state": self.state, "events": self.events, "result": self.result,
+                "error": self.error, "created": self.created, "finished": self.finished, "org": self.org, "owner": self.owner}
+
+    @staticmethod
+    def from_record(data: dict[str, Any]) -> "Job":
+        return Job(id=str(data["id"]), kind=str(data["kind"]), project_id=data.get("project_id"), state=str(data.get("state") or FAILED),
+                   events=list(data.get("events") or [])[:MAX_EVENTS], result=data.get("result"), error=data.get("error"),
+                   created=float(data.get("created") or time.time()), finished=data.get("finished"), org=data.get("org"), owner=data.get("owner"))
+
     def public(self, since: int = 0) -> dict[str, Any]:
         end = self.finished or time.time()
         return {"id": self.id, "kind": self.kind, "project_id": self.project_id, "state": self.state,
@@ -54,11 +70,46 @@ class Job:
 
 
 class JobRegistry:
-    def __init__(self, workers: int = 4):
+    def __init__(self, workers: int = 4, store: Optional[Path] = None):
         self._pool = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="a2f-job")
         self._jobs: dict[str, Job] = {}
         self._active: dict[str, str] = {}  # project id -> job id
         self._lock = threading.Lock()
+        self._store = Path(store) if store else None
+        if self._store is not None:
+            self._load()
+
+    # ---- saving: a restart must not erase what ran ---------------------------------------------------------------------
+    def _file(self, job_id: str) -> Optional[Path]:
+        return (self._store / f"{job_id}.json") if self._store is not None and re.fullmatch(r"[0-9a-f]{12}", job_id) else None
+
+    def _persist(self, job: Job) -> None:
+        f = self._file(job.id)
+        if f is None:
+            return
+        try:
+            f.parent.mkdir(parents=True, exist_ok=True)
+            write_atomic(f, json.dumps(job.record(), default=str))
+        except OSError:  # a job that cannot be saved still runs; the Activity page then forgets it on a restart, as it always did
+            pass
+
+    def _load(self) -> None:
+        """The jobs saved by an earlier server. One that was queued or running then was cut off: it is shown as failed (interrupted), so nobody waits on it."""
+        if self._store is None or not self._store.is_dir():
+            return
+        loaded: list[Job] = []
+        for f in self._store.glob("*.json"):
+            try:
+                loaded.append(Job.from_record(json.loads(read_text_retry(f))))
+            except (OSError, ValueError, KeyError, TypeError):
+                continue  # one damaged file hides no other job
+        for job in loaded:
+            if job.state in (QUEUED, RUNNING):
+                job.state, job.finished = FAILED, job.finished or time.time()
+                job.error = "Interrupted: the server stopped while this job was running. Check the project, then run it again."
+                self._persist(job)
+            self._jobs[job.id] = job
+        self._evict()
 
     def submit(self, kind: str, project_id: Optional[str], fn: Callable[[Callable[[str], None]], dict[str, Any]], *, org: Optional[str] = None,
                owner: Optional[str] = None) -> Job:
@@ -68,6 +119,7 @@ class JobRegistry:
             self._evict()
             job = Job(id=uuid.uuid4().hex[:12], kind=kind, project_id=project_id, org=org, owner=owner)
             self._jobs[job.id] = job
+            self._persist(job)
             if project_id:
                 self._active[project_id] = job.id
         self._pool.submit(self._run, job, fn)
@@ -78,6 +130,9 @@ class JobRegistry:
         done = sorted((j for j in self._jobs.values() if j.state in (SUCCEEDED, FAILED)), key=lambda j: j.finished or j.created)
         for old in done[:max(0, len(done) - KEEP_FINISHED)]:
             del self._jobs[old.id]
+            gone = self._file(old.id)
+            if gone is not None:
+                gone.unlink(missing_ok=True)
             if self._active.get(old.project_id or "") == old.id:
                 del self._active[old.project_id or ""]
 
@@ -101,6 +156,7 @@ class JobRegistry:
         finally:
             with self._lock:
                 job.finished = time.time()
+                self._persist(job)
 
     def get(self, job_id: str) -> Optional[Job]:
         return self._jobs.get(job_id)
