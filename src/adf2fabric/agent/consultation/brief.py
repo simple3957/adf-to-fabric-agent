@@ -53,6 +53,7 @@ class Facts:
     linked_service_types: dict[str, int] = field(default_factory=dict)
     self_hosted: int = 0  # linked services through a self-hosted integration runtime
     key_vault: int = 0  # linked services reading secrets from Azure Key Vault
+    vault_url_hint: Optional[str] = None  # the one Key Vault ADF's own Key Vault linked service points at, when there is exactly one
     ls_params_no_default: int = 0  # linked-service parameters with no value
     triggers: dict[str, int] = field(default_factory=dict)  # by type
     triggers_started: int = 0
@@ -108,6 +109,8 @@ def read_facts(store: Any, pid: str, destination: Optional[dict] = None) -> Fact
     f.linked_service_types = dict(Counter(ls.type or "?" for ls in d.linked_services))
     f.self_hosted = sum(1 for ls in d.linked_services if ls.integration_runtime_kind == "self_hosted")
     f.key_vault = sum(1 for ls in d.linked_services if ls.key_vault_refs)
+    vaults = sorted({(ls.endpoint or "").strip().rstrip("/") for ls in d.linked_services if (ls.type or "").lower() == "azurekeyvault" and ls.endpoint})
+    f.vault_url_hint = vaults[0] if len(vaults) == 1 else None
     f.ls_params_no_default = sum(1 for ls in d.linked_services for p in ls.parameters if not p.has_default)
     f.triggers = dict(Counter(t.type or "?" for t in d.triggers))
     f.triggers_started = sum(1 for t in d.triggers if (t.runtime_state or "").lower() == "started")
@@ -220,6 +223,17 @@ TOPIC_TITLE = {t[0]: t[1] for t in TOPICS}
 
 O = Option
 R = Recommendation
+
+
+def _vault_problem(text: str) -> Optional[str]:
+    """The problem with a typed Key Vault address, in words, or None when it is an Azure Key Vault endpoint."""
+    from adf2fabric.connections.keyvault import KeyVaultError, normalize_vault_url
+
+    try:
+        normalize_vault_url(text)
+    except KeyVaultError as exc:
+        return str(exc)
+    return None
 
 
 _ITEM_NAME = re.compile(r"^[A-Za-z0-9_.\-]{1,256}$")
@@ -418,27 +432,35 @@ QUESTIONS: list[Question] = [
              resolve=lambda f: R("Bound in the resolutions", "The Invoke pipeline connection is already bound.") if f.invoke_connection_bound else None),
 
     # ---- connections -------------------------------------------------------------------------------------------------
-    Question("connections.credentials", "connections", "Linked services must become Fabric connections. How are their credentials provided?",
-             "ADF never gives up stored secrets. A person chooses each sign-in method on the Connect step; a secret is named by environment "
-             "variable and never stored.",
-             "single", True, "gate", "The agent waits until every connection is bound or skipped.",
-             options=lambda f: [O("person", "A person sets up each connection before the run"),
-                                O("existing", "Reuse existing Fabric connections", "Bind their ids on the Connect step."),
+    Question("connections.tenancy", "connections", "Are the source data and Fabric in the same Microsoft Entra tenant?",
+             "In different tenants a workspace identity, or a signed-in person, cannot reach the other side's resources: a service principal or a key is needed.",
+             "single", True, "run", "Which sign-in methods the Connect step recommends, and the approvals the other tenant needs.",
+             options=lambda f: [O("same", "Same tenant", "Workspace identity and Microsoft Entra sign-in connections can be used."),
+                                O("different", "Different tenants", "A service principal or a key is used; the other tenant's administrator must allow it.")],
+             when=lambda f, a: f.linked_services > 0,
+             recommend=lambda f, a: R("same", "Most migrations stay in one tenant; choose Different if the factory or its data sits in another.")),
+    Question("connections.credentials", "connections", "Where do the connection secrets (passwords and keys) come from?",
+             "ADF never gives up stored secrets, so each connection needs its secret supplied again. A secret is never stored in a project file.",
+             "single", True, "run", "Which sign-in method the Connect step starts with, and whether it asks for a Key Vault.",
+             options=lambda f: [O("keyvault", "Azure Key Vault", "Name one vault; each connection reads its secret from it, so nothing is typed."),
+                                O("person", "I type each secret once", "Kept in memory for 30 minutes, never saved."),
+                                O("existing", "Reuse connections that already exist in Fabric", "Bind their ids on the Connect step."),
                                 O("skip", "Leave connections out", "Pipelines that need them are refused at deploy.")],
              when=lambda f, a: f.linked_services > 0,
-             recommend=lambda f, a: R("person", f"{plural(f.linked_services, 'linked service')}; pipelines cannot run without their connections.")),
+             recommend=lambda f, a: R("keyvault", f"{plural(f.key_vault, 'linked service')} already read their secret from Key Vault in ADF: keeping the vault means nothing is typed.")
+             if f.key_vault > 0 else R("person", f"{plural(f.linked_services, 'linked service')}; ADF's stored secrets cannot be exported, so each is entered once.")),
+    Question("connections.vault_url", "connections", "Which Azure Key Vault holds the secrets?",
+             "One address is enough: the Connect step fills it into every connection that can read from a vault. The signed-in account needs permission to read secrets there.",
+             "text", True, "run", "The vault address the Connect step pre-fills.",
+             when=lambda f, a: f.linked_services > 0 and a.get("connections.credentials") == "keyvault",
+             resolve=lambda f: R(f.vault_url_hint, "The Key Vault linked service in ADF points here.") if f.vault_url_hint else None,
+             placeholder="https://<vault>.vault.azure.net", check=lambda text: _vault_problem(text)),
     Question("connections.gateway", "connections", "Some linked services use a self-hosted integration runtime. How should Fabric reach them?",
              "Fabric reaches private systems through an on-premises data gateway, installed by an administrator. The agent never sets one up.",
              "single", True, "gate", "A prerequisite a person confirms before the run.",
              options=lambda f: [O("gateway", "An administrator sets up a data gateway first"), O("exclude", "Leave them out until access is approved")],
              when=lambda f, a: f.self_hosted > 0,
              recommend=lambda f, a: R("gateway", f"{plural(f.self_hosted, 'linked service')} use a self-hosted runtime.")),
-    Question("connections.keyvault", "connections", "Some linked services read secrets from Azure Key Vault. How should Fabric get them?",
-             "A Fabric connection can use a Key Vault reference, or a person types the secret once.",
-             "single", True, "record", "The brief.",
-             options=lambda f: [O("reference", "Use Key Vault references"), O("typed", "A person enters the secrets once")],
-             when=lambda f, a: f.key_vault > 0,
-             recommend=lambda f, a: R("reference", f"{plural(f.key_vault, 'linked service')}: the vault stays the only place the secret lives.")),
     Question("connections.parameters", "connections", "Linked-service parameters have no value. Who provides them?",
              "Fabric connections are not parameterised: each needs a fixed value.",
              "single", True, "gate", "The agent waits for the values.",
@@ -527,7 +549,16 @@ def simple() -> bool:
 
 # What simple mode asks: the questions the run reads (see Settings), minus two that have a safe default and are not worth a question
 # (``target.git``: committing to the workspace's Git is off unless wanted; ``security.sensitive``: a data-owner approval gate). The rest only record or gate.
-ESSENTIAL = frozenset(q.id for q in QUESTIONS if q.effect == "run") - {"target.git", "security.sensitive"}
+# The main points the project cannot choose for itself. Every other question has a safe default and stays in the full consultation
+# (ADF2FABRIC_CONSULT=full). A question listed here is still asked only when discovery found what it is about.
+ESSENTIAL = frozenset({
+    "scope.mode", "scope.pipelines",                                            # what moves
+    "connections.tenancy", "connections.credentials", "connections.vault_url",  # how Fabric reaches the data, and where the secrets come from
+    "storage.route", "storage.lakehouse",                                       # how pipelines reach files
+    "compute.engine", "compute.paths",                                          # where notebooks run
+    "pipelines.unsupported",                                                    # what to do with what has no Fabric equivalent
+    "validation.depth",                                                         # how far to prove it, and whether real runs may start
+})
 
 
 def resolve(facts: Facts, given: Answers) -> list[Resolved]:
@@ -598,6 +629,9 @@ class Settings:
     validate_stages: list[str]
     allow_real_runs: bool
     check_before_update: bool
+    secrets_from: str  # keyvault | person | existing | skip: where connection secrets come from
+    key_vault_url: Optional[str]  # the one vault the Connect step pre-fills
+    cross_tenant: bool  # source data and Fabric are in different tenants
     prerequisites: list[str]
     gates: list[str]
 
@@ -626,6 +660,13 @@ def settings_from(facts: Facts, rs: list[Resolved]) -> Settings:
     real = depth == "run" and _pick(a, "security.sensitive", "none") != "blocked"
     to_fabric = _pick(a, "compute.engine", "keep") == "fabric"
     prereq: list[str] = []
+    secrets_from = _pick(a, "connections.credentials", "person")
+    vault_url = (str(a.get("connections.vault_url") or "").strip() or None) if secrets_from == "keyvault" else None
+    cross_tenant = _pick(a, "connections.tenancy", "same") == "different"
+    if secrets_from == "keyvault":
+        prereq.append("The signed-in Azure account can read secrets (Get and List) in the Key Vault" + (f" {vault_url}." if vault_url else "."))
+    if cross_tenant:
+        prereq.append("The other tenant's administrator allows the service principal or key (consent, firewall, Conditional Access); both sides' accounts are signed in on the Connections page.")
     if a.get("target.workspace") == "new" or (not facts.fabric_workspace and a.get("target.workspace")):
         prereq.append("A Fabric workspace is chosen on the Connections step (a new one is planned and approved on the Plan step).")
     if a.get("target.capacity") in ("existing", "provision", "assess"):
@@ -644,7 +685,7 @@ def settings_from(facts: Facts, rs: list[Resolved]) -> Settings:
                     workloads_to_fabric=to_fabric, route_notebook_paths=to_fabric and _pick(a, "compute.paths", "direct") == "shortcuts",
                     schedules=_pick(a, "pipelines.triggers", "disabled") == "disabled", git_commit=_pick(a, "target.git", "off") == "commit",
                     validate_stages=stages, allow_real_runs=real, check_before_update=_pick(a, "target.existing", "check") == "check",
-                    prerequisites=prereq, gates=gates)
+                    secrets_from=secrets_from, key_vault_url=vault_url, cross_tenant=cross_tenant, prerequisites=prereq, gates=gates)
 
 
 def conflicts(facts: Facts, rs: list[Resolved]) -> list[str]:

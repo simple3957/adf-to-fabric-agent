@@ -2,12 +2,30 @@
 
 ## Simple mode (the default)
 
-The consultation is **simple by default**: only the questions that change what the run does are asked (scope, storage and lakehouse name, notebooks,
-unsupported activities, reconstruction, schedules, validation depth: at most ten, usually four to six, depending on what discovery found), each
-already answered with its recommendation and the reason. The 29 questions that only record a fact or gate a person (owner, rollback, downtime,
-credentials, network, audit evidence, ...) are not asked, and **nobody has to approve anything**: **Save settings** is the whole step. It makes the
+The consultation is **simple by default**: only the main points the project cannot choose for itself are asked, each already answered with its
+recommendation and the reason. `brief.ESSENTIAL` lists them, and each is asked only when discovery found what it is about:
+
+| Main point | Question ids |
+| --- | --- |
+| What moves | `scope.mode`, `scope.pipelines` |
+| How Fabric reaches the data | `connections.tenancy` (same tenant or different tenants), `connections.credentials` (where secrets come from), `connections.vault_url` |
+| How pipelines reach files | `storage.route`, `storage.lakehouse` |
+| Where notebooks run | `compute.engine`, `compute.paths` |
+| What has no Fabric equivalent | `pipelines.unsupported` |
+| How far to prove it | `validation.depth` |
+
+On the real sample estate (10 pipelines, 4 linked services) that is 6 questions, all pre-answered, against 27 in the full consultation. Every other question has a
+safe default and is asked only with `ADF2FABRIC_CONSULT=full`. **Nobody has to approve anything**: **Save settings** is the whole step. It makes the
 run follow those settings under the signed-in person's name; changing one saves a new version. Saving nothing leaves the run on its normal defaults,
 and the Next button stays open. A conflict or an open required question keeps it a draft and the screen says why.
+
+**Key Vault.** `connections.credentials` offers *Azure Key Vault*: name one vault (`connections.vault_url`, checked to be an Azure Key Vault endpoint) and the Connect
+step starts every service on its "secret in Key Vault" method with the vault filled in. When ADF already read a service's secret from a vault, that vault and secret
+name are taken from ADF's own Key Vault linked service, so nothing is typed; with exactly one Key Vault linked service in ADF the question is answered for you.
+The backend reads the secret with the signed-in person's own Azure sign-in, sends it once to Fabric and drops it; nothing is stored.
+
+**Tenancy.** `connections.tenancy` asks whether the source data and Fabric are in the same Microsoft Entra tenant. With different tenants the Connect step says a workspace
+identity or Entra sign-in cannot reach the other side, and the brief lists the other tenant's approvals as prerequisites.
 
 Simple mode never repoints storage to a lakehouse nobody chose: it recommends keeping the original connections until a lakehouse exists and is bound
 (`ItemToId lakehouse:<name>`), and it never invents a lakehouse name. Choosing the lakehouse route yourself needs the name, and until that lakehouse is bound

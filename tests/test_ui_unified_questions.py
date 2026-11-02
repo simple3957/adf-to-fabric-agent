@@ -134,3 +134,20 @@ def test_plan_step_can_be_passed_with_resources_still_to_create():
     assert f.complete and f.attention and "not created" in f.attention
     blocked = plan_facts({**prov, "blockers": ["no capacity"]})
     assert not blocked.complete  # a real blocker still stops the step
+
+
+def test_the_connect_form_starts_where_the_person_said_secrets_come_from():
+    import sys
+    from pathlib import Path
+
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "ui"))
+    import panels
+
+    usable = [{"id": "sql_login", "key_vault": False}, {"id": "sql_login_kv", "key_vault": True}, {"id": "existing_connection", "key_vault": False}]
+    assert panels.preferred_method(usable, "keyvault") == "sql_login_kv"
+    assert panels.preferred_method(usable, "existing") == "existing_connection"
+    assert panels.preferred_method(usable, "person") is None and panels.preferred_method([usable[0]], "keyvault") is None
+    card = {"key_vault_hint": {"vault_url": "https://kv-prod.vault.azure.net", "secret_name": "sql-password"}}
+    assert panels.vault_default("vault_url", card, {"key_vault_url": "https://other.vault.azure.net"}) == "https://kv-prod.vault.azure.net"  # ADF's own vault first
+    assert panels.vault_default("vault_url", {}, {"key_vault_url": "https://kv1.vault.azure.net"}) == "https://kv1.vault.azure.net"
+    assert panels.vault_default("secret_name", card, None) == "sql-password" and panels.vault_default("secret_name", {}, None) == ""

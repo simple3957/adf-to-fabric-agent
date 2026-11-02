@@ -788,3 +788,18 @@ def test_a_pasted_connection_id_is_normalised_and_must_be_the_right_type(project
     s.set_choice(pid, ConnectionChoice(linked_service="LS_SQL", method="existing_connection", values={"connection_id": GUID2}))
     item = next(i for i in s.apply(pid, "sess", wrong).items if i.linked_service == "LS_SQL")
     assert item.action == "failed" and "FabricDataPipelines" in item.detail and not item.bound
+
+
+def test_a_service_that_read_its_secret_from_a_vault_in_adf_carries_the_vault_and_the_secret_name():
+    """The Key Vault form starts filled in from what ADF itself used, so migrating such a service needs no typing."""
+    from types import SimpleNamespace as NS
+
+    from adf2fabric.connections.resolution import vault_hint
+
+    akv = NS(name="LS_Vault", endpoint="https://kv-prod.vault.azure.net/")
+    d = NS(linked_services=[akv])
+    one = NS(key_vault_refs=[NS(store_linked_service="ls_vault", secret_name="sql-password")])
+    assert vault_hint(d, one) == {"vault_url": "https://kv-prod.vault.azure.net", "secret_name": "sql-password"}
+    two = NS(key_vault_refs=[NS(store_linked_service="LS_Vault", secret_name="a"), NS(store_linked_service="LS_Vault", secret_name="b")])
+    assert vault_hint(d, two) == {"vault_url": "https://kv-prod.vault.azure.net"}  # two secrets: the vault is known, which secret is not guessed
+    assert vault_hint(d, NS(key_vault_refs=[])) == {}

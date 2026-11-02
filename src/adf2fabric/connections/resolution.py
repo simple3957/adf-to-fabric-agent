@@ -69,6 +69,7 @@ class LinkedServiceCard(_M):
     authentication_type: Optional[str] = None  # as authored in ADF
     user_name: Optional[str] = None
     key_vault_refs: list[dict[str, str]] = Field(default_factory=list)
+    key_vault_hint: dict[str, str] = Field(default_factory=dict)  # vault_url / secret_name ADF read this service's secret from, to pre-fill the Key Vault form
     used_by_datasets: list[str] = Field(default_factory=list)
     used_by_activities: list[dict[str, str]] = Field(default_factory=list)
     parameters: list[dict[str, Any]] = Field(default_factory=list)
@@ -233,6 +234,21 @@ def match_existing(spec: Optional[catalog.ConnectorSpec], fields: list[EndpointF
 # ---- the cards -------------------------------------------------------------------------------------------------------------
 
 
+def vault_hint(d: AdfSemanticDiscovery, ls: AdfLinkedService) -> dict[str, str]:
+    """Where ADF read this service's secret: the vault's address (from ADF's own Key Vault linked service) and, when it read just one, the secret's name.
+    Names and an address only, never a value."""
+    if not ls.key_vault_refs:
+        return {}
+    store = next((x for x in d.linked_services if x.name.lower() == ls.key_vault_refs[0].store_linked_service.lower()), None)
+    out: dict[str, str] = {}
+    url = ((store.endpoint if store else None) or "").strip().rstrip("/")
+    if url:
+        out["vault_url"] = url
+    if len(ls.key_vault_refs) == 1:
+        out["secret_name"] = ls.key_vault_refs[0].secret_name
+    return out
+
+
 def build_cards(d: AdfSemanticDiscovery, *, choices: Optional[dict[str, ConnectionChoice]] = None,
                 supported_types: Optional[dict[str, list[str]]] = None, connections: Optional[list[dict]] = None,
                 gateways: Optional[list[dict]] = None, secrets_held: Optional[dict[str, list[str]]] = None,
@@ -254,6 +270,7 @@ def build_cards(d: AdfSemanticDiscovery, *, choices: Optional[dict[str, Connecti
             supported=spec is not None, fabric_connection_type=spec.fabric_type if spec else None,
             authentication_type=ls.authentication_type, user_name=ls.connection.user_name,
             key_vault_refs=[{"store_linked_service": k.store_linked_service, "secret_name": k.secret_name} for k in ls.key_vault_refs],
+            key_vault_hint=vault_hint(d, ls),
             used_by_datasets=ds_names, used_by_activities=acts, endpoint_fields=fields, choice=choice,
             secrets_held=(secrets_held or {}).get(ls.name, []),
             auth_options=[{**a.method.public(), "available": a.available, "reason": a.reason} for a in avail],

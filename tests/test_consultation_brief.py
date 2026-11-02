@@ -39,7 +39,7 @@ def test_questions_are_asked_only_about_what_discovery_found():
                      triggers={"BlobEventsTrigger": 1, "ScheduleTrigger": 2}, self_hosted=1, key_vault=1, ls_params_no_default=2,
                      storage_undecided=3, blocked_activities=2, blocked_pipelines=["PL_C"], reconstruction_proposals=1))
     for q in ("compute.engine", "pipelines.events", "pipelines.dataflows", "pipelines.triggers", "pipelines.invoke", "connections.gateway",
-              "connections.keyvault", "connections.parameters", "storage.undecided", "pipelines.unsupported", "pipelines.reconstruct"):
+              "connections.vault_url", "connections.parameters", "storage.undecided", "pipelines.unsupported", "pipelines.reconstruct"):
         assert q in rich, q
 
 
@@ -319,3 +319,50 @@ def test_a_scope_that_leaves_out_a_pipeline_the_chosen_one_calls_is_a_conflict()
     assert any("PL_C invokes PL_A" in m for m in msgs)
     assert not B.conflicts(f, B.resolve(f, {"scope.mode": "selected", "scope.pipelines": ["PL_C", "PL_A"]}))
     assert not B.conflicts(f, B.resolve(f, {"scope.mode": "pilot"}))  # the first wave holds the children first
+
+
+# ---- the main points, tenancy and Key Vault ---------------------------------------------------------------------------------
+
+
+def test_the_default_consultation_asks_the_main_points_only():
+    assert B.ESSENTIAL == {"scope.mode", "scope.pipelines", "connections.tenancy", "connections.credentials", "connections.vault_url",
+                           "storage.route", "storage.lakehouse", "compute.engine", "compute.paths", "pipelines.unsupported", "validation.depth"}
+    assert B.ESSENTIAL <= {q.id for q in B.QUESTIONS}
+    # these have a safe default and are asked only in the full consultation
+    assert not B.ESSENTIAL & {"pipelines.reconstruct", "pipelines.triggers", "scope.approach", "context.owner", "target.git"}
+
+
+def test_tenancy_is_asked_when_there_are_connections_and_defaults_to_one_tenant():
+    assert "connections.tenancy" not in ids(facts(linked_services=0))
+    r = get(B.resolve(facts(), {}), "connections.tenancy")
+    assert r.applies and r.value == "same" and {o.value for o in r.q.options(facts())} == {"same", "different"}
+
+
+def test_secrets_can_come_from_key_vault_and_the_vault_is_named_once():
+    f = facts()
+    assert "keyvault" in {o.value for o in get(B.resolve(f, {}), "connections.credentials").q.options(f)}
+    assert "connections.vault_url" not in ids(f)  # asked only when the person chose Key Vault
+    assert "connections.vault_url" in ids(f, {"connections.credentials": "keyvault"})
+    # ADF already reads secrets from a vault: Key Vault is the recommendation, and ADF's own vault is the answer
+    g = facts(key_vault=2, vault_url_hint="https://kv-prod.vault.azure.net")
+    rs = B.resolve(g, {})
+    assert get(rs, "connections.credentials").value == "keyvault" and get(rs, "connections.vault_url").value == "https://kv-prod.vault.azure.net"
+    # no vault in ADF: typing each secret once is the recommendation
+    assert get(B.resolve(f, {}), "connections.credentials").value == "person"
+
+
+def test_a_typed_vault_address_must_be_an_azure_key_vault():
+    q = next(q for q in B.QUESTIONS if q.id == "connections.vault_url")
+    assert B.validate_answer(q, facts(), " https://kv1.vault.azure.net ") == "https://kv1.vault.azure.net"
+    with pytest.raises(ValueError):
+        B.validate_answer(q, facts(), "https://evil.example.com")  # a token must never be sent to another server
+
+
+def test_the_settings_carry_where_secrets_come_from_and_the_tenancy():
+    f = facts()
+    given = {"connections.credentials": "keyvault", "connections.vault_url": "https://kv1.vault.azure.net", "connections.tenancy": "different"}
+    s = B.settings_from(f, B.resolve(f, given))
+    assert (s.secrets_from, s.key_vault_url, s.cross_tenant) == ("keyvault", "https://kv1.vault.azure.net", True)
+    assert any("Key Vault" in p and "kv1.vault.azure.net" in p for p in s.prerequisites) and any("other tenant" in p for p in s.prerequisites)
+    plain = B.settings_from(f, B.resolve(f, {}))
+    assert (plain.secrets_from, plain.key_vault_url, plain.cross_tenant) == ("person", None, False)

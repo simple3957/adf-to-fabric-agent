@@ -79,7 +79,26 @@ def state_text(card: dict) -> str:
     return STATE_LABELS.get(card["state"], (card["state"],))[0]
 
 
-def _editor(api: ApiClient, pid: str, card: dict, known: dict[str, str], siblings: list[dict] | None = None) -> None:
+def preferred_method(usable: list[dict], secrets_from: str | None) -> str | None:
+    """The sign-in method the form starts on, from where the person said the secrets come from. A saved choice always wins over this."""
+    if secrets_from == "keyvault":
+        return next((o["id"] for o in usable if o.get("key_vault")), None)
+    if secrets_from == "existing":
+        return next((o["id"] for o in usable if o["id"] == "existing_connection"), None)
+    return None
+
+
+def vault_default(field: str, card: dict, settings: dict | None) -> str:
+    """What the Key Vault form starts with: the vault ADF used for this service, else the one named in the consultation; the secret's name from ADF."""
+    hint = card.get("key_vault_hint") or {}
+    if field == "vault_url":
+        return hint.get("vault_url") or (settings or {}).get("key_vault_url") or ""
+    if field == "secret_name":
+        return hint.get("secret_name") or ""
+    return ""
+
+
+def _editor(api: ApiClient, pid: str, card: dict, known: dict[str, str], siblings: list[dict] | None = None, settings: dict | None = None) -> None:
     """The one linked service being set up: its state once, the few facts that matter, and one form."""
     name = card["name"]
     held = set(card.get("secrets_held", []))
@@ -121,7 +140,8 @@ def _editor(api: ApiClient, pid: str, card: dict, known: dict[str, str], sibling
         return
     ids = [o["id"] for o in usable]
     method_id = st.selectbox("How should Fabric sign in?", ids, key=f"m-{name}",
-                             index=ids.index(chosen["method"]) if chosen.get("method") in ids else 0,
+                             index=ids.index(chosen["method"]) if chosen.get("method") in ids else
+                             ids.index(preferred_method(usable, (settings or {}).get("secrets_from")) or ids[0]),
                              format_func=lambda i: next(o["label"] for o in usable if o["id"] == i))
     method = next(o for o in usable if o["id"] == method_id)
     if method.get("notes"):
@@ -168,7 +188,7 @@ def _editor(api: ApiClient, pid: str, card: dict, known: dict[str, str], sibling
                                        help="Fabric: Settings ⚙ → Manage connections and gateways → the connection → Settings.")
                 values["connection_id"] = pasted.strip() or names.get(picked, "")
             else:
-                values[f["name"]] = st.text_input(label, value=(chosen.get("values") or {}).get(f["name"], ""),
+                values[f["name"]] = st.text_input(label, value=(chosen.get("values") or {}).get(f["name"]) or vault_default(f["name"], card, settings),
                                                   key=f"v-{name}-{f['name']}", help=f.get("help") or None)
 
         _grid(method.get("fields", []), method_field)
@@ -254,6 +274,10 @@ def connect(api: ApiClient, pid: str, cards: list[dict] | None, workspace_id: st
         st.info("No linked services found." if cards == [] else "Run discovery first.")
         return
     fabric_read_notice((getattr(api, "fabric_read", None) or {}).get(pid))
+    settings = options.agreed(api, pid)  # the saved consultation answers: where secrets come from, which vault, one tenant or two
+    if (settings or {}).get("cross_tenant"):
+        st.info("Source data and Fabric are in different tenants, so a workspace identity or Entra sign-in cannot reach the other side. "
+                "Use a service principal or a key (or Key Vault) below.")
     ready = sum(1 for c in cards if c["state"] in READY)
     problems = sum(1 for c in cards if c["state"] in PROBLEM)
     st.markdown(f"**{len(cards)} linked services** · {ready} ready" + (f" · {problems} need attention" if problems else "")
@@ -280,7 +304,7 @@ def connect(api: ApiClient, pid: str, cards: list[dict] | None, workspace_id: st
     with st.container(border=True):
         kind = card.get("fabric_connection_type")
         _editor(api, pid, card, known.get(kind or "?", {}),
-                [c for c in cards if c["name"] != card["name"] and kind and c.get("fabric_connection_type") == kind and c["state"] not in READY])
+                [c for c in cards if c["name"] != card["name"] and kind and c.get("fabric_connection_type") == kind and c["state"] not in READY], settings)
 
     st.markdown("#### Create the connections in Fabric")
     if not workspace_id:
