@@ -179,15 +179,17 @@ def _pipeline_item(p: Any, conv: Any, level_of: dict[str, str], errors: dict[str
                         "Generated files are not a deployed pipeline.", needs=gates, ask=f"Is '{name}' deployed in the target workspace?",
                         do="adf2fabric deploy --project %s --workspace-id <workspace> --apply" % project))
     cs.append(Criterion("ran_ok", "Ran to completion in Fabric", 3.0,
-                        UNMET if ran == "failed" else MET if ran in ("matches", "partial", "differs", "no_baseline") else UNKNOWN,
-                        {"failed": "its latest Fabric run did not complete", None: "never run through this tool"}.get(ran, "its latest Fabric run completed"),
+                        UNMET if ran in ("failed", "same_failure") else MET if ran in ("matches", "partial", "differs", "no_baseline") else UNKNOWN,
+                        {"failed": "its latest Fabric run did not complete", "same_failure": "its latest Fabric run did not complete, and ADF fails the same way",
+                         None: "never run through this tool"}.get(ran, "its latest Fabric run completed"),
                         "A clean static check and a 200 from the API say nothing about whether the pipeline runs. Only a real run does.",
                         needs=gates + ("deployed",), ask=f"May '{name}' be run in Fabric, and is it safe for it to write its targets?",
                         do=_RUN_CMD.format(p=project, n=name)))
     cs.append(Criterion("matches_baseline", "Result matches the ADF run", 3.0,
                         MET if ran == "matches" else UNMET if ran in ("differs", "failed") else UNKNOWN,
                         {"matches": "its Fabric run matched the ADF run", "differs": "its Fabric run differs from the ADF run", "partial": "only some activities could be compared",
-                         "no_baseline": "there is no earlier run to compare with", "failed": "the run failed"}.get(ran, "no comparison made"),
+                         "no_baseline": "there is no earlier run to compare with", "failed": "the run failed",
+                         "same_failure": "it failed the same way as ADF, but neither completed, so no result was compared"}.get(ran, "no comparison made"),
                         "Parity is the aim: the same activities, the same counts, the same lookups as ADF.", needs=("ran_ok",),
                         ask=f"Is there an ADF run of '{name}' to compare with?", do="Run it in ADF too (or twice in Fabric), then verify."))
     _apply_gates(cs)

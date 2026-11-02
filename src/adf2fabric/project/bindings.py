@@ -100,6 +100,33 @@ def set_binding(store: ProjectStore, pid: str, key: str, value: str) -> dict[str
     return {"key": key, "changed": changed}
 
 
+def bound_workspace(store: ProjectStore, pid: str) -> Optional[str]:
+    """The Fabric workspace the saved bindings were made for (the resolutions file's ``WorkspaceId *``), lower case, or None when none was saved."""
+    from adf2fabric.connections.catalog import normalize_guid
+
+    for e in _resolution_entries(store, pid):
+        if e.get("type") == "WorkspaceId":
+            value = normalize_guid(str(e.get("value") or ""))
+            return value or None
+    return None
+
+
+def mismatch_text(bound: Optional[str], workspace_id: Optional[str]) -> Optional[str]:
+    """Words for "these bindings belong to another workspace", or None. Only the end of each id is shown: an ordinary view carries no resource ids."""
+    from adf2fabric.connections.catalog import normalize_guid
+
+    ws = normalize_guid(workspace_id or "")
+    if not bound or not ws or bound == ws:
+        return None
+    return (f"The saved bindings were made for another Fabric workspace (ending ...{bound[-6:]}); the one chosen now ends ...{ws[-6:]}. "
+            "Notebook, child-pipeline and lakehouse ids belong to the workspace they were bound in and will not exist in this one. "
+            "Bind them for this workspace and Convert again, or choose the workspace the bindings were made for.")
+
+
+def workspace_mismatch(store: ProjectStore, pid: str, workspace_id: Optional[str]) -> Optional[str]:
+    return mismatch_text(bound_workspace(store, pid), workspace_id)
+
+
 def candidates(fabric: Any, workspace_id: Optional[str], items: list[dict[str, Any]]) -> tuple[dict[str, list[dict[str, str]]], str]:
     """For each open item key, the Fabric items it could be (``id``, ``name``), read live; and why nothing was read, if so.
 

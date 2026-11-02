@@ -20,6 +20,11 @@ checks are marked and never decide a stage or the overall status.
 | deployment | same | each pipeline is deployed and its definition, read back with `getDefinition`, equals the generated file (what deployment itself substitutes is applied first); schedules are present | behaviour |
 | runtime | `--runtime` and a recorded run | a real run completed and matched its baseline (status, copy counts, lookup results) | anything about pipelines never run |
 
+A Fabric run that **fails** is compared with ADF's own failed run around the same time. When ADF failed at the same activity with the same message
+(ids, codes and spacing ignored), the verdict is `same_failure` ("fails like ADF"): the migration reproduces the source, and the cause is the source's data or its
+own check, not the conversion. It is never proof (the runtime stage is `BLOCKED`, not passed): nothing completed, so nothing was compared. A failure ADF does
+not reproduce, or one with a different message, stays `failed`, and the detail says so.
+
 Runtime never starts a run. It reads the run-and-compare record written by `adf2fabric verify` / `run --apply`, and refuses a run
 older than the generated file it is supposed to vouch for. Each saved run is pinned to a hash of the generated file it ran (only when
 that file was saved before the run ended; `verify` adds the pin to older records too). For a pinned run the content decides, not the

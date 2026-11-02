@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -31,7 +32,7 @@ from adf2fabric.cloud import ARM_ENDPOINT
 
 ADF_API_VERSION = "2018-06-01"
 COPY_KEYS = ("rowsRead", "rowsCopied", "filesRead", "filesWritten")
-VERDICTS = ("matches", "partial", "differs", "no_baseline", "failed", "not_run")
+VERDICTS = ("matches", "partial", "differs", "no_baseline", "failed", "same_failure", "not_run")
 _FAILURE_CHARS = 400
 
 
@@ -201,6 +202,16 @@ class AdfRuns:
         runs = self._post(f"{self.factory.base}/queryPipelineRuns?api-version={ADF_API_VERSION}", body).get("value", [])
         return runs[0] if runs else None
 
+    def failure_near(self, pipeline: str, around: datetime, window_minutes: int = 30) -> Optional[dict]:
+        """ADF's Failed run of ``pipeline`` that started closest to ``around`` (within the window), or None. The message of a failed run is its
+        failing activity and error: what a Fabric failure is compared with."""
+        body = {"lastUpdatedAfter": _stamp(around - timedelta(minutes=window_minutes)),
+                "lastUpdatedBefore": _stamp(min(around + timedelta(minutes=window_minutes), datetime.now(timezone.utc) + timedelta(minutes=1))),
+                "filters": [{"operand": "PipelineName", "operator": "Equals", "values": [pipeline]},
+                            {"operand": "Status", "operator": "Equals", "values": ["Failed"]}]}
+        runs = self._post(f"{self.factory.base}/queryPipelineRuns?api-version={ADF_API_VERSION}", body).get("value", [])
+        return min(runs, key=lambda r: abs(((_parse(r.get("runStart")) or around) - around).total_seconds()), default=None)
+
     def successes_near(self, run: dict, window_minutes: int = 10) -> list[dict]:
         """The batch ``run`` belongs to: when a parent pipeline started it, every Succeeded run of the same pipeline that
         the same parent run started; when it was started by hand or by a trigger, ``run`` alone."""
@@ -289,6 +300,7 @@ def verify_pipeline(client: FabricClient, workspace: str, pipeline: str, *, star
     v.activities = summarize(run.activities)
     if not run.ok:
         v.detail = short_failure(run.failure or run.detail or f"the Fabric run ended {run.status}")
+        _same_failure(v, adf, run.started, run.failure or run.detail)
         return v
     base: Optional[dict[str, dict]] = None
     if adf is not None:
@@ -406,6 +418,7 @@ def _verify_batch(client: FabricClient, workspace: str, pipeline: str, called_by
     bad = next((r for r in runs if not r.ok), None)
     if bad is not None:
         v.detail = short_failure(bad.failure or f"a run ended {bad.status}")
+        _same_failure(v, adf, bad.started, bad.failure)
         return v
     batch = ("its latest run (the ADF baseline was started by hand)" if by_hand else
              f"the {len(runs)} run(s) that the latest run of {started_by} started" if started_by else
@@ -426,6 +439,47 @@ def _verify_batch(client: FabricClient, workspace: str, pipeline: str, called_by
         v.verdict, v.detail = "no_baseline", v.detail or f"Nothing to compare {batch} with yet."
         return v
     return _judge(v, base, f"Compared as {batch}.")
+
+
+_TARGET_FAILED = re.compile(r"Operation on target\s+(\S.*?)\s+failed:\s*(.*)", re.S | re.I)
+_GUID_TEXT = re.compile(r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}")
+
+
+def failure_signature(text: str) -> tuple[str, str]:
+    """(failing activity, its message) as either service words a failure: ``Operation on target X failed: <message>``.
+
+    The message is lower-cased, ids and spacing removed, and cut to its first 100 characters: the rest is service detail (request ids, stack text)
+    that differs between ADF and Fabric even for the same failure."""
+    t = str(text or "")
+    m = _TARGET_FAILED.search(t)
+    target, msg = (m.group(1).strip().lower(), m.group(2)) if m else ("", t)
+    msg = re.sub(r"\s+", " ", _GUID_TEXT.sub("<id>", msg)).strip().lower()
+    return target, msg[:100]
+
+
+def _same_failure(v: Verification, adf: Optional[AdfRuns], started: str, failure_text: str) -> bool:
+    """A Fabric run that failed where ADF failed the same way around the same time (the same activity, the same message) reproduces the source: a
+    failing check or bad data in the source, not a conversion defect. Sets the verdict ``same_failure`` and the ADF run as the baseline."""
+    at = _parse(started)
+    if adf is None or at is None or not failure_text:
+        return False
+    try:
+        other = adf.failure_near(v.pipeline, at)
+    except DeployError:
+        return False
+    if other is None:
+        return False
+    mine, theirs = failure_signature(failure_text), failure_signature(str(other.get("message") or ""))
+    if not mine[0] or mine[0] != theirs[0]:
+        return False
+    if not (mine[1].startswith(theirs[1]) or theirs[1].startswith(mine[1])):
+        v.detail = f"{v.detail} ADF also failed at the same activity ('{mine[0]}') but with a different message: {short_failure(str(other.get('message') or ''))}"
+        return False
+    v.verdict, v.baseline = "same_failure", "adf"
+    v.baseline_run, v.baseline_at = str(other.get("runId", "")), str(other.get("runEnd") or other.get("runStart") or "")
+    v.detail = ("ADF failed the same way (same activity, same message) at " + (v.baseline_at[:19] or "about the same time") + ": the migration reproduces the source. "
+                "The cause is the source's data or its own check, not the conversion. " + v.detail)
+    return True
 
 
 def short_failure(text: str) -> str:

@@ -161,6 +161,9 @@ def assess(entry: dict[str, Any], conv_pipeline: Any, checks: list[dict], verifi
     elif verdict == "no_baseline":
         c.evidence.append(Evidence("baseline", 3, 15, "nothing earlier to compare with"))
         c.gaps.append("Run it in ADF too (or run it twice in Fabric) to get a baseline.")
+    elif verdict == "same_failure":
+        c.evidence.append(Evidence("baseline", 7, 15, "it fails the same way as ADF: the behaviour is reproduced, but it did not complete"))
+        c.gaps.append("Fix the source's data or its own check so ADF and Fabric both complete, then compare again.")
     elif verdict in ("differs", "failed"):
         c.evidence.append(Evidence("baseline", 0, 15, f"its run differs from the baseline ({len(v.get('differences') or [])} difference(s))"))
         c.gaps.append("Explain the differences against the ADF baseline.")

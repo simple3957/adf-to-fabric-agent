@@ -678,7 +678,8 @@ def create_app(settings: Optional[Settings] = None, live: Optional[Container] = 
         items = B.open_items(ctx.c.store, slug)
         fabric, why = _fabric_or_why(ctx)
         found, read_error = B.candidates(fabric, ctx.session.destination.get("workspace_id"), items) if items else ({}, "")
-        return {"items": [{**i, "candidates": found.get(i["key"], [])} for i in items], "fabric_note": why or read_error}
+        return {"items": [{**i, "candidates": found.get(i["key"], [])} for i in items], "fabric_note": why or read_error,
+                "workspace_note": B.workspace_mismatch(ctx.c.store, slug, ctx.session.destination.get("workspace_id"))}
 
     @app.put("/projects/{pid}/bindings")
     def set_binding(pid: str, body: S.BindingBody, ctx: Ctx = Depends(), _: Principal = need(P.plans_generate)):

@@ -19,6 +19,7 @@ from typing import Optional
 
 from adf2fabric.agent.provisioning.transport import FabricGateway
 from adf2fabric.agent.validation import remote, static, views
+from adf2fabric.project import bindings as bindings_mod
 from adf2fabric.project.provisioning import VerificationReport as ProvVerification
 from adf2fabric.project.store import ProjectNotFoundError, ProjectStore
 from adf2fabric.project.validation import (Category as K, CheckResult, ComponentStatus as S, InventoryCounts, Result as R, Stage, StageSummary, ValidationReport)
@@ -73,7 +74,7 @@ def load_inputs(store: ProjectStore, pid: str) -> static.Inputs:
         discovery=_optional(lambda: store.load_adf_semantic_discovery(pid)) if store.has_adf_semantic_discovery(pid) else None,
         workloads=_optional(lambda: store.load_workload_manifest(pid)) if store.has_workload_manifest(pid) else None,
         provisioning=_optional(lambda: store.load_provisioning(pid, "verification", ProvVerification)) if store.has_provisioning(pid, "verification") else None,
-        source_dir=store.source_dir(pid))
+        source_dir=store.source_dir(pid), bound_workspace=_optional(lambda: bindings_mod.bound_workspace(store, pid)))
 
 
 def _stage_summary(stage: Stage, checks: list[CheckResult]) -> StageSummary:

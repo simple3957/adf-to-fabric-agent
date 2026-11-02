@@ -18,6 +18,8 @@ CHOOSE = "- choose a Fabric item -"
 def section(api: ApiClient, pid: str, unbound: list[str]) -> None:
     """``unbound``: names the conversion still reports as open (some belong to the Connect step, not to this list)."""
     got = call(api.bindings, pid) or {}
+    if got.get("workspace_note"):  # bindings made for one workspace, the person is working in another
+        st.warning(got["workspace_note"])
     items = got.get("items") or []
     mine = {i["name"] for i in items} | {i["key"] for i in items}
     elsewhere = [u for u in unbound if u not in mine and not u.startswith("connection:") and u != "workspace"]

@@ -455,3 +455,65 @@ def test_adf_groups_a_batch_by_its_parent_run():
            "invokedBy": {"invokedByType": "PipelineActivity", "pipelineRunId": "p1"}}
     assert [r["runId"] for r in adf.successes_near(run)] == ["a", "b"]
     assert adf.successes_near({"runId": "m", "invokedBy": {"invokedByType": "Manual"}}) == [{"runId": "m", "invokedBy": {"invokedByType": "Manual"}}]
+
+
+# ---- a failure ADF reproduces -------------------------------------------------------------------------------------------------
+
+
+def test_failure_signatures_ignore_codes_ids_and_spacing():
+    # the wording of the real failures: Fabric prefixes the Fail activity's code and may carry request ids; ADF does neither
+    fabric = "ROWS_LOST: Operation on target Fail_Row_Count_Mismatch failed: Rows lost converting Big_test.csv"
+    adf = "Operation on target Fail_Row_Count_Mismatch failed: Rows  lost converting Big_test.csv"
+    assert V.failure_signature(fabric) == V.failure_signature(adf) == ("fail_row_count_mismatch", "rows lost converting big_test.csv")
+    a = V.failure_signature("Operation on target X failed: bad id 6c1485aa-525f-490f-b2a3-737d4421fd4d")
+    b = V.failure_signature("Operation on target X failed: bad id 11111111-2222-3333-4444-555555555555")
+    assert a == b
+    assert V.failure_signature("something else")[0] == ""  # no recognisable failing activity: nothing to compare
+
+
+class FailingAdf(FakeAdf):
+    """ADF's history holds a Failed run of the pipeline near the Fabric run."""
+
+    def __init__(self, message):
+        super().__init__(None)
+        self.message = message
+
+    def failure_near(self, pipeline, around):
+        return {"runId": "adf-failed", "runStart": "2026-10-30T07:25:47Z", "runEnd": "2026-10-30T07:26:10Z", "message": self.message} if self.message else None
+
+
+def failing_runner(text):
+    return lambda *a, **k: RunResult(pipeline="P", item_id="i", job_id="job-9", status="Failed", started="2026-10-30T07:25:45", ended="2026-10-30T07:26:10",
+                                     activities=[], failure=text)
+
+
+def test_a_fabric_failure_that_adf_reproduces_is_the_same_failure_not_a_defect():
+    text = "Operation on target Fail_Too_Few_Rows failed: A Parquet file has fewer than 1000 rows"
+    v = V.verify_pipeline(None, "ws", "P", start=True, adf=FailingAdf(text), runner=failing_runner("TOO_FEW_ROWS: " + text))
+    assert v.verdict == "same_failure" and v.baseline == "adf" and v.baseline_run == "adf-failed"
+    assert "not the conversion" in v.detail and "fewer than 1000 rows" in v.detail
+
+
+def test_a_failure_adf_does_not_reproduce_stays_a_failure():
+    text = "Operation on target Fail_Too_Few_Rows failed: A Parquet file has fewer than 1000 rows"
+    assert V.verify_pipeline(None, "ws", "P", start=True, adf=FailingAdf(None), runner=failing_runner(text)).verdict == "failed"  # ADF did not fail
+    other = V.verify_pipeline(None, "ws", "P", start=True, adf=FailingAdf("Operation on target Fail_Too_Few_Rows failed: a different problem"), runner=failing_runner(text))
+    assert other.verdict == "failed" and "different message" in other.detail  # same activity, another cause: said, not hidden
+    elsewhere = V.verify_pipeline(None, "ws", "P", start=True, adf=FailingAdf("Operation on target Some_Other failed: A Parquet file has fewer than 1000 rows"),
+                                  runner=failing_runner(text))
+    assert elsewhere.verdict == "failed"  # a different activity failed in ADF
+
+
+def test_a_failure_with_unreadable_adf_history_stays_a_failure():
+    class Broken(FailingAdf):
+        def failure_near(self, pipeline, around):
+            raise DeployError("HTTP 403")
+
+    assert V.verify_pipeline(None, "ws", "P", start=True, adf=Broken("x"), runner=failing_runner("Operation on target T failed: m")).verdict == "failed"
+
+
+def test_the_handover_gives_a_reproduced_failure_its_own_level():
+    from adf2fabric.agent import handover
+
+    assert handover._FROM_VERDICT["same_failure"] == "source_also_fails" and "source_also_fails" in handover._RANK
+    assert handover._RANK["run_failed"] < handover._RANK["source_also_fails"] < handover._RANK["differs"]  # still needs a person, ahead of "results differ"

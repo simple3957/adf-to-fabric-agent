@@ -130,3 +130,31 @@ def test_a_pasted_binding_id_is_normalised(tmp_path):
     _with_notebook(store, pid)
     assert B.set_binding(store, pid, "notebook:NB_X", "{" + NB.upper() + "}") == {"key": "notebook:NB_X", "changed": True}
     assert next(i for i in B.open_items(store, pid) if i["key"] == "notebook:NB_X")["value"] == NB
+
+
+# ---- bindings made for another workspace -----------------------------------------------------------------------------------
+
+
+def test_bindings_made_for_another_workspace_are_named_with_only_the_end_of_each_id(tmp_path):
+    """Found in a real project: notebook and child-pipeline ids bound in one workspace, runs and deploys in another, so every id "did not exist"."""
+    store, pid, _ = _convert(tmp_path, FILES)
+    res = store.conversion_dir(pid) / "resolutions.json"
+    other, here = "53d67e72-8124-4ca3-ae55-c4b266935faa", "123acb8e-0000-4000-8000-0000000191a2"
+    assert B.workspace_mismatch(store, pid, here) is None  # nothing saved yet: nothing to compare
+    res.write_text(json.dumps([{"type": "WorkspaceId", "key": "*", "value": other.upper()}]), encoding="utf-8")
+    assert B.bound_workspace(store, pid) == other  # normalised
+    note = B.workspace_mismatch(store, pid, here)
+    assert note and "another Fabric workspace" in note and "5266935faa"[-6:] in note and "0191a2" in note
+    assert other not in note and here not in note  # an ordinary view carries no resource ids
+    assert B.workspace_mismatch(store, pid, "{" + other + "}") is None  # the same workspace, however it was typed
+    assert B.workspace_mismatch(store, pid, None) is None
+
+
+def test_the_api_and_a_deploy_say_when_the_bindings_belong_to_another_workspace(api):
+    other, here = "53d67e72-8124-4ca3-ae55-c4b266935faa", "33333333-3333-3333-3333-333333333333"
+    res = api.store.conversion_dir("test-proj") / "resolutions.json"
+    res.write_text(json.dumps([{"type": "WorkspaceId", "key": "*", "value": other}]), encoding="utf-8")
+    api.put("/session/destination", json={"provider": "azure_cli", "workspace_id": here})
+    assert "another Fabric workspace" in api.get("/projects/test-proj/bindings").json()["workspace_note"]
+    api.put("/session/destination", json={"provider": "azure_cli", "workspace_id": other})
+    assert api.get("/projects/test-proj/bindings").json()["workspace_note"] is None

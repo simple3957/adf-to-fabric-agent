@@ -2126,7 +2126,7 @@ def verify_cmd(project_name: str, workspace_id: str, pipelines: tuple[str, ...],
     report.write_text(render_report(record), encoding="utf-8")
     click.echo(f"  record: {record_path}")
     click.echo(f"  report: {report}")
-    if any(v.verdict in ("failed", "differs") for v in results):
+    if any(v.verdict in ("failed", "differs", "same_failure") for v in results):
         sys.exit(1)
 
 

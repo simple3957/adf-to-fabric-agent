@@ -106,6 +106,10 @@ Checked against the API routes and the CLI on 2026-10-29. Everything the API exp
 * **Connection ids** (Connect: "existing connection"; Convert: Invoke-pipeline and lakehouse): a pasted id is normalised (spaces, `{braces}`, capitals,
   `catalog.normalize_guid`). An existing connection must be the type the linked service needs. The Convert step checks a connection against the ones the
   account can see: a wrong type is refused, an id it cannot see is saved and shown as unverified.
+* **Bindings for another workspace**: the resolutions file records the workspace the notebook, child-pipeline and lakehouse ids were bound in
+  (`WorkspaceId *`). When it is not the workspace chosen now, the bindings list, the deploy result and the validation finding ("ids do not exist") all say so,
+  naming only the last six characters of each id and what to do. A deploy is warned, not refused: the person may know.
+* **A failure that ADF reproduces** shows as "fails like ADF" in the run-and-compare table (`verify` verdict `same_failure`), not as a plain "run failed".
 * **Sign-in page**: drawn before, and outside, the top bar. A lockout or service error is a message, never a traceback; a valid token still signs in during a
   lockout, and a request with no token does not count toward it.
 

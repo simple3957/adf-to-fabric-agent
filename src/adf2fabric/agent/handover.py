@@ -22,6 +22,7 @@ LEVELS = [
     ("source_fix", "Fix the source first", "Fix the source problem named below, then convert again."),
     ("needs_bindings", "Needs connections", "Bind the connections or items listed, then convert again."),
     ("run_failed", "Last run failed", "Read the failure, fix the cause (often a data source being offline), run it again."),
+    ("source_also_fails", "Fails like ADF", "ADF fails the same way, so the migration reproduces the source: fix the source's data or its own check, then run both again."),
     ("differs", "Results differ", "Check the differences against the ADF run; the source data may have changed."),
     ("not_run", "Ready, not run yet", "Deploy it and run `adf2fabric verify --apply`."),
     ("ran_no_baseline", "Ran, nothing to compare with", "It ran in Fabric; the next verified run is compared with this one."),
@@ -32,7 +33,7 @@ _RANK = {lvl: i for i, (lvl, _, _) in enumerate(LEVELS)}
 _LABEL = {lvl: label for lvl, label, _ in LEVELS}
 _NEXT = {lvl: nxt for lvl, _, nxt in LEVELS}
 _FROM_VERDICT = {"matches": "proven", "partial": "partly_proven", "differs": "differs", "no_baseline": "ran_no_baseline",
-                 "failed": "run_failed"}
+                 "failed": "run_failed", "same_failure": "source_also_fails"}
 
 
 @dataclass

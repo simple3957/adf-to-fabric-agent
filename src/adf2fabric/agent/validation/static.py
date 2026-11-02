@@ -47,6 +47,7 @@ class Inputs:
     provisioning: Any = None  # a VerificationReport, when provisioning was verified
     source_dir: Optional[Path] = None
     assisted: list[str] = field(default_factory=list)  # pipelines validated against an accepted model-assisted edit of their source
+    bound_workspace: Optional[str] = None  # the workspace the saved bindings (resolutions) were made for
 
 
 @dataclass

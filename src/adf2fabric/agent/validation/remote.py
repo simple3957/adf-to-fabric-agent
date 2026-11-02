@@ -25,6 +25,7 @@ from adf2fabric.agent.provisioning.transport import FabricGateway, ProvisionErro
 from adf2fabric.agent.validation import views
 from adf2fabric.agent.validation.diffing import diff
 from adf2fabric.agent.validation.static import Collector, Inputs, _connection_values, _lakehouse_artifacts
+from adf2fabric.project import bindings as bindings_mod
 from adf2fabric.project.validation import Category as K, ComponentStatus as S, Result as R, Stage
 
 _GUID_LEN = 36
@@ -76,12 +77,12 @@ def api_and_deployment(inp: Inputs, c: Collector, fab: Optional[FabricGateway], 
             c.add("deployment.listing", K.deployment, R.BLOCKED, f"The workspace could not be listed: {exc}", stage=st, remediation="Grant read access.")
         return
     if want_api:
-        _api_references(inp, c, items, conns, fab)
+        _api_references(inp, c, items, conns, fab, workspace)
     if want_deploy:
         _deployed(inp, c, fab, workspace, pipes)
 
 
-def _api_references(inp: Inputs, c: Collector, items: dict, conns: dict, fab: FabricGateway) -> None:
+def _api_references(inp: Inputs, c: Collector, items: dict, conns: dict, fab: FabricGateway, workspace: Optional[str] = None) -> None:
     ids_conn: dict[str, list[str]] = {}
     ids_item: dict[str, list[str]] = {}
     for tp in inp.tgt.pipelines:
@@ -111,10 +112,12 @@ def _api_references(inp: Inputs, c: Collector, items: dict, conns: dict, fab: Fa
         c.add("connections_secrets.credential_types", K.connections_secrets, R.PASS, "Credential TYPES of the bound connections were read (no secret is ever returned).",
               stage=Stage.api, evidence=kinds, required=False)
     missing_items = [f"item {i} used by {', '.join(u[:3])}" for i, u in ids_item.items() if i not in items]
+    other_ws = bindings_mod.mismatch_text(inp.bound_workspace, workspace) if (missing_items or miss) else None  # the usual cause of ids that "do not exist"
     c.add("deployment.items_exist", K.deployment, R.FAIL if missing_items else (R.PASS if ids_item else R.NOT_RUN),
-          (f"{len(missing_items)} notebook / job / pipeline / lakehouse id(s) the generated pipelines use do not exist." if missing_items else
+          (f"{len(missing_items)} notebook / job / pipeline / lakehouse id(s) the generated pipelines use do not exist." + (f" Likely cause: {other_ws}" if other_ws else "") if missing_items else
            f"All {len(ids_item)} referenced item id(s) exist." if ids_item else "No generated activity references a Fabric item id."),
-          stage=Stage.api, evidence=missing_items, remediation="Deploy the item (workloads-deploy / deploy) and convert again with --resolutions." if missing_items else "",
+          stage=Stage.api, evidence=missing_items, remediation=("Bind the items for this workspace (or choose the workspace they were bound in) and convert again." if other_ws else
+                       "Deploy the item (workloads-deploy / deploy) and convert again with --resolutions.") if missing_items else "",
           required=bool(ids_item))
 
 
@@ -239,6 +242,10 @@ def runtime(inp: Inputs, c: Collector, project_dir: Path, requested: bool) -> No
         if stale:
             c.add("runtime.execution", K.runtime, R.BLOCKED, f"The recorded run of '{tp.name}' is older than its generated file, so it does not vouch for the current artifact.",
                   stage=Stage.runtime, component=comp, remediation="Deploy the current file and run the pipeline again.")
+        elif verdict == "same_failure":
+            c.add("runtime.execution", K.runtime, R.BLOCKED, f"'{tp.name}' failed in Fabric exactly as it fails in ADF: the migration reproduces the source, so it cannot be proven until the source runs to completion.",
+                  stage=Stage.runtime, component=comp, evidence=[str(e.get("detail", ""))[:300]],
+                  remediation="Fix the source's data or its own check, run ADF and Fabric again, then verify.")
         elif status != "Completed":
             c.add("runtime.execution", K.runtime, R.FAIL, f"The last run of '{tp.name}' ended '{status or 'unknown'}'.", stage=Stage.runtime, component=comp,
                   evidence=[str(e.get("detail", ""))[:300]], remediation="Fix the failing activity and run again.")

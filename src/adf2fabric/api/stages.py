@@ -290,6 +290,10 @@ def run_stage(c: Container, session: Session, pid: str, stage: str, log: Log, op
     else:
         deploy_record.note_dry_run(c.store.project_dir(pid), workspace, [i.name for i in items], sum(1 for r in results if r.action in ("failed", "refused")),
                                    allow_unbound=bool(options.get("allow_unbound")))
+    from adf2fabric.project import bindings as bindings_mod
+
+    note = bindings_mod.workspace_mismatch(c.store, pid, workspace)  # bound for one workspace, deployed to another: warn, do not refuse (the person may know)
     return {"applied": stage == "deploy_apply",
             "results": [{"name": r.name, "action": r.action, "detail": r.detail, "children": r.children}
-                        for r in results]}
+                        for r in results],
+            "warnings": [note] if note else []}

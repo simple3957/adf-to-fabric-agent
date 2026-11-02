@@ -486,6 +486,8 @@ def deploy(api: ApiClient, pid: str, dest: dict, conversion: dict | None, result
             st.session_state.setdefault("deploy", {})[pid] = job["result"]
             st.session_state.setdefault("deploy_sig", {})[pid] = sig
             st.rerun()
+    for w in (result or {}).get("warnings", []):
+        st.warning(w)
     if result:
         st.markdown(theme.badge("Deployed to Fabric", "success") if result.get("applied")
                     else theme.badge("Dry run: nothing was changed in Fabric", "info"), unsafe_allow_html=True)
@@ -495,7 +497,7 @@ def deploy(api: ApiClient, pid: str, dest: dict, conversion: dict | None, result
 
 
 VERDICT_LABELS = {"matches": "✅ matches", "partial": "🟡 partly compared", "differs": "🟠 differs", "no_baseline": "⬜ no baseline",
-                  "failed": "❌ run failed", "not_run": "⬜ not run yet"}
+                  "failed": "❌ run failed", "same_failure": "🟣 fails like ADF", "not_run": "⬜ not run yet"}
 
 
 def _compare(api: ApiClient, pid: str) -> None:

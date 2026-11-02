@@ -829,3 +829,20 @@ def test_a_lakehouse_folder_with_the_shortcut_in_front_is_a_transformation_not_a
     r = run(store, pid)
     assert {x.id: x for x in r.components}["pipeline:PL_Dyn/activity:Copy_Dyn"].status is status
     assert results(r, "expression_preservation.expressions", "pipeline:PL_Dyn") == {R.PASS}
+
+
+def test_missing_item_ids_name_bindings_made_for_another_workspace_as_the_likely_cause(project):
+    """Found in a real project: ids bound in one workspace, validated against another, so every id 'did not exist' with no hint why."""
+    store, pid = project
+    lake = "33333333-3333-3333-3333-333333333333"
+    edit_target(store, pid, "PL_Main", _repoint_sink(lake))
+    fake = FakeFabric(store, pid)  # the lakehouse is not in this workspace
+    r = api(store, pid, fake, stages=("static", "api"))
+    plain = check(r, "deployment.items_exist")[0]
+    assert plain.result is R.FAIL and "Likely cause" not in plain.summary  # no saved workspace: nothing to blame
+    (store.conversion_dir(pid) / "resolutions.json").write_text(
+        json.dumps([{"type": "WorkspaceId", "key": "*", "value": "123acb8e-0000-4000-8000-000000000001"}]), encoding="utf-8")
+    r = api(store, pid, fake, stages=("static", "api"))
+    blamed = check(r, "deployment.items_exist")[0]
+    assert blamed.result is R.FAIL and "Likely cause" in blamed.summary and "another Fabric workspace" in blamed.summary
+    assert "choose the workspace" in blamed.remediation

@@ -102,9 +102,13 @@ def _after_conversion(row: dict, verdict: Optional[dict]) -> tuple[str, list[dic
         text = _run_failure_text(run)
         r = R.for_run_failure(text)
         failed = [a["name"] for a in run.get("activities", []) if a.get("status") not in ("Succeeded", "Skipped")]
-        return "run_failed", [_problem("run", r.cause if r else "The run ended " + str(run.get("status")) + ".", text or "No message was returned.",
-                                       r.fix if r else "Open the run in Fabric Monitor, find the failed activity and read its error.", "", failed_activities=failed[:6],
-                                       recognised=bool(r))], notes
+        same = bool(verdict and verdict.get("verdict") == "same_failure")  # ADF fails the same way: the source is what needs fixing
+        cause = r.cause if r else "The run ended " + str(run.get("status")) + "."
+        fix = r.fix if r else "Open the run in Fabric Monitor, find the failed activity and read its error."
+        if same:
+            cause = "ADF fails the same way, so this is not a conversion problem. " + cause
+            fix = "Fix the source's data or its own check (the failing activity is named below), then run ADF and Fabric again. " + fix
+        return "run_failed", [_problem("run", cause, text or "No message was returned.", fix, "", failed_activities=failed[:6], recognised=bool(r))], notes
     if verdict and verdict.get("verdict") in ("differs", "failed"):
         return "differs_from_baseline", [_problem("run", "Its result differs from the ADF baseline.", "; ".join(f"{d.get('activity')} {d.get('fact')}: ADF {d.get('baseline')}, Fabric {d.get('fabric')}" for d in (verdict.get("differences") or [])[:3]),
                                                   "Find out whether Fabric or ADF is right (a changed source, a different parameter, a data race), then fix the cause and run again.",
