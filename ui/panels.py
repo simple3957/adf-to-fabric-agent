@@ -496,6 +496,16 @@ def deploy(api: ApiClient, pid: str, dest: dict, conversion: dict | None, result
     _compare(api, pid)
 
 
+def _when(stamp: str | None) -> str:
+    """A run's time for a table cell: day, month and minute (the full timestamp is cut off in a narrow column)."""
+    from datetime import datetime
+
+    try:
+        return datetime.fromisoformat(str(stamp).replace("Z", "+00:00")).strftime("%d %b %H:%M")
+    except ValueError:
+        return "-" if not stamp else str(stamp)[:16]
+
+
 VERDICT_LABELS = {"matches": "✅ matches", "partial": "🟡 partly compared", "differs": "🟠 differs", "no_baseline": "⬜ no baseline",
                   "failed": "❌ run failed", "same_failure": "🟣 fails like ADF", "not_run": "⬜ not run yet"}
 
@@ -522,11 +532,15 @@ def _compare(api: ApiClient, pid: str) -> None:
     if not res:
         return
     st.dataframe([{"pipeline": r["pipeline"], "verdict": VERDICT_LABELS.get(r["verdict"], r["verdict"]),
-                   "Fabric run": r.get("ran_at") or "-", "baseline": f"{r.get('baseline') or '-'} {r.get('baseline_at') or ''}",
-                   "facts matched": r.get("matched", 0), "detail": r.get("detail") or ""} for r in res["results"]],
-                 hide_index=True, column_config={"Fabric run": st.column_config.TextColumn(width="small"),
-                                                 "baseline": st.column_config.TextColumn(width="small"),
-                                                 "facts matched": st.column_config.NumberColumn(width="small")})
+                   "Fabric run": _when(r.get("ran_at")), "baseline": f"{(r.get('baseline') or '-').upper()} {_when(r.get('baseline_at'))}".strip(),
+                   "facts": r.get("matched", 0), "detail": r.get("detail") or ""} for r in res["results"]],
+                 hide_index=True, column_config={"pipeline": st.column_config.TextColumn(width=230), "verdict": st.column_config.TextColumn(width=150),
+                                                 "Fabric run": st.column_config.TextColumn(width=115), "baseline": st.column_config.TextColumn(width=105),
+                                                 "facts": st.column_config.NumberColumn(width=60, help="Activity facts (status, counts, lookups) that matched the baseline"),
+                                                 "detail": st.column_config.TextColumn(width=260)})
+    for r in res["results"]:  # a long explanation does not fit a table cell: say it in full under the table
+        if r["verdict"] in ("failed", "same_failure") and r.get("detail"):
+            st.caption(f"**{r['pipeline']}**: {r['detail']}")
     for r in res["results"]:
         for d in r.get("differences") or []:
             st.warning(f"**{r['pipeline']}** · `{d['activity']}` {d['fact']}: ADF {d['baseline']} → Fabric {d['fabric']}")
