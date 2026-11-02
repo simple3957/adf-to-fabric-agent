@@ -54,9 +54,9 @@ class _FileLock:
         try:
             if self._depth == 0:
                 self._path.parent.mkdir(parents=True, exist_ok=True)
+                # Nothing is ever written to the sidecar: Windows locks byte 0 of an empty file with full mutual exclusion (checked). An earlier
+                # version wrote a byte "if the file looks empty"; a late writer then hit the byte another process had locked (PermissionError).
                 self._fh = open(self._path, "a+b")
-                self._fh.write(b" ") if self._fh.tell() == 0 else None  # msvcrt needs a byte to lock
-                self._fh.flush()
                 try:
                     _os_lock(self._fh)
                 except BaseException:

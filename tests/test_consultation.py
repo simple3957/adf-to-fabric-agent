@@ -322,6 +322,12 @@ def test_reproducible_no_op_rerun_preserves_timestamps(store, project, tmp_path)
 def test_content_change_bumps_updated_at(store, project, tmp_path):
     path = _write(tmp_path, _questionnaire())
     first = _run(store, path, connectors=all_validated_connectors()).consultation
+    # The clock moves in steps (about 0.5 to 15 ms on Windows): two runs back to back can read the same instant, which says nothing about the code.
+    import time
+    from datetime import datetime, timezone
+
+    while datetime.now(timezone.utc) <= first.updated_at:
+        time.sleep(0.001)
 
     changed = _questionnaire()
     changed["constraints"] = ["Different constraint"]

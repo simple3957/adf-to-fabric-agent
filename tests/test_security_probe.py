@@ -185,3 +185,21 @@ def test_absurdly_nested_json_is_refused_with_a_plain_reason_not_a_recursion_err
     up = world.call("ann", "PUT", "/uploads/zip", content=make_zip({"pipeline/PL_Deep.json": deep}), headers={"Content-Type": "application/zip"}).json()
     done = world.wait("ann", world.call("ann", "POST", "/projects", json_body={"project_name": "deep", "source": {"kind": "zip", "upload_id": up["upload_id"]}}).json())
     assert done["state"] == "failed" and "levels deep" in done["error"] and "Recursion" not in done["error"]
+
+
+def test_processes_arriving_together_at_a_record_that_has_no_lock_file_yet_all_get_the_lock(tmp_path):
+    """Found when this failed once in the full suite: each process wrote a byte into the new lock file "if it looked empty", and a late writer hit the
+    byte another process had locked (PermissionError on Windows, about 6% of acquisitions). Nothing is written now. Six processes are released at the
+    same instant onto a fresh path, several times over."""
+    import subprocess
+    import sys
+    import time
+
+    code = chr(10).join(["import sys, time", "from pathlib import Path", "from adf2fabric.project.locks import lock_for",
+                         "t = float(sys.argv[2])", "while time.time() < t: pass", "with lock_for(Path(sys.argv[1])): pass"])
+    for trial in range(12):
+        target = tmp_path / f"t{trial}" / "record.yaml"
+        target.parent.mkdir()
+        start = time.time() + 0.6
+        procs = [subprocess.Popen([sys.executable, "-W", "ignore", "-c", code, str(target), str(start)]) for _ in range(6)]
+        assert [p.wait(timeout=60) for p in procs] == [0] * 6, f"trial {trial}"
