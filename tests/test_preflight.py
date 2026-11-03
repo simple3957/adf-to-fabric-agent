@@ -75,3 +75,18 @@ def test_an_alias_before_a_clause_or_bracket_is_flagged_and_expression_queries_a
             "sqlReaderQuery": {"value": "SELECT COUNT(*) AS RowCount FROM @{pipeline().parameters.t}", "type": "Expression"}}}},
         {"name": "B", "type": "Lookup", "typeProperties": {"source": {"sqlReaderQuery": "SELECT (SELECT 1 AS User)"}}}]}}})
     assert len(got) == 1 and "ROWCOUNT" in got[0].message and "USER" in got[0].message
+
+
+def test_a_lookup_that_returns_all_rows_is_noted_for_its_5000_row_cap_and_the_others_are_not():
+    def lookup(name, **tp):
+        return {"name": name, "type": "Lookup", "typeProperties": tp}
+
+    contents = {
+        "Many": {"properties": {"activities": [lookup("All_Rows", firstRowOnly=False), lookup("Also_All", firstRowOnly=False),
+                                               {"name": "If", "type": "IfCondition", "typeProperties": {"ifTrueActivities": [lookup("Nested", firstRowOnly=False)]}}]}},
+        "First": {"properties": {"activities": [lookup("One_Row", firstRowOnly=True), lookup("Default")]}},
+    }
+    got = preflight._lookup_row_cap(contents)
+    assert [f.pipelines for f in got] == [["Many"]]  # firstRowOnly true, or left at its default (true), has no cap to hit
+    assert got[0].subject == "All_Rows, Also_All, Nested" and got[0].severity == "info" and got[0].code == "lookup_row_cap"
+    assert "5,000" in got[0].message and "rowsRead" in got[0].fix

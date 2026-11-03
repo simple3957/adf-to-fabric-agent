@@ -127,6 +127,28 @@ def _wait_only(d: AdfSemanticDiscovery) -> list[PreflightFinding]:
     return out
 
 
+LOOKUP_URL = "https://learn.microsoft.com/en-us/azure/data-factory/control-flow-lookup-activity"
+LOOKUP_ROW_CAP = 5000
+
+
+def _lookup_row_cap(contents: dict[str, dict]) -> list[PreflightFinding]:
+    """A Lookup that returns every row (firstRowOnly false) stops at 5,000 rows, with no error: a count or a value built from it is silently short.
+
+    Seen live: Lookup counted 5,000 of a 6,000-row CSV while Copy wrote all 6,000, so a check comparing the two failed on correct data."""
+    out = []
+    for name, content in sorted(contents.items()):
+        names = sorted({a["name"] for a in _activities(content) if a.get("type") == "Lookup" and (a.get("typeProperties") or {}).get("firstRowOnly") is False})
+        if names:
+            out.append(PreflightFinding(
+                code="lookup_row_cap", severity="info", subject=", ".join(names), pipelines=[name],
+                message=f"Lookup activity returns at most {LOOKUP_ROW_CAP:,} rows (and about 4 MB), with no error: a source with more rows is cut short, so its count "
+                        "or value is lower than the real one. This applies in ADF and in Fabric alike.",
+                fix="Check by hand any step that uses the Lookup's count or rows against a source that can exceed 5,000 rows; compare with Copy's rowsRead / "
+                    "rowsCopied instead, which have no cap. A check that fails on a count of exactly 5,000 is this limit, not lost data.",
+                source_url=LOOKUP_URL))
+    return out
+
+
 def _missing_artifacts(d: AdfSemanticDiscovery) -> list[PreflightFinding]:
     """Linked services and datasets that pipelines name but the source does not contain (a partial ZIP or Git folder).
 
@@ -182,4 +204,4 @@ def _unaccounted_activities(d: AdfSemanticDiscovery) -> list[PreflightFinding]:
 
 def scan(d: AdfSemanticDiscovery, contents: dict[str, dict]) -> list[PreflightFinding]:
     """Findings for the converted ``contents`` (pipeline name -> pipeline-content JSON) and the semantic record."""
-    return [*_missing_artifacts(d), *_unaccounted_activities(d), *_reserved_aliases(contents), *_parameters_without_value(d), *_wait_only(d)]
+    return [*_missing_artifacts(d), *_unaccounted_activities(d), *_reserved_aliases(contents), *_parameters_without_value(d), *_wait_only(d), *_lookup_row_cap(contents)]
