@@ -377,11 +377,17 @@ def _run_and_compare(api: ApiClient, pid: str, rep: dict, ws: bool) -> None:
         chosen = st.multiselect("Pipelines to run (up to 20)", deployed, key="run-pipes", max_selections=20)
         wait = st.select_slider("Wait for each run up to", [5, 10, 20, 30, 50], value=30, key="run-wait", format_func=lambda m: f"{m} min",
                                 help="A run that takes longer keeps running in Fabric; it is simply not compared. Kept within one sign-in's lifetime.")
+        then_validate = st.checkbox("Then validate the migration (files, Fabric, deployment and these runs)", value=True, key="run-then-validate",
+                                    help="Runs the validation once the runs are recorded, so the verdict below includes them. It starts nothing more.")
         sure = typed_confirm("Start real runs of the selected pipelines in Fabric", "RUN", "run-confirm", disabled=not chosen)
         allowed = can("migration:execute")
         if st.button("Run and compare", key="run-go", type="primary", disabled=not (ws and chosen and sure and allowed),
                      help=None if allowed else "Your role cannot start runs (needs migration:execute)."):
-            if (job := run_job(lambda: api.run_stage(pid, "verify", pipelines=chosen, run=True, confirm=True, run_timeout=wait * 60, idempotency_key=intent("run-verify")),
-                               "Running in Fabric and comparing", intent_name="run-verify")) and job["state"] == "succeeded":
+            ran = run_job(lambda: api.run_stage(pid, "verify", pipelines=chosen, run=True, confirm=True, run_timeout=wait * 60, idempotency_key=intent("run-verify")),
+                          "Running in Fabric and comparing", intent_name="run-verify")
+            if ran and ran["state"] == "succeeded":
+                if then_validate:  # only after the runs are recorded: validation reads that record, so it must not start before
+                    run_job(lambda: api.run_stage(pid, "validate", validate_stages=["static", "api", "deployment", "runtime"], idempotency_key=intent("run-validate")),
+                            "Validating the migration", intent_name="run-validate")
                 st.rerun()
         st.caption("A pipeline becomes runtime-validated only when its run completes and matches the ADF baseline.")
