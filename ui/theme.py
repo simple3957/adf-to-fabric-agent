@@ -120,11 +120,14 @@ code { background: var(--surface-3); color: var(--em); }
 .ma-vdot.attention { color: var(--warn); border:2px solid var(--warn); background: var(--surface); }
 .ma-vtitle { font-family: var(--head); font-weight:700; font-size:15.5px; display:flex; align-items:center; gap:8px; }
 .ma-vmetric { font-size:13px; color: var(--muted); margin: 1px 0 4px; }
-.ma-vstate { font-size:10.5px; font-weight:700; letter-spacing:.08em; text-transform:uppercase; padding:2px 8px; border-radius:999px;
+.ma-vstate { white-space:nowrap; font-size:10.5px; font-weight:700; letter-spacing:.04em; text-transform:uppercase; padding:2px 8px; border-radius:999px;
   background: var(--surface-3); color: var(--muted); }
 .ma-vstate.done { background: var(--ok-soft); color: var(--ok); }
 .ma-vstate.current { background: var(--em-soft); color: var(--em); }
 .ma-vstate.attention { background: var(--warn-soft); color: var(--warn); }
+[class*="st-key-vstep-"]:not([class*="st-key-vstep-sel-"]) .ma-vstate { display:none; }  /* the dot, the ⚠ and the metric say it; the badge is for the open step */
+[class*="st-key-vstep-"]:not([class*="st-key-vstep-sel-"]) { padding: 6px 10px; }
+.st-key-stepper { max-height: calc(100vh - 24px); overflow-y: auto; }  /* a short window scrolls the list, not the page past it */
 [class*="st-key-vstep-"] .stButton { margin-left: 46px; }
 [class*="st-key-vstep-"] .stButton > button { min-height: 0; height: 26px; padding: 0 4px; font-size: 13px; color: var(--em); }
 
@@ -173,6 +176,26 @@ code { background: var(--surface-3); color: var(--em); }
 .ma-opt-note { font-size:13px; color: var(--muted); margin: 0 0 6px; }
 .ma-need-list { margin:0; padding-left:18px; } .ma-need-list li { font-size:14px; }
 @media (max-width: 720px) { .ma-wave-row { grid-template-columns:30px minmax(0,1fr) 56px; } .ma-wave-bar { display:none; } }
+/* loading: a ring and a thin bar while the script runs, and the old page stays steady (Streamlit fades it to a ghost and shows a tiny widget) */
+[data-stale="true"] { opacity: 1 !important; transition: none !important; }
+[data-testid="stStatusWidget"] { display: none !important; }
+.stApp[data-test-script-state="running"]::before { content:""; position:fixed; top:0; left:0; right:0; height:3px; z-index:1000002; pointer-events:none;
+  background: linear-gradient(90deg, var(--em), var(--cy)) no-repeat; background-size: 35% 100%; animation: ma-bar 1.2s ease-in-out infinite; }
+.stApp[data-test-script-state="running"]::after { content:""; position:fixed; top:14px; right:20px; width:24px; height:24px; z-index:1000002; pointer-events:none;
+  border-radius:50%; border:3px solid var(--em-soft); border-top-color: var(--em); animation: ma-spin .8s linear infinite; }
+[data-testid="stSpinner"] { color: var(--muted); font-size: 14px; }
+[data-testid="stSpinner"] i, [data-testid="stSpinnerIcon"] { border-color: var(--em-soft) !important; border-top-color: var(--em) !important; }
+.ma-needbar { display:flex; align-items:center; gap:10px; padding:10px 14px; margin: 6px 0 14px; border-radius:12px; font-size:14.5px;
+  background: var(--em-soft); border:1px solid rgba(47,111,236,.25); }
+.ma-needbar b { font-family: var(--head); white-space:nowrap; }
+.ma-needbar.attention { background: var(--warn-soft); border-color: rgba(168,109,0,.35); }
+.ma-needbar.done { background: var(--ok-soft); border-color: rgba(31,138,58,.3); }
+.ma-needbar.wait { background: var(--surface-3); border-color: var(--border); color: var(--muted); }
+.st-key-overview { background: var(--surface); border:1px solid var(--border); border-radius:20px; padding: 22px 26px; margin-bottom: 18px; box-shadow: 0 2px 8px var(--shadow); }
+.ma-ovrow { display:flex; gap:10px; align-items:baseline; padding: 3px 0; font-size:14.5px; }
+@keyframes ma-spin { to { transform: rotate(360deg); } }
+@keyframes ma-bar { 0% { background-position: -40% 0; } 100% { background-position: 140% 0; } }
+@media (prefers-reduced-motion: reduce) { .stApp[data-test-script-state="running"]::before, .stApp[data-test-script-state="running"]::after { animation-duration: 3s; } }
 </style>
 """
 

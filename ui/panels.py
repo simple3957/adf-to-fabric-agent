@@ -408,17 +408,18 @@ def convert(api: ApiClient, pid: str, result: dict | None) -> None:
         short = {"converted_with_differences": "with differences", "manual_required": "manual work"}  # a long label is cut off in a narrow tile
         for col, (k, n) in zip(st.columns(len(counts)), counts.items()):
             col.metric(short.get(k, k.replace("_", " ")), n)
-    st.dataframe([{"pipeline": p["name"], "status": p["status"].replace("_", " "), "structurally valid": "✅" if p["structurally_valid"] else "❌",
-                   "ready to run": "✅" if p["runtime_ready"] else "⬜"} for p in result.get("pipelines", [])], hide_index=True)
+    rows = [{"pipeline": p["name"], "status": p["status"].replace("_", " "), "structurally valid": "✅" if p["structurally_valid"] else "❌",
+             "ready to run": "✅" if p["runtime_ready"] else "⬜"} for p in result.get("pipelines", [])]
+    clean = all(p["structurally_valid"] and p["runtime_ready"] and p["status"] == "converted" for p in result.get("pipelines", []))
+    with st.expander(f"{len(rows)} pipeline(s)" + (": all converted and ready to run" if clean else ""), expanded=not clean or len(rows) <= 5):
+        st.dataframe(rows, hide_index=True)
     triggers = list({t["name"]: t for t in result.get("triggers", [])}.values())
     if triggers:
         st.markdown("##### Triggers")
         st.dataframe([{"trigger": t["name"], "type": t.get("type") or "?", "Fabric schedule": str(t.get("schedule", "manual")).replace("_", " "),
                        "what to do": t.get("action") or ""} for t in triggers], hide_index=True)
         st.caption("Schedules are created switched off and never duplicated. 'manual' means it must be recreated by hand in Fabric.")
-    for f in result.get("preflight", []):
-        show = {"error": st.error, "warning": st.warning}.get(f.get("severity"), st.info)
-        show(f"**{f['subject']}**: {f['message']}  \n*Fix:* {f['fix']}")
+    _source_checks(result.get("preflight", []))
     open_ids = [u for u in result.get("unbound") or [] if u != "workspace"]  # the workspace id is filled in at deploy: not something to set here
     if open_ids:
         st.warning(f"{len(open_ids)} item(s) still open ({', '.join(open_ids[:5])}): pipelines that need them won't be ready to run.")
@@ -428,6 +429,20 @@ def convert(api: ApiClient, pid: str, result: dict | None) -> None:
     if result.get("assisted"):
         st.info("Converted from a reviewed model-assisted edit of the source (the original file is unchanged): " + ", ".join(f"`{n}`" for n in result["assisted"]))
     panels_assist.section(api, pid)
+
+
+def _source_checks(findings: list[dict]) -> None:
+    """Problems (error, warning) stay in view. Notes (info) of one kind are one entry inside one expander, so many of the same note are one."""
+    for f in (x for x in findings if x.get("severity") in ("error", "warning")):
+        {"error": st.error, "warning": st.warning}[f["severity"]](f"**{f['subject']}**: {f['message']}  \n*Fix:* {f['fix']}")
+    notes: dict[str, list[dict]] = {}
+    for f in (x for x in findings if x.get("severity") not in ("error", "warning")):
+        notes.setdefault(f.get("code") or f["message"], []).append(f)
+    if notes:
+        with st.expander(f"{len(notes)} note(s) about the source, nothing blocked"):
+            for group in notes.values():
+                where = "; ".join(f"{p}: {x['subject']}" if p else x["subject"] for x in group for p in (x.get("pipelines") or [""]))
+                st.markdown(f"**{group[0]['message']}**  \n*Where:* {where}  \n*Fix:* {group[0]['fix']}")
 
 
 # ---- 4. deploy ------------------------------------------------------------------------------------------------------------

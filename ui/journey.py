@@ -89,6 +89,22 @@ def statuses(facts: dict[str, StepFacts], confirmed: set[str]) -> list[StepStatu
     return out
 
 
+def needed(s: StepStatus, prev_title: Optional[str] = None, next_title: Optional[str] = None) -> tuple[str, str]:
+    """(tone, sentence): what this step needs from the person right now. Tone is ``wait`` | ``act`` | ``attention`` | ``done``; the words come from the facts."""
+    f = s.facts
+    if s.locked:
+        return "wait", f"Confirm {prev_title or 'the step before'} first: this step opens after it."
+    if s.stale:
+        return "act", f"Run {s.step.title} again: it was confirmed, but its results are gone."
+    if s.confirmed:
+        return "done", f"Nothing needed. Confirmed" + (f"; next is {next_title}." if next_title else ".")
+    if f.complete and f.attention:
+        return "attention", f"Look at: {f.attention}. Then continue, or fix it first."
+    if f.complete:
+        return "act", f"Check the result, then confirm to continue" + (f" to {next_title}." if next_title else ".")
+    return "act", f.waiting or "Run this step."
+
+
 def first_open(steps: list[StepStatus]) -> str:
     """The step to show by default: the first unlocked one that isn't done yet."""
     for s in steps:

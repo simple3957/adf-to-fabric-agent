@@ -10,8 +10,8 @@ import panels_consult
 import panels_ext
 import theme
 from components import active_jobs, call, client, read, watch_job
-from journey import (connect_facts, consult_facts, convert_facts, deploy_facts, discover_facts, done_count, first_open, plan_facts, report_facts, review_facts,
-                     statuses, validate_facts)
+from journey import (connect_facts, consult_facts, convert_facts, deploy_facts, discover_facts, done_count, first_open, needed, plan_facts, report_facts,
+                     review_facts, statuses, validate_facts)
 
 api = client()
 pid = st.session_state.get("project_id")
@@ -93,7 +93,28 @@ with left, st.container(key="stepper"):
                 st.session_state.setdefault("step", {})[pid] = s.step.key
                 st.rerun()
 
+def _go(key: str) -> None:
+    st.session_state.setdefault("step", {})[pid] = key
+
+
 with right:
+    # ---- overview: a project already worked on opens on where it stands, not inside whichever step is next ------------------------
+    if 0 < done < len(steps) and pid not in st.session_state.get("step", {}):
+        proven = sum(1 for p in (report or {}).get("pipelines", []) if p.get("state") == "runtime_validated")
+        total = len((report or {}).get("pipelines", []))
+        nxt_open = by_key[first_open(steps)]
+        with st.container(key="overview"):
+            st.markdown(f"### {done} of {len(steps)} steps done" + (f" · {proven} of {total} pipelines proven by a real run" if total else ""))
+            for s in steps:
+                if not s.locked and not s.confirmed:
+                    tone, text = needed(s, None, None)
+                    theme.html_block(f'<div class="ma-ovrow"><b>{theme.esc(s.step.title)}</b><span>{theme.esc(text)}</span></div>')
+            if st.button(f"Continue with {nxt_open.step.title} →", key="ov-go", type="primary"):
+                _go(nxt_open.step.key)
+                st.rerun()
+            st.caption("Or pick any step from the list on the left.")
+        st.stop()  # the overview stands in for the step panel until a step is chosen
+
     # ---- completion -----------------------------------------------------------------------------------------------------------
     if done == len(steps):
         # Every step was confirmed, but "done" is the backend's word, not ours: only a verified validation may say the migration worked.
@@ -131,6 +152,12 @@ with right:
                 if cur.step.key in ("convert", "deploy"):
                     st.session_state.get("deploy", {}).pop(pid, None)
                 st.rerun()
+
+        prev_t = steps[cur.index - 1].step.title if cur.index else None
+        next_t = steps[cur.index + 1].step.title if cur.index + 1 < len(steps) else None
+        tone, text = needed(cur, prev_t, next_t)
+        theme.html_block(f'<div class="ma-needbar {tone}" role="status"><b>{"Needed from you" if tone in ("act", "attention") else "Status"}</b>'
+                         f'<span>{theme.esc(text)}</span></div>')
 
         if selected == "discover":
             panels.discover(api, pid, project, found)

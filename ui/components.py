@@ -113,7 +113,11 @@ def read(api: ApiClient, name: str, pid: str, ttl: float = 30.0) -> Optional[Any
         forget("read:")  # everything read before the change is dropped, not just the one key
         st.session_state["_read_version"] = api.version
     try:
-        return cached(f"read:{name}:{pid}", ttl, lambda: getattr(api, name)(pid))
+        def fetch():
+            with st.spinner(f"Reading {name.replace('_', ' ')}…"):  # only on a miss, which is the slow case; a kept read shows nothing
+                return getattr(api, name)(pid)
+
+        return cached(f"read:{name}:{pid}", ttl, fetch)
     except ApiError as err:
         show_error(err)
         return None

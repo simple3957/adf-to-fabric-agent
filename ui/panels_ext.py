@@ -55,8 +55,8 @@ def review(api: ApiClient, pid: str, inv: dict | None) -> None:
         st.warning("Discovery is not complete, so anything downstream may be missing pieces: " + "; ".join(gaps) + ".")
         _table(comp["unprocessed"], "", column_config={"kind": "Kind", "name": "Name", "reason": "Why it was not processed"})
 
-    st.markdown("##### What each state means")
-    state_legend(inv.get("states") or {})
+    with st.expander("What each state means"):
+        state_legend(inv.get("states") or {})
     t_pipes, t_acts, t_waves, t_deps, t_compute, t_compat = st.tabs(["Pipelines", "Activities", "Waves & order", "Dependencies", "Compute", "Compatibility"])
     with t_pipes:
         _table([{"Pipeline": p["name"], "State": f"{state_chip_text(p['state'])}", "Activities": p["activities"], "Calls": ", ".join(p["calls"]),
@@ -349,7 +349,8 @@ def report(api: ApiClient, pid: str, rep: dict | None, dest: dict) -> None:
     {"success": st.success, "error": st.error, "warning": st.warning}.get(rep["tone"], st.info)(rep["headline"])
     panels_confidence.confidence_panel(api, pid)
     st.markdown("##### Where each pipeline stands")
-    state_legend(rep["states"])
+    with st.expander("What each state means"):
+        state_legend(rep["states"])
     _table([{"Pipeline": p["name"], "State": state_chip_text(p["state"]), "Why": "; ".join(p["reasons"])} for p in rep["pipelines"]], "No pipelines.",
            column_config={"Pipeline": st.column_config.TextColumn(width="large"), "State": st.column_config.TextColumn(width="medium"),
                           "Why": st.column_config.TextColumn(width="large")})
