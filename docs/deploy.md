@@ -9,10 +9,12 @@ Code: `src/adf2fabric/agent/deployment/fabric_deploy.py` (pipelines, schedules) 
 - **Placeholders.** Workspace item ids (notebook, dataflow, Spark job) stay unbound after conversion. Deploy refuses unbound placeholders unless `--allow-unbound`.
 - **Schedules.** `--schedules` creates Fabric Job Scheduler schedules from converted triggers. They are created disabled and never duplicated. `--schedules-only` creates them for pipelines that are already in the workspace, without creating or overwriting any pipeline. Fabric requires an `endDateTime` (verified live 2026-10-16); when the ADF trigger has none, ten years out is used and the report says so.
 - **Compute.** `compute-deploy` creates custom Spark pools and environments and publishes them.
+- **The deploy record.** Every deploy, from the CLI or the API stage, writes `deployment/deployment-record.json`: the last dry run (workspace, pipelines, refused count) and, for a real deploy, each pipeline's last action and the workspace it went to. The Report, the inventory, the waves and the UI's Deploy step read it, and count a pipeline as deployed **only for the workspace it was deployed to**: choosing another workspace shows it as converted, with the reason "deployed to another Fabric workspace". (Before 2026-11-04 the CLI did not write this record and the views ignored the chosen workspace, so a CLI deploy to a new workspace showed as not deployed while the old workspace still showed as deployed.)
+- **A deploy makes earlier runs stale.** A recorded run older than the pipeline's latest deploy no longer vouches for it (`verify.current_record`), so after a redeploy run `verify --apply` again.
 
 ## Not deployed
 
-Spark job definitions, dataflows and connections. Connections go through the separate connection service (`connections/`, `scripts/create_fabric_connection.py`).
+Notebooks, Spark job definitions, dataflows and connections are not pushed by `deploy`. Notebooks go through `deploy-notebook` (a file you hold) or `workloads-deploy` (an approved generated artifact, whose id is then recorded in the workload manifest). Connections go through the separate connection service (`connections/`, `scripts/create_fabric_connection.py`).
 
 ## Deploying a notebook
 

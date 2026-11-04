@@ -51,6 +51,14 @@ Stable ids: `pipeline:P`, `pipeline:P/activity:A`, `dataset:D`, `linked_service:
 difference), **missing**, **extra** (for example a stale generated pipeline whose source was removed), **unverified**,
 **not_applicable**. Diffs are flattened and sorted (key order is not a difference) and redacted by key name and by value shape.
 
+## A pipeline with no run to compare with (`output-check`)
+
+`verify` compares a Fabric run with an earlier ADF (or Fabric) run. If the factory never ran the pipeline, or ran it on other data, the verdict is `no_baseline` and the runtime check is BLOCKED. `adf2fabric output-check --project P --pipeline NAME --source <abfss URL> --target <abfss URL>` reads the source data and what Fabric wrote (CSV with a header, or Parquet; one file or a folder; ADLS Gen2 or OneLake) and compares the row count, the column names and a content hash that ignores row, column and file order. It is read-only; the record `verification/output-checks.json` keeps counts and hashes, never a value.
+
+- `matches`: same rows, columns and content. `counts_match`: same count and columns but a different hash (a value changed, or a number or date was written in another type): look at a sample; it does not vouch. `differs`: rows or columns differ.
+- The runtime check of a `no_baseline` pipeline passes only if its run completed and every output check of that pipeline is `matches` and was made after that run. The message says there was no earlier run and that only the checked outputs are covered. It never turns a `differs` or failed run into a pass.
+- Limits: you give the source and target locations (paths built from parameters or run ids are not worked out for you); no API route or UI step yet; a source in another tenant needs a login that can read it; it does not see Excel, JSON, SQL tables or Delta tables.
+
 ## Overall status
 
 `FAILED` (a required check failed, or a source component is missing) > `BLOCKED` > `NOT_VALIDATED` (a required check not run, a

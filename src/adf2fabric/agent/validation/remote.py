@@ -20,6 +20,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
+from adf2fabric.agent.deployment import output_check
 from adf2fabric.agent.deployment import verify as verify_mod
 from adf2fabric.agent.provisioning.transport import FabricGateway, ProvisionError
 from adf2fabric.agent.validation import views
@@ -255,6 +256,11 @@ def runtime(inp: Inputs, c: Collector, project_dir: Path, requested: bool) -> No
         elif verdict == "differs":
             c.add("runtime.execution", K.runtime, R.FAIL, f"'{tp.name}' ran, but its results differ from the baseline.", stage=Stage.runtime, component=comp,
                   evidence=[json.dumps(x)[:200] for x in e.get("differences", [])[:6]], remediation="Investigate the differing activities; the migrated pipeline does not behave like the source.")
+        elif verdict == "no_baseline" and (vouched := output_check.evidence(project_dir, tp.name, ran))[0]:
+            c.add("runtime.execution", K.runtime, R.PASS, f"'{tp.name}' ran to completion in Fabric. There is no earlier run to compare with, so it is vouched for by its output: "
+                  f"{vouched[1]} output check(s) matched the source data (row count, columns, content hash). Only the checked outputs are covered.",
+                  stage=Stage.runtime, component=comp, evidence=[f"run {e.get('job_id')} at {e.get('ran_at')}"])
         else:
             c.add("runtime.execution", K.runtime, R.BLOCKED, f"'{tp.name}' ran, but could not be fully compared ({verdict}).", stage=Stage.runtime, component=comp,
-                  evidence=[str(e.get("detail", ""))[:300]], remediation="Provide an ADF baseline run (or a previous Fabric run) covering every activity, then verify again.")
+                  evidence=[str(e.get("detail", ""))[:300]] + (output_check.evidence(project_dir, tp.name, ran)[2] if verdict == "no_baseline" else []),
+                  remediation="Provide an ADF baseline run (or a previous Fabric run) covering every activity, or compare its output with the source: `adf2fabric output-check`.")

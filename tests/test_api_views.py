@@ -805,3 +805,19 @@ def test_the_target_plan_follows_the_approved_brief_on_where_spark_runs(world):
     assert world.call("abe", "POST", f"{B}/approve", json_body={"fingerprint": fp}).status_code == 200
     plan(world)
     assert store.load_provisioning("demo-estate", "target", TargetSpec).spark_compute == "keep"  # the brief keeps Spark where it runs
+
+
+def test_a_pipeline_deployed_to_another_workspace_is_not_deployed_in_this_one(world):
+    """The record keeps each pipeline's last deploy; looking at a different workspace must not show it as deployed (or proven) there."""
+    from adf2fabric.api import views
+
+    prepare(world)
+    name = next(p["name"] for p in world.call("vic", "GET", f"{P}/inventory").json()["pipelines"])
+    run(world, "oscar", "deploy_dry_run", {"workspace_id": DEMO_WS, "allow_unbound": True})
+    stage_r = stage(world, "oscar", "deploy_apply", {"workspace_id": DEMO_WS, "allow_unbound": True, "confirm": True})
+    world.wait("oscar", stage_r.json())
+    store = world.demo.store
+    assert views.pipeline_states(store, "demo-estate", DEMO_WS)[name]["state"] == "deployed"
+    assert views.pipeline_states(store, "demo-estate")[name]["state"] == "deployed"  # no workspace asked about: the record as it is
+    other = views.pipeline_states(store, "demo-estate", "00000000-0000-0000-0000-00000000abcd")[name]
+    assert other["state"] == "converted" and any("another Fabric workspace" in r for r in other["reasons"])

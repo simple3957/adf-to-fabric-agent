@@ -846,3 +846,22 @@ def test_missing_item_ids_name_bindings_made_for_another_workspace_as_the_likely
     blamed = check(r, "deployment.items_exist")[0]
     assert blamed.result is R.FAIL and "Likely cause" in blamed.summary and "another Fabric workspace" in blamed.summary
     assert "choose the workspace" in blamed.remediation
+
+
+def test_a_run_with_no_baseline_passes_only_when_its_output_matched_the_source(project):
+    from adf2fabric.agent.deployment import output_check as oc
+    from adf2fabric.agent.deployment import verify as v
+
+    store, pid = project
+    sha = v.file_sha(v.artifact_file(store.project_dir(pid), "PL_Main"))
+    record(store, pid, "PL_Main", verdict="no_baseline", baseline="", ran_at="2026-01-01T00:00:00+00:00", artifact_sha=sha)
+    assert results(rt(store, pid), "runtime.execution", "pipeline:PL_Main") == {R.BLOCKED}
+    chk = {"name": "out", "pipeline": "PL_Main", "verdict": oc.COUNTS_MATCH, "detail": "content hash differs", "checked_at": "2026-02-01T00:00:00+00:00"}
+    oc.save(store.project_dir(pid), chk)
+    c = check(rt(store, pid), "runtime.execution", "pipeline:PL_Main")[0]
+    assert c.result is R.BLOCKED and any("content hash differs" in e for e in c.evidence)  # a changed value does not vouch
+    oc.save(store.project_dir(pid), {**chk, "verdict": oc.MATCHES})
+    c = check(rt(store, pid), "runtime.execution", "pipeline:PL_Main")[0]
+    assert c.result is R.PASS and "no earlier run" in c.summary and "Only the checked outputs" in c.summary
+    oc.save(store.project_dir(pid), {**chk, "verdict": oc.MATCHES, "checked_at": "2025-01-01T00:00:00+00:00"})  # made before the run
+    assert results(rt(store, pid), "runtime.execution", "pipeline:PL_Main") == {R.BLOCKED}

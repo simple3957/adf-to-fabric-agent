@@ -106,5 +106,6 @@ Workspace; `workspaceIdentity` on Get Workspace; the role and capacity enums; 42
 role-assignment duplicate behaviour and the list endpoint's exact shape (existing assignments are checked first); the shape of
 the ARM `usages` response (an unrecognised shape is `unknown`, not `passed`); that a new capacity's Fabric `displayName` equals
 its ARM name (it is looked up by that name and apply stops with a clear message if it does not appear); no non-admin way to read
-the "create workspaces" tenant setting; the write paths (create/assign/identity/roles/pools/lakehouses/ARM) have been exercised
-against a fake only, never live.
+the "create workspaces" tenant setting. Live: a Spark pool and an environment were created, then verified by reading them back, in the
+workspace `Practise` on 2026-11-03 (the environment was not published). The other write paths (create workspace/assign capacity/identity/
+roles/lakehouses/ARM) have been exercised against a fake only, never live.

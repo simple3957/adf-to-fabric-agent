@@ -82,8 +82,9 @@ def _walk(acts):
 # =====================================================================================================================
 
 
-def pipeline_states(store: ProjectStore, pid: str) -> dict[str, dict[str, Any]]:
-    """name -> {state, flags, reasons}. Built only from persisted evidence."""
+def pipeline_states(store: ProjectStore, pid: str, workspace: str = "") -> dict[str, dict[str, Any]]:
+    """name -> {state, flags, reasons}. Built only from persisted evidence. With ``workspace`` (the one the person is looking at) a pipeline counts as
+    deployed only if it was deployed to that workspace: the record holds each pipeline's last deploy, and another workspace's is not this one's."""
     d = _try(lambda: store.load_adf_semantic_discovery(pid))
     if d is None:
         return {}
@@ -121,7 +122,11 @@ def pipeline_states(store: ProjectStore, pid: str) -> dict[str, dict[str, Any]]:
                 state = "blocked"
         row = rec.get(p.name) or rec.get(next((k for k in rec if k.lower() == p.name.lower()), ""), None)
         if state == "converted" and row and row.get("ok"):
-            state = "deployed"
+            elsewhere = workspace and str(row.get("workspace") or "").lower() != workspace.lower()
+            if elsewhere:
+                reasons.append(f"it was deployed to another Fabric workspace (…{str(row.get('workspace') or '')[-6:]}), not the one chosen now")
+            else:
+                state = "deployed"
         v = verified.get(p.name) or next((x for k, x in verified.items() if k.lower() == p.name.lower()), None)
         if state == "deployed" and v and v.get("verdict") == "matches" and v.get("fabric_status") == "Completed":
             state = "runtime_validated"
@@ -134,9 +139,9 @@ def pipeline_states(store: ProjectStore, pid: str) -> dict[str, dict[str, Any]]:
 # =====================================================================================================================
 
 
-def inventory(store: ProjectStore, pid: str, roots: tuple[Path, ...] = ()) -> dict[str, Any]:
+def inventory(store: ProjectStore, pid: str, roots: tuple[Path, ...] = (), workspace: str = "") -> dict[str, Any]:
     d = store.load_adf_semantic_discovery(pid)  # ProjectNotFoundError when discovery has not run (the route turns it into guidance)
-    states = pipeline_states(store, pid)
+    states = pipeline_states(store, pid, workspace)
     by_type: dict[str, int] = {}
     conf_counts: dict[str, int] = {}
     pipes = []
@@ -189,14 +194,14 @@ def confidence(store: ProjectStore, pid: str, roots: tuple[Path, ...] = ()) -> d
     return sanitize(engine.assess(store, pid), roots)
 
 
-def waves(store: ProjectStore, pid: str, roots: tuple[Path, ...] = ()) -> dict[str, Any]:
+def waves(store: ProjectStore, pid: str, roots: tuple[Path, ...] = (), workspace: str = "") -> dict[str, Any]:
     """The dependency waves and the order the pipelines are deployed in, with what each object needs and what needs it.
 
     Built from the dependency inventory only: names, types, counts and the order. Nothing here carries a definition, a path or a secret."""
     inv = _try(lambda: store.load_dependency_inventory(pid)) if store.has_dependency_inventory(pid) else None
     if inv is None:
         return {"available": False, "needs": "Run 'Resolve dependencies' on the Review step: the waves and the order are built from the references it resolves."}
-    states = pipeline_states(store, pid)
+    states = pipeline_states(store, pid, workspace)
     wave_of: dict[str, int] = {}
     for w in inv.waves:
         for item in w.items:  # most items are 'type:name'; the pipeline waves list plain pipeline names
@@ -382,9 +387,9 @@ def validation_summary(store: ProjectStore, pid: str, roots: tuple[Path, ...] = 
                                                    if c.status.value in ("missing", "extra", "altered", "unverified")][:120]}, roots)
 
 
-def report(store: ProjectStore, pid: str, roots: tuple[Path, ...] = ()) -> dict[str, Any]:
+def report(store: ProjectStore, pid: str, roots: tuple[Path, ...] = (), workspace: str = "") -> dict[str, Any]:
     """The final migration report. Its headline is the validation engine's honest overall status; with no validation it says so."""
-    states = pipeline_states(store, pid)
+    states = pipeline_states(store, pid, workspace)
     counts = {s: 0 for s in STATES}
     for v in states.values():
         counts[v["state"]] += 1

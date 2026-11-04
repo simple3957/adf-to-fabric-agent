@@ -116,14 +116,14 @@ allocation, Spark properties) and, for PyPI libraries, `Libraries/PublicLibrarie
 written **off**. Endpoints: List/Create Workspace Custom Pool, List/Create Environment, Publish Environment (`beta=false`).
 
 Verified against Microsoft's reference on 2026-10-14. Verified by a read-only dry run against the test workspace (it
-listed pools and environments successfully). **Creation itself has only been tested against a fake REST session**, not yet
-against a live workspace.
+listed pools and environments successfully). `compute-deploy`'s own creation has only been tested against a fake REST session. The same
+Fabric endpoints did create a pool and an environment live through provisioning (`provision-apply`, workspace `Practise`, 2026-11-03).
 
 ## Not built yet
 
 * Reading the Databricks workspace / Synapse workspace live (today: the sources file).
-* Retrieving, scanning and converting notebook **code**, and remapping the Databricks activity to a Fabric Notebook
-  activity. Databricks notebooks are still reused externally.
+* ~~Retrieving, scanning and converting notebook code~~: built since as `workloads-generate` / `-approve` / `-deploy` / `-record-run`
+  ([workload-migration.md](workload-migration.md)), CLI only. `convert` still keeps the Databricks activity by default; the move is opt-in.
 * Custom (non-PyPI) libraries in the environment: the jar/wheel files are not available to the tool.
 * Whether an environment created with a definition needs `--publish` before its settings apply is assumed from Microsoft's
   save-and-publish description, not confirmed. Single-node pools: the executor maximum equals the node count, which the

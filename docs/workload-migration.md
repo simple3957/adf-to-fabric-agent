@@ -58,6 +58,15 @@ Code: `src/adf2fabric/agent/workloads/` (`source.py` retrieval, `notebook_format
 Everything else stays as written and is listed as an open issue (mounts, DBFS, volumes, `%run`, `dbutils.notebook.run`,
 credentials in code, `getSecretWithLS`, ...).
 
+## Running generate again
+
+- Each `workloads-generate` run rewrites the workloads it covers. A new artifact needs a new `workloads-approve`, and its `execution` and
+  `fabric_item_id` start empty until `workloads-deploy --apply` and `workloads-record-run`.
+- Run without the code (no `--source`, no `--fetch`, nothing cached under `databricks/notebooks/`) it replaces a generated, approved
+  record with `blocked; code not_requested`. Keep a copy of `workloads/` or pass the code again. (Found 2026-11-04; not yet changed.)
+- In Git Bash on Windows, `--source /Shared/x=file.py` has its `/Shared/...` rewritten into a Windows path and is silently not matched.
+  Set `MSYS_NO_PATHCONV=1`, or key by the notebook's name alone: `--source x=file.py`.
+
 ## Generated is not verified
 
 | Evidence | Meaning |

@@ -73,3 +73,28 @@ def test_a_malformed_or_unknown_answer_is_refused_and_nothing_is_saved(project):
     assert run("brief-answer", "--project", "test-proj", "--set", "scope.pipelines=[not json").exit_code != 0
     r = run("brief-answer", "--project", "test-proj", "--set", "no.such.question=x")
     assert r.exit_code == 1 and "Not saved" in r.output
+
+
+def test_deploy_records_where_it_deployed_like_the_api_does(project, monkeypatch):
+    """The Report and the UI read the deploy record: a CLI deploy that did not write it left them showing the previous workspace."""
+    from types import SimpleNamespace
+
+    from adf2fabric.agent.deployment import fabric_deploy, record as deploy_record
+    from adf2fabric.connectivity import _azure
+
+    store, pid = project
+    assert run("convert", "--project", "test-proj").exit_code == 0
+    token = SimpleNamespace(get_token=lambda scope: SimpleNamespace(token="t"))
+    monkeypatch.setattr(_azure, "build_credential", lambda cred, **kw: (token, ""))
+    monkeypatch.setattr(fabric_deploy, "FabricClient", lambda tok, **kw: object())
+    monkeypatch.setattr(fabric_deploy, "deploy", lambda client, ws, items, apply, allow_unbound=False:
+                        [SimpleNamespace(name=i.name, action="update", detail="" if apply else "dry run: nothing was changed", item_id="x", children=[]) for i in items])
+    dry = run("deploy", "--project", "test-proj", "--workspace-id", "ws-dry", "--allow-unbound")
+    assert dry.exit_code == 0, dry.output
+    rec = deploy_record.load(store.project_dir(pid))
+    assert rec["last_dry_run"]["workspace"] == "ws-dry" and "pipelines" not in rec  # a dry run deploys nothing
+    applied = run("deploy", "--project", "test-proj", "--workspace-id", "ws-real", "--allow-unbound", "--apply")
+    assert applied.exit_code == 0, applied.output
+    rec = deploy_record.load(store.project_dir(pid))
+    assert rec["last_apply"]["workspace"] == "ws-real" and rec["pipelines"]
+    assert {v["workspace"] for v in rec["pipelines"].values()} == {"ws-real"} and all(v["ok"] for v in rec["pipelines"].values())

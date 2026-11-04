@@ -1,63 +1,49 @@
-# Status briefing (2026-10-16)
+# Status briefing (2026-11-04)
 
-> Older than the code: since this audit `verify` (run check), `deploy-notebook`, `git-commit`, provisioning, workloads and validation were added. See CLAUDE.md for the current command list.
+Replaces the briefing of 2026-10-16, which predated `verify`, `deploy-notebook`, `git-commit`, provisioning, workloads, validation and
+`output-check`. Command list: CLAUDE.md. What a person must supply, and where: [manual-inputs.md](manual-inputs.md).
 
-Based on a read-only code audit plus one full test run: **1068 passed, 1 skipped** (about 4.5 min). All tests are offline and mocked. No stage was run against a live Fabric workspace in this audit.
+## Proven live
 
-## Where we are
+On the real sample project `adf-data-migration-7593` (10 pipelines, 56 activities), moved to the Fabric workspace `Practise` on
+2026-11-03/04: all 10 pipelines converted, deployed and run. 8 match their last successful ADF run (status, copy counts, lookup results);
+`PL_Rig_Orchestrator` and `PL_Rig_Child_FileToParquet` match their previous Fabric run, because the ADF baseline was taken on other data
+and the ADF original now fails on the 5,000-row Lookup cap. Validation: API, deployment and runtime PASS; static BLOCKED on two notebook
+records (below). Also live: notebook deploy, schedules, a Spark pool and an environment created by provisioning, OneLake shortcuts,
+Lakehouse repointing of CSV/Parquet datasets.
 
-| Area | Status | Note |
+## Where each area stands
+
+| Area | Status | What is missing |
 |---|---|---|
-| Dynamic discovery | Mostly done | Subscription, factory, repo URL, branch, token and workspace are all inputs. No tenant, subscription, factory or domain is hardcoded in `src/`. |
-| Pipelines | Partial | About 35 activity types handled. SSIS, U-SQL and AzureML classic are blocked on purpose. Some properties are not carried over (Copy `logSettings`, Validation retry). |
-| Datasets | Done | Inlined as `datasetSettings`; missing or inline datasets raise blockers. |
-| Linked services / connections | Partial | About 55 types have a verdict. Auto-create for 5: SQL/Synapse, ADLS Gen2, Blob, REST, Databricks. OAuth and gateway connections are manual. |
-| Triggers | Partial | Schedule and tumbling-window convert. Event and custom-event triggers are manual. Created disabled. |
-| Data flows | Partial | Scaffold activity only; the transformation graph is not converted. |
-| Integration runtimes, VNet | Analysis only | Classified and advised; nothing provisioned. |
-| Compute | Partial | Plan, assessment and pool/environment deploy exist. Notebook and Spark job content are not migrated. |
-| Deploy | Partial | Pipelines, schedules and compute only. Notebooks, Spark job definitions, dataflows and connections are not pushed by `deploy`. |
-| Post-deploy run check | Missing in the tool | No job-instance trigger or run verification in code. Earlier session notes record nine pipelines deployed and run by hand on 2026-10-12 in the test workspace, so the converter has been proven live, but not through a repeatable command. |
+| Discovery (Git, ZIP, live ARM, `adf_publish`) | Done | Sovereign-cloud storage suffixes are public-cloud only, and the endpoints are untested |
+| Activities | Done for about 35 types | SSIS, U-SQL, AzureML classic blocked on purpose; Synapse-only types such as `SqlPoolStoredProcedure` have no rule |
+| Datasets | Done | Inlined as `datasetSettings` |
+| Data flows | Scaffold | `ExecuteDataFlow` becomes a Dataflow Gen2 refresh; the flow itself is not read or converted |
+| Triggers | Partial | Schedule and tumbling window convert (created disabled); event and custom-event triggers are manual |
+| Connections | Partial | Auto-create for SQL/Synapse, ADLS Gen2, Blob, REST, Databricks; about 50 other types get a verdict only; OAuth and gateway are manual |
+| Storage | Partial | ADLS Gen2 shortcuts and CSV/Parquet repointing; other stores, `wasbs://` and computed paths stay as written |
+| Spark workloads | Built, CLI only | Generate, approve, deploy, record-run for Databricks notebooks; no live Databricks/Synapse reads in this tenant, no custom jar/wheel libraries |
+| Compute (pools, environments) | Built | `compute-deploy` creation tested on a fake only (provisioning created the same items live) |
+| Provisioning | Partial live | Pool and environment live; workspace, capacity, roles, lakehouse, ARM capacity on fakes only |
+| Run and compare (`verify`) | Done, live | Compares by activity facts; needs a baseline run |
+| Output check (`output-check`) | Built 2026-11-04, CLI only | For pipelines with no baseline; CSV/Parquet; the paths are given by hand |
+| Validation | Done, live | |
+| `git-commit` | Built | Never run against a Git-connected workspace (none exists) |
+| CDC | Detected | No Fabric Copy job generated |
+| UI | 9 steps | No screen for workloads, compute deploy, shortcuts, notebook deploy, git-commit, diagnose, output-check (see [ui.md](ui.md)) |
 
-Compute is built but not finished.
+## Open on the sample project
 
-## Gaps in dynamic discovery
+- The two notebooks in `Practise` were regenerated for its lakehouse (identical code to what is deployed and ran) and wait for a person's
+  `workloads-approve`; then `workloads-deploy --apply` records their ids and the static stage can pass.
+- The ADF original of `PL_Rig_Child_FileToParquet` checks a Lookup count against rows copied, which fails above 5,000 rows. The project's
+  converted copy compares Copy `rowsRead` with `rowsCopied` instead; ADF itself is unchanged by agreement.
 
-Fixed on 2026-10-16 (offline, covered by tests; 1091 passed, 1 skipped):
+## Known issues
 
-1. `adf_publish` is now read. An `ARMTemplateForFactory.json` (plus `linkedTemplates/`) is extracted into the Git layout in a generated `_adf_publish_extracted/` folder next to it, and that folder becomes the source root. Parameter defaults are applied; secure parameters and other ARM expressions stay unresolved and are reported in the manifest.
-2. The branch is no longer assumed to be `main`. With no `--branch` and no `default_branch` in config, intake follows the repository's own default branch (`git ls-remote --symref`).
-3. The ARM and Fabric hosts come from `ADF2FABRIC_ARM_ENDPOINT` and `ADF2FABRIC_FABRIC_ENDPOINT` (default: public cloud). Storage endpoint suffixes (`dfs.core.windows.net`) are still public-cloud only.
-4. The workspace, lakehouse and notebook GUIDs in `fabric/` are now placeholders.
+- `workloads-generate` run without the code replaces a generated, approved record with `blocked` ([workload-migration.md](workload-migration.md)).
 
-Still open: GUIDs remain in Git history; a subscription and tenant id in `docs/linked-service-mapping.md` (line 93) were left for you to decide; the sovereign-cloud endpoints themselves are not verified, and none are assumed.
+## Known test issue
 
-## Documentation state
-
-- Now present: `CLAUDE.md`, `docs/ARCHITECTURE.md`, `deploy.md`, `datasets.md`, `triggers.md`, `auth.md`, `testing.md`, and this file. They were written from the audit plus spot checks, so skim them before relying on them.
-- `docs/pipeline-parser.md` is current: `parser_pipelines.py` exists at `agent/discovery/adf_semantic/` (an earlier audit note calling it stale was wrong). The doc only uses the short path.
-- Draft: `docs/linked-service-mapping.md` (marked blocked on Fabric access).
-- Still without its own doc: the API layer internals.
-
-## What we need
-
-- A Fabric capacity and workspace we can run against repeatedly.
-- Permission to create connections (service principal or user).
-- A customer-like ADF sample, including one with an `adf_publish` branch.
-- Databricks and Synapse access if compute sources are to be read live.
-- A decision on event triggers and data flows: convert, or flag as manual.
-
-## Proposed order of work
-
-1. Live end-to-end run: deploy one converted pipeline, trigger it, read back the result.
-2. More connector types for auto-create, verified live.
-3. Deploy notebooks, Spark job definitions and dataflow scaffolds.
-4. Decide triggers and data flows.
-
-Done offline on 2026-10-16: `adf_publish` parsing, default-branch detection, configurable endpoints, GUID cleanup (see above).
-
-## Questions for the call
-
-- Is a live Fabric run in scope for the next milestone, and who provides the capacity?
-- Are customer estates expected to use `adf_publish`, or the collaboration branch?
-- Is a manual fallback acceptable for OAuth/gateway connections and event triggers?
+`tests/test_hardening.py::test_finished_jobs_are_still_listed_after_a_restart` failed once in a full run and passes alone; not yet explained.

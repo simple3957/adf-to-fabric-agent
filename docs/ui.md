@@ -46,6 +46,16 @@ the existing nine steps and flows.
   * *Run and compare*: which pipelines and how long to wait for each run.
   The server checks every choice again (names, convert-only choices, the real-run rules).
 
+## Loading and "what is needed from you"
+
+* **Loader.** While the script runs (every click reruns it) the page shows a rotating ring top right and a thin bar across the top, and the old content stays
+  steady: Streamlit's fade of stale elements is switched off (`[data-stale]`), and its small status widget is hidden. A read that is not already kept shows
+  `Reading <name>…` (`components.read`); jobs keep their `st.status` log. Reduced-motion settings slow the animation.
+* **Needed from you.** A strip over every step says in one sentence what that step needs (`journey.needed`): the step to confirm first, what is still to run, what
+  to look at before continuing, or nothing. The words come from the step's facts, so they cannot disagree with the step.
+* **Overview.** A project that has been worked on (some steps confirmed, not all) opens on one card: steps done, pipelines proven by a real run, what is open and
+  a button to continue. Choosing any step replaces it. Result tables with nothing to look at (every pipeline converted and ready) are collapsed.
+
 ## Each question is asked once
 
 - **Pipeline scope.** Convert and Deploy share one scope per project (`options.scope_picker`): the approved brief's scope is the first default, a choice made in
@@ -68,6 +78,7 @@ Checked against the API routes and the CLI on 2026-10-29. Everything the API exp
 | Storage map, OneLake shortcuts | `storage-map`, `create-shortcut` | Needed before Convert can repoint storage |
 | Notebook deploy, Git commit | `deploy-notebook`, `git-commit` | Notebooks are not deployed by Deploy |
 | Diagnosis (fix-first ranking) | `diagnose` | The Report step shows states, not the ranked fixes |
+| Output check (a pipeline with no ADF run to compare with) | `output-check` | Its result does reach the UI: Validate and Report read it through the runtime check |
 | Users and audit log | `auth-user-*`, `audit-verify` (the API has admin routes, no UI) | Administration |
 
 ## Things that go wrong in use, and what the UI does
@@ -101,7 +112,8 @@ Checked against the API routes and the CLI on 2026-10-29. Everything the API exp
 * **Deploy**: a dry run that refuses pipelines (an unbound connection) offers "Leave out the refused and dry-run the other N". A dry run on its own
   lets the step be passed with the headline "Dry run done, nothing deployed yet"; the Report still shows those pipelines as not deployed. The real
   deploy stays locked until a clean dry run of the same pipelines *and options* (the server compares them).
-* A deploy made earlier is read back from the server, so a reload does not say "Deploy needs to run again".
+* A deploy made earlier is read back from the server, so a reload does not say "Deploy needs to run again". It counts only for the workspace it went to:
+  with another workspace chosen in Connections, Deploy says "Not run yet" and the Report shows those pipelines as converted, "deployed to another Fabric workspace".
 * A run older than the pipeline's latest deploy never counts as proof (`verify.current_record`).
 * **Connection ids** (Connect: "existing connection"; Convert: Invoke-pipeline and lakehouse): a pasted id is normalised (spaces, `{braces}`, capitals,
   `catalog.normalize_guid`). An existing connection must be the type the linked service needs. The Convert step checks a connection against the ones the
@@ -120,4 +132,4 @@ Checked against the API routes and the CLI on 2026-10-29. Everything the API exp
 
 ## Limits
 
-Provisioning writes and Azure capacity creation have only been exercised against the in-memory demo target, never a live tenant.
+Provisioning has created a Spark pool and an environment live (workspace `Practise`, 2026-11-03, verified by reading them back). Its other writes (workspace creation, capacity assignment, role assignments, lakehouses, Azure capacity creation) have only been exercised against the in-memory demo target, never a live tenant.

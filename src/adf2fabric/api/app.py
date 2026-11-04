@@ -926,14 +926,14 @@ def create_app(settings: Optional[Settings] = None, live: Optional[Container] = 
         slug = ctx.project(pid)
         if not ctx.c.store.has_adf_semantic_discovery(slug):
             raise HTTPException(409, "Discovery has not run for this project yet.")
-        return views.inventory(ctx.c.store, slug, _roots())
+        return views.inventory(ctx.c.store, slug, _roots(), ctx.session.destination.get("workspace_id") or "")
 
     @app.get("/projects/{pid}/waves")
     def waves_view(pid: str, ctx: Ctx = Depends(), _: Principal = need(P.reports_view)):
         slug = ctx.project(pid)
         if not ctx.c.store.has_adf_semantic_discovery(slug):
             raise HTTPException(409, "Discovery has not run: the waves are built from what was discovered.")
-        return views.waves(ctx.c.store, slug, _roots())
+        return views.waves(ctx.c.store, slug, _roots(), ctx.session.destination.get("workspace_id") or "")
 
     @app.get("/projects/{pid}/confidence")
     def confidence_view(pid: str, ctx: Ctx = Depends(), _: Principal = need(P.reports_view)):
@@ -955,7 +955,7 @@ def create_app(settings: Optional[Settings] = None, live: Optional[Container] = 
         slug = ctx.project(pid)
         if not ctx.c.store.has_adf_semantic_discovery(slug):
             raise HTTPException(409, "Discovery has not run for this project yet.")
-        return views.report(ctx.c.store, slug, _roots())
+        return views.report(ctx.c.store, slug, _roots(), ctx.session.destination.get("workspace_id") or "")
 
     # ---- target provisioning (plan: read-only; approve; apply: dry run unless confirmed; verify: read-only) ------------------
     from adf2fabric.agent.provisioning import service as prov

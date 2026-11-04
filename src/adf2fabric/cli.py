@@ -1718,6 +1718,15 @@ def deploy_cmd(project_name: str, workspace_id: str, pipelines: tuple[str, ...],
         from adf2fabric.agent.deployment.fabric_deploy import FABRIC_SCOPE
         client = FabricClient(credential.get_token(FABRIC_SCOPE).token)
         results = [] if schedules_only else deploy(client, workspace_id, items, apply=apply_, allow_unbound=allow_unbound)
+        if results:  # the same record the API stage keeps: where each pipeline was last deployed, which the Report and the UI read
+            from adf2fabric.agent.deployment import record as deploy_record
+
+            pdir = store.project_dir(slugify(project_name))
+            if apply_:
+                deploy_record.note_apply(pdir, workspace_id, results)
+            else:
+                deploy_record.note_dry_run(pdir, workspace_id, [i.name for i in items], sum(1 for r in results if r.action in ("failed", "refused")),
+                                           allow_unbound=allow_unbound)
     except (DeployError, CredentialUnavailable) as exc:
         click.secho(f"Deploy failed: {getattr(exc, 'detail', None) or exc}", fg="red", err=True)
         sys.exit(1)
@@ -2127,6 +2136,46 @@ def verify_cmd(project_name: str, workspace_id: str, pipelines: tuple[str, ...],
     click.echo(f"  record: {record_path}")
     click.echo(f"  report: {report}")
     if any(v.verdict in ("failed", "differs", "same_failure") for v in results):
+        sys.exit(1)
+
+
+@cli.command(name="output-check")
+@click.option("--project", "project_name", required=True, help="Project name.")
+@click.option("--pipeline", "pipeline", required=True, help="The converted pipeline whose output this checks.")
+@click.option("--name", "name", default=None, help="Name of this check (default: the pipeline name). The same name replaces an earlier check.")
+@click.option("--source", "source", required=True, help="Source data: abfss://<filesystem>@<account>.dfs.core.windows.net/<path> (a file or a folder).")
+@click.option("--target", "target", required=True,
+              help="What Fabric wrote: abfss://<workspace-id>@onelake.dfs.fabric.microsoft.com/<lakehouse-id>/Files/<path>, or an ADLS path.")
+@click.option("--format", "fmt", type=click.Choice(["csv", "parquet"]), default=None, help="Both sides' format (default: from the file extensions).")
+@azure_auth_options()
+@_audited("output-check")
+def output_check_cmd(project_name: str, pipeline: str, name: str | None, source: str, target: str, fmt: str | None, auth: str, **auth_env: str | None) -> None:
+    """Compare what a pipeline wrote with its source data (rows, columns, content hash). Read-only; for a pipeline with no ADF run to compare with."""
+    from adf2fabric.agent.deployment import output_check as oc
+    from adf2fabric.connectivity._azure import CredentialUnavailable, build_credential
+
+    store = ProjectStore(projects_root(load_config()))
+    pid = slugify(project_name)
+    if not store.has_conversion(pid):
+        click.secho(f"Output check failed: project '{pid}' has no conversion. Run `adf2fabric convert` first.", fg="red", err=True)
+        sys.exit(1)
+    try:
+        credential, _ = build_credential(credential_from(auth, **auth_env), storage_ok=True)
+        result = oc.check(name or pipeline, pipeline, oc.parse_location(source), oc.parse_location(target), credential, fmt)
+    except (oc.OutputCheckError, CredentialUnavailable) as exc:
+        click.secho(f"Output check failed: {getattr(exc, 'detail', None) or exc}", fg="red", err=True)
+        sys.exit(1)
+    except Exception as exc:  # noqa: BLE001  a storage read error is a failed check, not a verdict
+        click.secho(f"Output check failed: could not read the data ({type(exc).__name__}). Check the location and that you can read it.", fg="red", err=True)
+        sys.exit(1)
+    path = oc.save(store.project_dir(pid), result)
+    colour = {"matches": "green", "counts_match": "yellow", "differs": "red"}[result["verdict"]]
+    click.secho(f"OUTPUT CHECK  {result['name']}: {result['verdict']}  {result['detail']}", fg=colour)
+    for side in ("source", "target"):
+        s = result[f"{side}_summary"]
+        click.echo(f"  {side:<7} {s['files']} file(s), {s['rows']} row(s), {len(s['columns'])} column(s), hash {s['digest'][:12] or '-'}")
+    click.echo(f"  record: {path}")
+    if result["verdict"] != "matches":
         sys.exit(1)
 
 
