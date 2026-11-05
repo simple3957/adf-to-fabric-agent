@@ -466,6 +466,47 @@ def test_provisioning_apply_is_idempotent_too(world):
 # =====================================================================================================================
 
 
+def test_an_output_check_runs_as_a_job_reads_only_allowed_stores_and_is_listed_without_locations(world, monkeypatch):
+    from adf2fabric.agent.deployment import output_check as oc
+
+    prepare(world, "oscar")
+    pipeline = world.demo.store.load_conversion("demo-estate").pipelines[0].source_pipeline
+    src, tgt = "abfss://raw@srcacct.dfs.core.windows.net/in", f"abfss://{DEMO_WS}@onelake.dfs.fabric.microsoft.com/lh/Files/out"
+    body = {"pipeline": pipeline, "name": "orders", "source": src, "target": tgt}
+    assert world.call("oscar", "POST", f"{P}/output-checks", json_body=body).status_code == 409  # demo data is never "checked"
+    monkeypatch.setattr(world.demo, "fabric_http", None)  # from here the container stands for a live one
+    asked = []
+    monkeypatch.setattr(type(world.demo), "storage_token", lambda self, s, side: asked.append(side) or "tok")
+    monkeypatch.setattr(oc, "service_for", lambda loc, cred: loc)
+    monkeypatch.setattr(oc, "read_location", lambda svc, loc: [("a.csv", b"id,v\n1,x\n2,y\n")])
+    bad = world.call("oscar", "POST", f"{P}/output-checks", json_body={**body, "source": "abfss://raw@10.0.0.5:8443/in"})
+    assert bad.status_code in (400, 422) and "dfs.core.windows.net" in bad.text  # the server's sign-in is never pointed elsewhere
+    assert world.call("oscar", "POST", f"{P}/output-checks", json_body={**body, "pipeline": "PL_Nope"}).status_code == 422
+    r = world.call("oscar", "POST", f"{P}/output-checks", json_body=body)
+    assert r.status_code == 202, r.text
+    j = world.wait("oscar", r.json())
+    assert j["state"] == "succeeded" and j["result"]["verdict"] == "matches" and j["result"]["source_rows"] == 2
+    assert sorted(asked) == ["destination", "source"]  # OneLake read as the Fabric account, ADLS as the source's sign-in
+    items = world.call("oscar", "GET", f"{P}/output-checks").json()["items"]
+    assert [(i["pipeline"], i["name"], i["verdict"]) for i in items] == [(pipeline, "orders", "matches")]
+    assert "srcacct" not in json.dumps(items) and DEMO_WS not in json.dumps(items)
+
+
+def test_the_diagnosis_reads_the_workspace_ranks_fixes_and_shows_no_paths(world):
+    prepare(world, "oscar")
+    auto = world.call("oscar", "GET", f"{P}/diagnosis").json()  # written by the convert stage itself: nobody asked for it
+    assert auto["available"] and auto["workspace_read"] is False and all(p["explanation"] for p in auto["pipelines"])
+    r = world.call("oscar", "POST", f"{P}/diagnosis")
+    assert r.status_code == 202, r.text
+    j = world.wait("oscar", r.json())
+    assert j["state"] == "succeeded" and j["result"]["workspace_read"] is True and sum(j["result"]["summary"].values()) > 0
+    d = world.call("oscar", "GET", f"{P}/diagnosis").json()
+    assert d["available"] and d["pipelines"] and all(p["stage"] and p["headline"] for p in d["pipelines"])
+    assert d["fix_first"] == sorted(d["fix_first"], key=lambda g: -len(g["pipelines"]))  # the fix that unblocks most comes first
+    blob = json.dumps(d)
+    assert str(world.demo.store.projects_root) not in blob and "\\" not in blob.replace("\\n", "")
+
+
 def test_production_mode_refuses_demo_and_serves_only_real_state(tmp_path, monkeypatch):
     from adf2fabric.project.store import ProjectStore
 

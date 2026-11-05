@@ -4,6 +4,8 @@
   output needs a new approval). Nothing outward happens.
 * ``deploy`` creates/updates the Fabric item for approved workloads only, dry-run unless ``apply``. It never deletes.
 * ``record_run`` stores evidence of execution, and only from a real Fabric pipeline run whose activity ran the deployed item.
+* ``bind_deployed`` records a notebook already in the workspace (deployed by any route) as this workload's item, only when its code
+  equals the generated notebook; the person who binds it is recorded as accepting it.
 """
 
 from __future__ import annotations
@@ -145,4 +147,58 @@ def record_run(store: ProjectStore, project_id: str, ident: str, run: Any, *, no
                                     detail=("" if ok else act.error[:300]) or f"activity status {act.status}")
     m.summary = summarize(m)
     store.save_workload_manifest(project_id, m)
+    return w
+
+
+def pipeline_item(store: ProjectStore, project_id: str, w: WorkloadEntry) -> Optional[str]:
+    """The Fabric item id the converted pipelines run for this workload (the first activity that uses it and is bound), or None."""
+    for u in w.used_by:
+        pipeline, _, activity = u.partition("/")
+        if activity and (item := _bound_item(store, project_id, pipeline, activity)) and not str(item).startswith("<"):
+            return str(item)
+    return None
+
+
+def _code(cells: list[dict]) -> list[str]:
+    return [("".join(c.get("source", "")) if isinstance(c.get("source"), list) else str(c.get("source", ""))).strip()
+            for c in cells if c.get("cell_type") == "code"]
+
+
+def check_deployed(store: ProjectStore, project_id: str, client: FabricClient, workspace: str, ident: str, item_id: str) -> tuple[WorkloadEntry, bool, str]:
+    """(workload, ok, why): is ``item_id`` a notebook in ``workspace`` whose code cells equal this workload's generated notebook? Read-only."""
+    m = store.load_workload_manifest(project_id)
+    w = _find(m, ident)
+    if w.artifact.kind != "fabric_notebook" or w.generation.status != "generated":
+        return w, False, "This workload has no generated notebook to compare with: generate it first (workloads-generate)."
+    item_id = item_id.strip().strip("{}").lower()
+    if item_id not in {i.lower() for i in notebook_deploy.list_notebooks(client, workspace).values()}:
+        return w, False, "That id is not a notebook in the chosen Fabric workspace."
+    deployed = _code(notebook_deploy.read_cells(client, workspace, item_id))
+    generated = _code(json.loads((store.project_dir(project_id) / str(w.artifact.file)).read_text(encoding="utf-8")).get("cells", []))
+    if deployed != generated:
+        return w, False, (f"The deployed notebook's code differs from the generated one ({len(deployed)} vs {len(generated)} code cell(s)). "
+                          "Deploy the generated notebook (or regenerate from the code that is deployed), then bind it.")
+    return w, True, f"The deployed notebook's {len(generated)} code cell(s) equal the generated notebook."
+
+
+def bind_deployed(store: ProjectStore, project_id: str, client: FabricClient, workspace: str, ident: str, item_id: str, *, by: str,
+                  resolutions: Optional[Path] = None, now: Optional[datetime] = None) -> WorkloadEntry:
+    """Record that this workload is deployed as ``item_id``. Only when ``check_deployed`` passes; the person who binds it accepts the
+    generated notebook, so the approval is recorded with their name (there is no separate approval step in this path)."""
+    if not by.strip():
+        raise LifecycleError("Say who is binding the notebook.")
+    w, ok, why = check_deployed(store, project_id, client, workspace, ident, item_id)
+    if not ok:
+        raise LifecycleError(why)
+    m = store.load_workload_manifest(project_id)
+    w = _find(m, w.id)
+    item_id = item_id.strip().strip("{}").lower()
+    at = now or datetime.now(timezone.utc)
+    w.artifact.fabric_item_id = item_id
+    w.approval = Approval(status="approved", by=by.strip(), at=at, note=f"Accepted by binding the deployed notebook {item_id}: {why}"[:300])
+    m.summary = summarize(m)
+    m.updated_at = at
+    store.save_workload_manifest(project_id, m)
+    if resolutions is not None:
+        notebook_deploy.bind_resolutions(resolutions, w.name, item_id, workspace)
     return w

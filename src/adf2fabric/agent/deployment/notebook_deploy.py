@@ -6,6 +6,7 @@ Fabric REST (verified against Microsoft Learn, 2026-10-16):
   running operation). Needs a contributor role and a workspace on a Fabric capacity.
 * ``POST /v1/workspaces/{ws}/notebooks/{id}/updateDefinition`` - 200, or 202.
 * ``GET  /v1/workspaces/{ws}/notebooks`` - paged with ``continuationToken``.
+* ``POST /v1/workspaces/{ws}/notebooks/{id}/getDefinition?format=ipynb`` - 200, or 202 (long running): read-only.
 
 The definition is sent in the ``ipynb`` format (a part named ``notebook-content.ipynb``). A plain ``.py`` file becomes
 one code cell; an ``.ipynb`` file is sent as it is. Notebook *content* is never changed or generated here: whatever the
@@ -86,6 +87,20 @@ def list_notebooks(client: FabricClient, workspace: str) -> dict[str, str]:
         token = data.get("continuationToken")
         if not token:
             return found
+
+
+def read_cells(client: FabricClient, workspace: str, item_id: str) -> list[dict]:
+    """The cells of a deployed notebook (read-only ``getDefinition`` in the ipynb format; waits for the long-running operation)."""
+    resp = client._call("POST", f"{FABRIC_API}/workspaces/{workspace}/notebooks/{item_id}/getDefinition?format=ipynb")
+    if resp.status_code == 202:
+        op = (client._finish(resp, "Reading the notebook") or {}).get("operation")
+        resp = client._call("GET", f"{op}/result")
+    if resp.status_code != 200:
+        raise DeployError(f"Reading the notebook failed (HTTP {resp.status_code}): {_error_text(resp)}")
+    for part in ((resp.json() or {}).get("definition") or {}).get("parts", []):
+        if part.get("path") == NOTEBOOK_PART:
+            return json.loads(base64.b64decode(part["payload"]).decode("utf-8")).get("cells", [])
+    raise DeployError("The notebook definition has no ipynb part.")
 
 
 def deploy_notebook(client: FabricClient, workspace: str, name: str, definition: dict, *, apply: bool) -> NotebookResult:

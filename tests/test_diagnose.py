@@ -146,10 +146,66 @@ def test_a_run_that_matched_its_baseline_is_proven_and_one_that_differs_is_not(t
     (store.project_dir(pid) / "verification").mkdir()
     f = store.project_dir(pid) / "verification" / "verification.json"
     f.write_text(json.dumps({"PL_Main": {"verdict": "matches"}}), encoding="utf-8")
-    assert _by(E.diagnose(store, pid, {"pipelines": [_row("PL_Main")], "workspace_pipelines": []}))["PL_Main"]["stage"] == "proven"
+    p = _by(E.diagnose(store, pid, {"pipelines": [_row("PL_Main")], "workspace_pipelines": []}))["PL_Main"]
+    assert p["stage"] == "proven" and p["notes"] == []
+    f.write_text(json.dumps({"PL_Main": {"verdict": "matches", "baseline": "fabric"}}), encoding="utf-8")
+    p = _by(E.diagnose(store, pid, {"pipelines": [_row("PL_Main")], "workspace_pipelines": []}))["PL_Main"]
+    assert p["stage"] == "proven" and any("earlier Fabric run, not with ADF" in n for n in p["notes"])  # never claimed as an ADF match
     f.write_text(json.dumps({"PL_Main": {"verdict": "differs", "differences": [{"activity": "Copy_Customer", "fact": "rowsCopied", "baseline": 4, "fabric": 3}]}}), encoding="utf-8")
     p = _by(E.diagnose(store, pid, {"pipelines": [_row("PL_Main")], "workspace_pipelines": []}))["PL_Main"]
     assert p["stage"] == "differs_from_baseline" and "rowsCopied" in p["problems"][0]["detail"]
+
+
+def _records(store, pid, deployed, verification=None, checks=None):
+    from adf2fabric.agent.deployment import record as deploy_record
+
+    deploy_record.note_apply(store.project_dir(pid), G(5), deployed, now=1_000.0)
+    if verification is not None:
+        (store.project_dir(pid) / "verification").mkdir(exist_ok=True)
+        (store.project_dir(pid) / "verification" / "verification.json").write_text(json.dumps(verification), encoding="utf-8")
+    if checks is not None:
+        import yaml
+
+        (store.project_dir(pid) / "validation").mkdir(exist_ok=True)
+        (store.project_dir(pid) / "validation" / "validation.yaml").write_text(yaml.safe_dump({"checks": checks}), encoding="utf-8")
+
+
+class _Res:
+    def __init__(self, name, action, detail=""):
+        self.name, self.action, self.detail = name, action, detail
+
+
+def test_without_a_workspace_read_the_projects_own_records_say_why_each_pipeline_stops(tmp_path):
+    store, pid, _ = _convert(tmp_path, FILES, resolutions_path=_bound(tmp_path))
+    _records(store, pid, [_Res("PL_Main", "failed", "ItemNotFound: the notebook id 1234 does not exist")])
+    p = _by(E.refresh(store, pid, G(5)))["PL_Main"]
+    assert p["stage"] == "deploy_failed" and "ItemNotFound" in p["problems"][0]["cause"]
+    assert p["explanation"][0] == E.HEADLINE["deploy_failed"] and any(x.startswith("What to do:") and "dry run" in x for x in p["explanation"])
+    assert "PL_Main" in (store.project_dir(pid) / "diagnosis" / "diagnosis.md").read_text(encoding="utf-8")  # written without anyone asking
+    _records(store, pid, [_Res("PL_Main", "update")], {"PL_Main": {"verdict": "failed", "fabric_status": "Failed", "ran_at": "2999-01-01T00:00:00",
+                                                                   "detail": "Login failed for user 'etl'", "activities": {"Copy": {"status": "Failed"}}}})
+    p = _by(E.refresh(store, pid, G(5)))["PL_Main"]
+    assert p["stage"] == "run_failed" and "credential" in p["problems"][0]["cause"].lower()
+    assert _by(E.refresh(store, pid, "99999999-0000-0000-0000-000000000000"))["PL_Main"]["stage"] == "ready_to_deploy"  # another workspace: not deployed there
+
+
+def test_a_run_older_than_the_latest_deploy_does_not_count_as_proof(tmp_path):
+    store, pid, _ = _convert(tmp_path, FILES, resolutions_path=_bound(tmp_path))
+    _records(store, pid, [_Res("PL_Main", "update")], {"PL_Main": {"verdict": "matches", "fabric_status": "Completed", "ran_at": "1970-01-01T00:00:01",
+                                                                   "activities": {}}})
+    assert _by(E.refresh(store, pid, G(5)))["PL_Main"]["stage"] == "never_run"
+
+
+def test_an_open_final_check_keeps_a_matched_pipeline_from_being_called_proven(tmp_path):
+    store, pid, _ = _convert(tmp_path, FILES, resolutions_path=_bound(tmp_path))
+    check = {"id": "compute.fabric_compute", "result": "BLOCKED", "required": True, "component": "pipeline:PL_Main/activity:NB",
+             "summary": "'NB' runs a Fabric item that is not bound to its generated notebook.", "remediation": "On the Deploy step, Check and Bind the notebook."}
+    _records(store, pid, [_Res("PL_Main", "update")], {"PL_Main": {"verdict": "matches", "fabric_status": "Completed", "ran_at": "2999-01-01T00:00:00",
+                                                                   "activities": {}}}, [check, {**check, "required": False, "summary": "optional"}])
+    p = _by(E.refresh(store, pid, G(5)))["PL_Main"]
+    assert p["stage"] == "checks_open" and [x["kind"] for x in p["problems"]] == ["validation"]
+    assert "What to do: On the Deploy step, Check and Bind the notebook." in p["explanation"]
+    assert "PL_Main" in [x["pipeline"] for x in E.attention(E.refresh(store, pid, G(5)))]
 
 
 def test_upstream_problems_come_first_and_a_stale_deployment_is_noted(tmp_path):

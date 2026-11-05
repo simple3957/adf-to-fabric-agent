@@ -277,6 +277,20 @@ def test_two_verifications_finishing_together_keep_each_others_results(tmp_path)
     assert sorted(json.loads(path.read_text(encoding="utf-8"))) == sorted(f"PL_{n}" for n in range(10))
 
 
+def test_output_checks_finishing_together_keep_each_others_results(tmp_path):
+    from concurrent.futures import ThreadPoolExecutor
+
+    from adf2fabric.agent.deployment import output_check as O
+
+    def one(n):
+        O.save(tmp_path, {"pipeline": f"PL_{n % 3}", "name": f"out-{n}", "verdict": O.MATCHES})
+
+    with ThreadPoolExecutor(10) as ex:
+        list(ex.map(one, range(12)))
+    data = O.load(tmp_path)
+    assert sorted(name for checks in data.values() for name in checks) == sorted(f"out-{n}" for n in range(12))
+
+
 def test_the_audit_chain_stays_intact_when_two_writers_append_to_it(tmp_path):
     """The CLI and the API are two writers of one hash chain: each used to remember its own last hash, so the other's events broke the chain."""
     from adf2fabric.api.security.audit import AuditLog

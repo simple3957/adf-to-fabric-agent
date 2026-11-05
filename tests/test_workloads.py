@@ -529,6 +529,21 @@ def test_reassessment_keeps_generated_artifacts_approvals_and_evidence(tmp_path)
     assert _w(regenerated, "nb_clean").approval.status == "approved"  # identical output keeps the approval
 
 
+def test_generating_again_without_the_code_keeps_the_generated_record(tmp_path):
+    store, pid = _project(tmp_path, ESTATE)
+    _discover(store)
+    f = tmp_path / "nb.py"
+    f.write_text("# Databricks notebook source\ndf = spark.range(1)\n", encoding="utf-8")
+    store.save_workload_manifest(pid, build_manifest(store, pid, Options(generate=True, local_files={"/Shared/etl/nb_clean": str(f)},
+                                                                         pipelines={"pl_dbx"}), NOW))
+    lifecycle.approve(store, pid, "nb_clean", by="Pat", now=NOW)
+    before = _w(store.load_workload_manifest(pid), "nb_clean")
+    m = build_manifest(store, pid, Options(generate=True, pipelines={"pl_dbx"}), NOW)  # no --source, no --fetch, nothing cached
+    w = _w(m, "nb_clean")
+    assert w == before and w.generation.status == "generated" and w.approval.by == "Pat"
+    assert any("nb_clean" in n and "not_requested" in n and "Pass the code again" in n for n in m.notes)
+
+
 def test_changed_code_resets_the_approval(tmp_path):
     store, pid = _project(tmp_path, ESTATE)
     _discover(store)
@@ -706,3 +721,65 @@ def test_an_unapproved_notebook_with_parameters_is_not_bound(generated, tmp_path
                                {"type": "WorkspaceId", "key": "*", "value": WS}]), encoding="utf-8")
     _convert_pipeline(store, pid, res)
     assert _activity(store, pid, "PL_Dbx", "Etl")["type"] == "DatabricksNotebook"  # parameters would be dropped: the source compute is kept
+
+
+class NotebookFabric:
+    """A workspace holding notebooks: lists them and returns each one's definition (getDefinition, ipynb)."""
+
+    def __init__(self, notebooks: dict):
+        self.notebooks = notebooks  # id -> cells
+        self.writes = []
+
+    def _call(self, method, url, body=None):
+        import base64
+
+        class R:
+            def __init__(s, status, data):
+                s.status_code, s._d, s.headers, s.text, s.content = status, data, {}, "", b"x"
+
+            def json(s):
+                return s._d
+
+        if method == "GET" and url.endswith("/notebooks"):
+            return R(200, {"value": [{"id": i, "displayName": f"nb{n}"} for n, i in enumerate(self.notebooks)]})
+        if method == "POST" and "/getDefinition" in url:
+            item = url.split("/notebooks/")[1].split("/")[0]
+            payload = base64.b64encode(json.dumps({"cells": self.notebooks[item]}).encode()).decode()
+            return R(200, {"definition": {"parts": [{"path": "notebook-content.ipynb", "payload": payload}]}})
+        self.writes.append((method, url))
+        return R(500, {})
+
+
+def _generated_cells(store, pid, name):
+    w = _w(store.load_workload_manifest(pid), name)
+    return json.loads((store.project_dir(pid) / w.artifact.file).read_text(encoding="utf-8"))["cells"]
+
+
+NB_ID = "11111111-2222-3333-4444-555555555555"
+
+
+def test_binding_a_deployed_notebook_needs_its_code_to_equal_the_generated_one(generated, tmp_path):
+    store, pid = generated
+    same = NotebookFabric({NB_ID: _generated_cells(store, pid, "nb_clean")})
+    w, ok, why = lifecycle.check_deployed(store, pid, same, WS, "nb_clean", NB_ID.upper())
+    assert ok and "equal the generated" in why
+    changed = [dict(c) for c in _generated_cells(store, pid, "nb_clean")]
+    next(c for c in changed if c.get("cell_type") == "code")["source"] = ["print('edited in Fabric')"]
+    assert lifecycle.check_deployed(store, pid, NotebookFabric({NB_ID: changed}), WS, "nb_clean", NB_ID)[1] is False
+    assert "not a notebook" in lifecycle.check_deployed(store, pid, NotebookFabric({}), WS, "nb_clean", NB_ID)[2]
+    with pytest.raises(lifecycle.LifecycleError):
+        lifecycle.bind_deployed(store, pid, NotebookFabric({NB_ID: changed}), WS, "nb_clean", NB_ID, by="Pat")
+    assert _w(store.load_workload_manifest(pid), "nb_clean").artifact.fabric_item_id is None  # a refused bind records nothing
+
+
+def test_binding_records_the_id_the_person_and_the_resolution_and_writes_nothing_to_fabric(generated, tmp_path):
+    store, pid = generated
+    fab = NotebookFabric({NB_ID: _generated_cells(store, pid, "nb_clean")})
+    res = tmp_path / "resolutions.json"
+    with pytest.raises(lifecycle.LifecycleError):
+        lifecycle.bind_deployed(store, pid, fab, WS, "nb_clean", NB_ID, by=" ")
+    lifecycle.bind_deployed(store, pid, fab, WS, "nb_clean", NB_ID, by="Pat", resolutions=res, now=NOW)
+    w = _w(store.load_workload_manifest(pid), "nb_clean")
+    assert w.artifact.fabric_item_id == NB_ID and w.approval.status == "approved" and w.approval.by == "Pat" and NB_ID in w.approval.note
+    assert any(r["value"] == NB_ID for r in json.loads(res.read_text(encoding="utf-8")))
+    assert fab.writes == []

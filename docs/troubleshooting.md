@@ -8,7 +8,14 @@ adf2fabric diagnose --project P --workspace-id W      # read-only; writes projec
 
 It finds, for every pipeline, the **first** thing in its way, why, and what to do; ranks the fixes so the one that unblocks the most pipelines comes first; lists
 every service (linked service and the Fabric connection it needs) with its state; and names pipelines that are in the workspace but not in this project (it
-never deletes anything: remove stale ones in the portal). Without `--workspace-id` it covers conversion and binding only.
+never deletes anything: remove stale ones in the portal). Without `--workspace-id` deployment and runs come from the project's own records (its deploys
+and run comparisons; a run older than the latest deploy does not count), not from Fabric.
+
+**It is written for you after every step.** `convert`, `deploy --apply`, `verify` and `validate` (CLI and API alike) write the diagnosis again from the
+project's records, with no Fabric read, and the CLI prints each pipeline that needs attention with *Why:* and *What to do:* lines. Each pipeline in
+`diagnosis.json` carries an `explanation` (those sentences). The UI shows them under Convert, Validate and Deploy (only the problems that step can fix)
+and all of them on Report ("What to fix first"). A deploy that fails or is refused keeps Fabric's message in the deploy record, so the diagnosis can say
+why.
 
 ## The ladder (each stage needs the one before)
 
@@ -16,12 +23,14 @@ never deletes anything: remove stale ones in the portal). Without `--workspace-i
 |---|---|---|
 | **not converted** | The converter left an activity for a person (manual or blocked). | Open the conversion report. Each activity says why; `diagnose` gives the fix for each code (below). Re-run `convert`. |
 | **unbound** | Converted, but a connection, gateway or item it needs has no real id yet. | Create it in Fabric, then bind it in the resolutions file; `convert --resolutions ...`. |
+| **deploy failed** | Its latest deploy failed or was refused (from the deploy record). | Read the message kept with it: usually an unbound notebook, connection or child pipeline id. Bind it, dry run, deploy again. |
 | **not deployed** | Not in the workspace. | `deploy --with-children` (a dry run) then `--apply`. It refuses unbound placeholders unless you say so. |
 | **deployed, differs** | What is in Fabric is not what was generated. | Deploy the current file again; `pipeline-report` shows the difference. |
 | **never run** | Deployed but never started (or only runs when its caller does). | `verify --apply`. |
 | **run failed** | The latest run did not complete. | `diagnose` matches the message to a cause (below); open the run in Fabric Monitor for the activity's error. |
 | **differs from baseline** | It ran, but the result is not what ADF gave. | Find out which is right: a changed source, a different parameter, a data race. Fix the cause, run again. |
-| **proven** | Deployed, run, and matched its ADF baseline. | Done for that pipeline. `validate` says whether the migration as a whole can be called verified. |
+| **checks open** | It ran and matched, but a required final check (`validate`) on it is BLOCKED or FAIL. | Each check's own remediation, e.g. Check and Bind a notebook on the Deploy step. Validate again. |
+| **proven** | Deployed, run, and matched its baseline (its last ADF run, or an earlier Fabric run; a note says which when it is Fabric). | Done for that pipeline. `validate` says whether the migration as a whole can be called verified. |
 
 ## Services: what makes a connection work
 

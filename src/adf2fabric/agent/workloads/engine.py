@@ -531,6 +531,11 @@ def _write(project_dir: Path, rel: str, content: bytes) -> tuple[str, str]:
 # =====================================================================================================================
 
 
+_READ = {C.retrieved, C.cached, C.in_project, C.supplied}
+# the code was not offered or not reachable this run; unlike dynamic / binary / incomplete, nothing says the source changed
+_NOT_READ_THIS_RUN = {C.not_requested, C.missing_credential, C.denied, C.not_found, C.unreachable, C.error}
+
+
 def build_manifest(store: ProjectStore, project_id: str, opts: Optional[Options] = None, now: Optional[datetime] = None) -> WorkloadManifest:
     opts = opts or Options()
     now = now or datetime.now(timezone.utc)
@@ -539,6 +544,7 @@ def build_manifest(store: ProjectStore, project_id: str, opts: Optional[Options]
     previous = store.load_workload_manifest(project_id) if store.has_workload_manifest(project_id) else None
     prior = {w.id: w for w in previous.workloads} if previous else {}
     entries: list[WorkloadEntry] = []
+    notes: list[str] = []
     if plan is not None:
         project_dir = store.project_dir(project_id)
         resolver = SourceResolver(project_dir, opts.tokens, opts.fetch, dict(opts.local_files), opts.client_factory)
@@ -546,6 +552,12 @@ def build_manifest(store: ProjectStore, project_id: str, opts: Optional[Options]
         for spec in _specs(d, plan, opts.pipelines):
             entry = _assess(spec, d, plan, resolver, opts, project_dir, used_names, now)
             old = prior.get(entry.id)
+            if old is not None and entry.code.status in _NOT_READ_THIS_RUN and old.code.status in _READ and old.artifact.kind != "none":
+                # code that was read before and simply not offered (or not reachable) this run is not new evidence: keep the record
+                notes.append(f"{old.name}: its code could not be read this run ({entry.code.status.value}), so the earlier record "
+                             f"(generated, approval {old.approval.status}) was kept. Pass the code again (--source or --fetch) to regenerate it.")
+                entries.append(old)
+                continue
             if old is not None and old.code.sha256 == entry.code.sha256:
                 if not opts.generate and old.artifact.kind != "none" and entry.generation.status == "not_generated"                         and entry.classification in (K.directly_convertible, K.convertible_with_changes):
                     entry.artifact, entry.generation = old.artifact, old.generation  # an assessment does not forget what was generated
@@ -555,6 +567,7 @@ def build_manifest(store: ProjectStore, project_id: str, opts: Optional[Options]
     manifest = WorkloadManifest(project_id=project_id, source_commit_sha=d.source_commit_sha, created_at=previous.created_at if previous else now,
                                 updated_at=now, workloads=sorted(entries, key=lambda e: e.id))
     manifest.summary = summarize(manifest)
+    manifest.notes.extend(notes)
     if plan is None:
         manifest.notes.append("The estate has no Databricks or Synapse Spark activity, so there are no workloads.")
     return manifest

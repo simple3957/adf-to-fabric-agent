@@ -10,7 +10,8 @@ Code: `src/adf2fabric/agent/conversion/triggers.py`. Tests: `tests/test_triggers
 
 Recurrence shapes that cannot be expressed are refused as manual, for example weekly intervals above 1 and negative month days.
 
-`deploy --schedules` creates the schedules disabled and does not duplicate existing ones. See `docs/deploy.md`.
+`deploy --schedules` creates the schedules disabled and does not duplicate existing ones. See `docs/deploy.md`. Schedules are created
+from the command line only: the web UI's Deploy step deploys pipelines, not schedules.
 
 ## What the report tells a person to recreate
 

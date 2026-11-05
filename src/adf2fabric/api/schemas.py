@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, SecretStr
 
@@ -52,6 +52,20 @@ class ImportBody(_In):
 class BindingBody(_In):
     key: str = Field(max_length=200)
     value: str = Field(max_length=64)
+
+
+class NotebookBindBody(_In):
+    workload: str = Field(max_length=200)
+    item_id: str = Field(max_length=64)
+    confirm: bool = False  # False: only check; True: record the binding (the caller is recorded as accepting the generated notebook)
+
+
+class OutputCheckBody(_In):
+    pipeline: str = Field(max_length=200)
+    name: str = Field(default="", max_length=120)  # the same name replaces an earlier check
+    source: str = Field(max_length=1000)  # abfss://<filesystem>@<account>.dfs.core.windows.net/<path>
+    target: str = Field(max_length=1000)  # abfss://<workspace-id>@onelake.dfs.fabric.microsoft.com/<lakehouse-id>/Files/<path>
+    format: Optional[Literal["csv", "parquet"]] = None
 
 
 class ChoiceBody(_In):

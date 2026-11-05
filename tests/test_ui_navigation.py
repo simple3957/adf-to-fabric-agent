@@ -20,6 +20,14 @@ def _status(index, facts, confirmed=()):
     return steps, steps[index]
 
 
+def test_why_and_what_to_do_shows_source_text_as_text():
+    import panels_ext
+
+    shown = panels_ext._plain("PL_[click](javascript:alert(1)) <img src=x> **bold** &amp; `code`")
+    assert not any(c in shown for c in "[]()<>*`") and "javascript:alert" in shown  # the words stay, nothing is a link, tag or emphasis
+    assert panels_ext.STEP_STAGES["deploy"] == ("unbound", "deploy_failed", "not_deployed", "deployed_differs")
+
+
 def test_a_locked_step_says_which_step_opens_it():
     steps, locked = _status(1, {})
     assert journey.needed(locked, steps[0].step.title) == ("wait", "Confirm Discover first: this step opens after it.")

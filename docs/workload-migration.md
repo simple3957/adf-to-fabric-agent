@@ -58,12 +58,31 @@ Code: `src/adf2fabric/agent/workloads/` (`source.py` retrieval, `notebook_format
 Everything else stays as written and is listed as an open issue (mounts, DBFS, volumes, `%run`, `dbutils.notebook.run`,
 credentials in code, `getSecretWithLS`, ...).
 
+## Binding a notebook that is already deployed
+
+A notebook that reached the workspace another way (`deploy-notebook`, by hand, an earlier `workloads-deploy`) can be recorded as the
+workload's item without `workloads-approve` + `workloads-deploy`: the UI's Deploy step lists the generated notebooks the pipelines run, with
+the id each pipeline runs filled in (`GET /projects/{id}/workloads/notebooks`).
+
+- **Check** (`POST .../workloads/notebooks/bind`, `plans:generate`) reads the notebook from the chosen workspace (`getDefinition`, ipynb)
+  and compares its code cells with the generated notebook. Read-only.
+- **Bind** (the same with `confirm: true`, also `provision:approve`) does the same check and, only if the code is equal, records the id
+  in the manifest and `ItemToId notebook:<name>` in `conversion/resolutions.json`, and records the signed-in person as accepting the
+  generated notebook (the approval, with the id in its note). Audited as `workload.bind`. Nothing in Fabric is changed.
+- An id that is not a notebook in the workspace, or a notebook whose code differs, is refused. Static validation then passes the
+  notebook check (`compute.fabric_compute`); execution evidence is still `workloads-record-run`'s.
+- Code: `agent/workloads/lifecycle.py` (`check_deployed`, `bind_deployed`), `agent/deployment/notebook_deploy.read_cells`. Live-checked on
+  2026-11-04 against the two notebooks in `Practise` (equal) and a mismatched id (refused).
+
 ## Running generate again
 
 - Each `workloads-generate` run rewrites the workloads it covers. A new artifact needs a new `workloads-approve`, and its `execution` and
   `fabric_item_id` start empty until `workloads-deploy --apply` and `workloads-record-run`.
-- Run without the code (no `--source`, no `--fetch`, nothing cached under `databricks/notebooks/`) it replaces a generated, approved
-  record with `blocked; code not_requested`. Keep a copy of `workloads/` or pass the code again. (Found 2026-11-04; not yet changed.)
+- Run without the code (no `--source`, no `--fetch`, nothing cached under `databricks/notebooks/`), or with code that cannot be reached
+  this time (`not_requested`, `missing_credential`, `denied`, `not_found`, `unreachable`, `error`), a workload whose code was read before
+  and which has an artifact keeps its earlier record whole: artifact, approval, Fabric id and run evidence. The manifest gets a note
+  naming it, and the CLI prints the note. Pass the code again to regenerate it. (Fixed 2026-11-05; before that the record was replaced
+  with `blocked; code not_requested`.)
 - In Git Bash on Windows, `--source /Shared/x=file.py` has its `/Shared/...` rewritten into a Windows path and is silently not matched.
   Set `MSYS_NO_PATHCONV=1`, or key by the notebook's name alone: `--source x=file.py`.
 

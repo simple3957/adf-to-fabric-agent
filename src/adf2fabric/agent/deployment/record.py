@@ -13,6 +13,7 @@ import time
 from pathlib import Path
 from typing import Any, Iterable, Optional
 
+from adf2fabric.connections.redaction import redact
 from adf2fabric.project.locks import read_text_retry, write_atomic
 
 _NAME = "deployment-record.json"
@@ -47,8 +48,10 @@ def note_apply(project_dir: Path, workspace: str, results: Iterable[Any], now: O
     data = load(project_dir)
     rows = data.setdefault("pipelines", {})
     for r in results:
-        rows[str(r.name)] = {"action": str(r.action), "at": now or time.time(), "workspace": workspace,
-                             "ok": str(r.action) not in ("failed", "refused", "skipped")}
+        ok = str(r.action) not in ("failed", "refused", "skipped")
+        rows[str(r.name)] = {"action": str(r.action), "at": now or time.time(), "workspace": workspace, "ok": ok}
+        if not ok:  # what Fabric (or the tool) said, so the diagnosis can say why
+            rows[str(r.name)]["detail"] = redact(str(getattr(r, "detail", "") or ""))[:400]
     data["last_apply"] = {"at": now or time.time(), "workspace": workspace}
     _write(project_dir, data)
 

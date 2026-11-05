@@ -199,7 +199,29 @@ def _validate(c: Container, session: Session, pid: str, options: dict, log: Log)
             "checks": len(report.checks)}
 
 
+AFTER = ("convert", "deploy_apply", "verify", "validate")  # the stages after which each pipeline's "why and what to do" is written again
+
+
+def refresh_diagnosis(c: Container, pid: str, workspace: str = "") -> None:
+    """Write the diagnosis again from the project's own records (no Fabric read), so every pipeline that has a problem at any step has its
+    explanation (why, what to do) on record without anyone asking for it."""
+    from adf2fabric.agent.diagnose import engine
+
+    engine.refresh(c.store, pid, workspace)
+
+
 def run_stage(c: Container, session: Session, pid: str, stage: str, log: Log, options: Optional[dict] = None) -> dict[str, Any]:
+    try:
+        return _run_stage(c, session, pid, stage, log, options)
+    finally:  # a stage that failed part-way (a refused deploy) has the most to explain
+        if stage in AFTER and c.store.exists(pid):
+            try:
+                refresh_diagnosis(c, pid, (options or {}).get("workspace_id") or session.destination.get("workspace_id") or "")
+            except Exception as exc:  # noqa: BLE001  a diagnosis that cannot be written is said, never raised over the stage's own outcome
+                log(f"the per-pipeline explanations could not be updated ({type(exc).__name__})")
+
+
+def _run_stage(c: Container, session: Session, pid: str, stage: str, log: Log, options: Optional[dict] = None) -> dict[str, Any]:
     options = options or {}
     if stage not in STAGES:
         raise StageError(f"Unknown stage '{stage}'.", [f"Use one of: {', '.join(STAGES)}."])

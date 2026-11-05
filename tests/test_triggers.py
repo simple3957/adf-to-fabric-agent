@@ -308,6 +308,23 @@ def test_dry_run_only_reads_and_a_rerun_never_duplicates():
     assert [(r.action, r.schedule_id) for r in res] == [("exists", "old")] and not posts(s)
 
 
+def test_a_schedule_fabric_echoes_back_in_its_own_form_is_still_recognised():
+    echoed = {**DAILY, "startDateTime": "2099-01-01T08:30:00.0000000Z", "endDateTime": "2108-12-30T08:30:00Z",
+              "localTimeZoneId": "utc", "extraFabricField": "x"}  # fractions, Z, case and fields Fabric adds itself
+    c, s = client({("GET", LS): [Resp(200, {"value": [{"id": "old", "configuration": echoed}]})]})
+    res = fd.deploy_schedules(c, WS, [sitem()], {"PL_Main": "ITEM1"}, apply=True)
+    assert [(r.action, r.schedule_id) for r in res] == [("exists", "old")] and not posts(s)
+    later = {**DAILY, "times": ["09:30"]}
+    c, s = client({("GET", LS): [Resp(200, {"value": [{"id": "old", "configuration": echoed}]})], ("POST", LS): [Resp(201, {"id": "new"})]})
+    assert fd.deploy_schedules(c, WS, [sitem(later)], {"PL_Main": "ITEM1"}, apply=True)[0].action == "create"  # a real difference
+
+
+def test_two_identical_triggers_in_one_run_make_one_schedule():
+    c, s = client({("GET", LS): [Resp(200, {"value": []})], ("POST", LS): [Resp(201, {"id": "sch1"})]})
+    res = fd.deploy_schedules(c, WS, [sitem(trigger="T1"), sitem(trigger="T2")], {"PL_Main": "ITEM1"}, apply=True)
+    assert [(r.action, r.schedule_id) for r in res] == [("create", "sch1"), ("exists", "sch1")] and len(posts(s)) == 1
+
+
 def test_a_pipeline_that_is_not_deployed_is_skipped_or_planned_and_the_limit_is_respected():
     c, s = client({})
     assert fd.deploy_schedules(c, WS, [sitem()], {}, apply=True)[0].action == "skipped"

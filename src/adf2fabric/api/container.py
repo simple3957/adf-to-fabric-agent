@@ -27,6 +27,7 @@ from adf2fabric.connections.testing import ConnectorTester
 from adf2fabric.project.store import ProjectStore
 
 FABRIC_RESOURCE = cloud.FABRIC_ENDPOINT
+STORAGE_RESOURCE = "https://storage.azure.com/"  # the audience ADLS Gen2 and OneLake both accept
 MODES = ("live", "demo")
 
 
@@ -105,6 +106,14 @@ class Container:
             return "demo-token"
         dest = session.destination
         return self.azure.token(tenant=dest.get("tenant_id"), account=dest.get("account"), resource=FABRIC_RESOURCE)
+
+    def storage_token(self, session: Session, side: str) -> str:
+        """A storage token (ADLS Gen2 and OneLake): for the ``source`` side the subscription the ADF source was chosen in, when there is
+        one; otherwise, and for the ``destination``, the account Fabric is used as."""
+        src, dest = session.source or {}, session.destination
+        if side == "source" and src.get("subscription_id"):
+            return self.azure.token(subscription=src["subscription_id"], resource=STORAGE_RESOURCE)
+        return self.azure.token(tenant=dest.get("tenant_id"), account=dest.get("account"), resource=STORAGE_RESOURCE)
 
     def gateways(self, session: Session, need_arm: bool = False):
         """(Fabric gateway, ARM gateway or None) for provisioning and validation. Each gets a token PROVIDER for its own audience."""

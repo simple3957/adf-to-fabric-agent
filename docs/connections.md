@@ -24,10 +24,18 @@ ADF linked service. The UI is a thin client of the FastAPI backend (`python -m a
 | Cards | SQL, ADLS Gen2, Blob, REST, Databricks; parameterized LS; Key Vault refs; existing-connection matching | unit + real projects |
 | Auth methods | SQL login / service principal / workspace identity / existing connection (each with Key Vault variant); storage key / SAS / SP / workspace identity | unit with fakes |
 | Test | config -> Key Vault read -> TCP reach -> SQL login / storage call | fakes |
-| Apply | create or reuse Fabric connections, merge `conversion/resolutions.json`, dry-run | fakes |
+| Apply | create or reuse Fabric connections, merge `conversion/resolutions.json`, dry-run; never creates a name twice (below) | fakes |
 | Integration runtimes | azure / managed VNet / self-hosted / SSIS -> Fabric path | unit + parser |
 | Report | `conversion/connections-report.{md,json}` | unit |
 | Demo mode | same routes, canned providers, real parsing on a bundled sample | tests |
+
+## Applying again
+
+A create looks up the connection's display name (case-insensitive) in what Fabric lists first. The same name with the same type and
+address is reused ("reused", bound, nothing created): a second apply, or one made by hand. The same name with another type or address is
+refused, and the person chooses it as the existing connection or gives another display name. A parameterised linked service's variants
+(`name-2`, `name-3`…) are checked one by one, so only missing ones are created. A connection created earlier in the same apply counts too.
+(Added 2026-11-05; before that every apply posted a new connection.)
 
 ## Not implemented / cannot be (and why)
 

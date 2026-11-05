@@ -14,7 +14,7 @@ import panels_confidence
 import panels_waves
 import theme
 from api_client import ApiClient
-from components import call, can, empty_state, intent, run_job, state_legend, typed_confirm
+from components import call, can, empty_state, intent, read, run_job, state_legend, typed_confirm
 
 ACTION_TONE = {"create": "warning", "configure": "warning", "reuse": "success", "delegate": "info", "blocked": "error", "conflict": "error", "unknown": "neutral"}
 ACTION_TEXT = {"create": "Will create", "configure": "Will configure", "reuse": "Exists: reuse", "delegate": "Done by another step", "blocked": "Blocked",
@@ -312,6 +312,7 @@ def validate(api: ApiClient, pid: str, val: dict | None, dest: dict | None = Non
         empty_state("Not validated yet", (val or {}).get("needs", "Run validation."))
         return
     _validation_body(val)
+    explain_for_step(api, pid, "validate")
 
 
 def _validation_body(val: dict) -> None:
@@ -362,7 +363,9 @@ def report(api: ApiClient, pid: str, rep: dict | None, dest: dict) -> None:
     if rep["validation"].get("available"):
         with st.expander("Validation detail"):
             _validation_body(rep["validation"])
+    _problem_finder(api, pid, ws)
     _run_and_compare(api, pid, rep, ws)
+    _output_check(api, pid, rep)
     st.caption("A generated file, a clean check or a successful call is never proof that a pipeline runs correctly: only a recorded real run compared with the source is.")
     panels_confidence.score_panel(api, pid)
 
@@ -392,3 +395,116 @@ def _run_and_compare(api: ApiClient, pid: str, rep: dict, ws: bool) -> None:
                             "Validating the migration", intent_name="run-validate")
                 st.rerun()
         st.caption("A pipeline becomes runtime-validated only when its run completes and matches the ADF baseline.")
+
+
+STEP_STAGES = {  # the diagnosis stages a step can do something about
+    "convert": ("not_converted", "unbound"),
+    "validate": ("not_converted", "unbound", "checks_open"),
+    "deploy": ("unbound", "deploy_failed", "not_deployed", "deployed_differs"),
+}
+
+
+def explain_for_step(api: ApiClient, pid: str, step: str) -> None:
+    """Under a step: the pipelines whose problem that step can fix, each with why and what to do. The server writes the diagnosis again after
+    every convert, deploy, run and validation, so this is current without anyone asking for it."""
+    d = read(api, "diagnosis", pid) or {}
+    if d.get("available") and d.get("ready", True):
+        explain_pipelines(d, stages=STEP_STAGES[step])
+
+
+def explain_pipelines(d: dict, stages: tuple[str, ...] | None = None) -> None:
+    """Each pipeline that has a problem: where it stops, why, and what to do (the diagnosis' own sentences)."""
+    need = [p for p in d.get("pipelines") or [] if (p["stage"] not in ("proven", "ready_to_deploy") or p.get("problems"))
+            and (stages is None or p["stage"] in stages)]
+    if not need:
+        return
+    st.markdown(f"**Why, and what to do** · {len(need)} pipeline(s)")
+    for p in need:  # bordered boxes, not expanders: this sits inside an expander, and Streamlit does not nest them
+        with st.container(border=True):
+            lines = p.get("explanation") or [p["headline"]]
+            body = [f"<b>{_plain(p['pipeline'])}</b>: {_plain(lines[0])}"]  # names and messages come from the source: shown as text
+            for line in lines[1:]:
+                head, sep, rest = line.partition(": ")
+                body.append(f"<b>{head}:</b> {_plain(rest)}" if sep and head in ("Why", "What to do") else _plain(line))
+            st.markdown("<br>".join(body), unsafe_allow_html=True)
+
+
+_PLAIN = str.maketrans({c: f"&#{ord(c)};" for c in "&<>\"'[]()*_`#~|!\\"})  # HTML and Markdown both: '&' too, so an entity is shown, not decoded
+
+
+def _plain(text: object) -> str:
+    """Text from the source or from Fabric, safe inside st.markdown: neither HTML nor Markdown (a link, an image, emphasis) is interpreted."""
+    return str(text).translate(_PLAIN)
+
+
+def _problem_finder(api: ApiClient, pid: str, ws: bool) -> None:
+    """What stops each pipeline, and the fixes ranked by how many pipelines each one unblocks. Read-only."""
+    with st.expander("What to fix first"):
+        st.caption("For each pipeline, the first thing that stops it (not converted, not bound, not deployed, differs, never run, run failed, "
+                   "differs from ADF), and the fixes ranked by how many pipelines each one unblocks. Nothing is changed."
+                   + ("" if ws else " Choose a workspace to include what is deployed and how the latest runs went."))
+        allowed = can("plans:generate")
+        if st.button("Find what to fix", key="diag-go", disabled=not allowed, help=None if allowed else "Your role cannot run this (needs plans:generate)."):
+            if (job := run_job(lambda: api.run_diagnosis(pid), "Finding what to fix")) and job["state"] == "succeeded":
+                st.rerun()
+        d = call(api.diagnosis, pid) or {}
+        if not d.get("available"):
+            return
+        if not d.get("ready", True):
+            st.info(d.get("message", ""))
+            return
+        st.caption("Read with the workspace." if d.get("workspace_read") else "Conversion and binding only (no workspace was read).")
+        fixes = d.get("fix_first") or []
+        if not fixes:
+            st.success("Nothing to fix: every pipeline is proven or waiting only on what is listed below.")
+        for i, g in enumerate(fixes[:8], 1):
+            st.markdown(f"**{i}. {g['cause']}** · {len(g['pipelines'])} pipeline(s)")
+            st.caption(f"Do this: {g['fix']}  \nPipelines: {', '.join(g['pipelines'][:10])}")
+        _table([{"Pipeline": p["pipeline"], "Where it stops": " ".join([p["headline"], *p.get("notes", [])])} for p in d.get("pipelines") or []], "",
+               column_config={"Pipeline": st.column_config.TextColumn(width="medium"), "Where it stops": st.column_config.TextColumn(width="large")})
+        explain_pipelines(d)
+        todo = [s for s in d.get("services") or [] if s["state"] == "not bound" or s["level"] in ("unsupported", "unlisted")]
+        if todo:
+            st.markdown("**Connections still to sort out**")
+            _table([{"Service": s["service"], "Type": s["type"], "State": s["state"], "Do this": s["todo"]} for s in todo], "")
+        if d.get("extras"):
+            st.caption(f"{len(d['extras'])} pipeline(s) in the workspace are not part of this project: {', '.join(d['extras'][:8])}")
+
+
+def _output_check(api: ApiClient, pid: str, rep: dict) -> None:
+    """Prove a pipeline that has no ADF run to compare with: compare the data it wrote with its source data. Read-only."""
+    with st.expander("Check a pipeline's output (when there is no ADF run to compare with)"):
+        st.caption("Reads the source data and what the Fabric run wrote, and compares the row count, the column names and a fingerprint of the "
+                   "contents. CSV with a header, or Parquet; a file or a folder. Nothing is written. Run the pipeline in Fabric first: only a check "
+                   "made after its latest run counts.")
+        names = [p["name"] for p in rep["pipelines"]]
+        if not names:
+            st.caption("Convert pipelines first.")
+            return
+        with st.form("ocheck-form", border=False):
+            pipeline = st.selectbox("Pipeline", names, key="ocheck-pipe")
+            name = st.text_input("Name of this check", key="ocheck-name", placeholder="e.g. orders (the same name replaces an earlier check)")
+            source = st.text_input("Source data", key="ocheck-src", placeholder="abfss://<container>@<account>.dfs.core.windows.net/<folder or file>")
+            target = st.text_input("What the pipeline wrote", key="ocheck-tgt",
+                                   placeholder="abfss://<workspace id>@onelake.dfs.fabric.microsoft.com/<lakehouse id>/Files/<folder or file>")
+            fmt = st.selectbox("Format", ["from the file names", "csv", "parquet"], key="ocheck-fmt")
+            allowed = can("plans:generate")
+            go = st.form_submit_button("Check the output", type="primary", disabled=not allowed,
+                                       help=None if allowed else "Your role cannot run checks (needs plans:generate).")
+        if go:
+            if not (source.strip() and target.strip()):
+                st.warning("Give both the source data and what the pipeline wrote.")
+            else:
+                job = run_job(lambda: api.run_output_check(pid, pipeline, source.strip(), target.strip(), name.strip(),
+                                                           None if fmt.startswith("from") else fmt, idempotency_key=intent("ocheck")),
+                              "Checking the output", intent_name="ocheck")
+                if job and job["state"] == "succeeded":
+                    res = job.get("result") or {}
+                    {"matches": st.success, "counts_match": st.warning}.get(res.get("verdict"), st.error)(res.get("message", ""))
+        rows = (call(api.output_checks, pid) or {}).get("items") or []
+        if rows:
+            _table([{"Pipeline": r["pipeline"], "Check": r["name"], "Result": r["verdict"], "Source rows": r["source_rows"],
+                     "Written rows": r["target_rows"], "Detail": r["detail"]} for r in rows], "",
+                   column_config={"Detail": st.column_config.TextColumn(width="large")})
+            st.caption("A pipeline with no ADF run passes the run check only when every check of it says matches and was made after its latest run. "
+                       "Validate again to see it.")

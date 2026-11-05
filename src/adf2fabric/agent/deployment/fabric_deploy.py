@@ -421,8 +421,7 @@ def deploy_schedules(client: FabricClient, workspace: str, items: list[ScheduleI
     """Plan or create the schedules. ``pipeline_ids`` maps a pipeline's display name to its Fabric item id; a pipeline
     without an id (not deployed yet, or a dry run of a new pipeline) is planned but not checked against Fabric."""
     results: list[ScheduleResult] = []
-    cache: dict[str, list[dict]] = {}
-    created: dict[str, int] = {}
+    cache: dict[str, list[dict]] = {}  # per item: what Fabric listed, plus what this run created
     for it in items:
         item_id = pipeline_ids.get(it.pipeline)
         body = {"enabled": bool(it.body.get("enabled")) and enable, "configuration": it.body["configuration"]}
@@ -433,12 +432,12 @@ def deploy_schedules(client: FabricClient, workspace: str, items: list[ScheduleI
             continue
         try:
             existing = cache.setdefault(item_id, list_schedules(client, workspace, item_id))
-            same = next((e for e in existing if e.get("configuration") == it.body["configuration"]), None)
+            same = next((e for e in existing if _same_schedule(e.get("configuration") or {}, it.body["configuration"])), None)
             if same:
                 results.append(ScheduleResult(it.pipeline, it.trigger, "exists", same.get("id"),
                                               "an identical schedule already exists; left unchanged"))
                 continue
-            if len(existing) + created.get(item_id, 0) >= MAX_SCHEDULES_PER_ITEM:
+            if len(existing) >= MAX_SCHEDULES_PER_ITEM:
                 results.append(ScheduleResult(it.pipeline, it.trigger, "failed", detail=(
                     f"the pipeline already has {MAX_SCHEDULES_PER_ITEM} schedules (the Fabric limit)")))
                 continue
@@ -447,11 +446,29 @@ def deploy_schedules(client: FabricClient, workspace: str, items: list[ScheduleI
                 results.append(ScheduleResult(it.pipeline, it.trigger, "create", detail=f"dry run: would create it {state}"))
                 continue
             sid = create_schedule(client, workspace, item_id, body)
-            created[item_id] = created.get(item_id, 0) + 1
+            existing.append({"id": sid, "configuration": it.body["configuration"]})  # a second identical trigger in this run sees it
             results.append(ScheduleResult(it.pipeline, it.trigger, "create", sid, f"created {state}"))
         except DeployError as exc:
             results.append(ScheduleResult(it.pipeline, it.trigger, "failed", detail=str(exc)))
     return results
+
+
+_FRACTION = re.compile(r"\.\d+(?=Z?$)")
+
+
+def _schedule_value(v: Any) -> Any:
+    """A configuration value as Fabric may echo it back: ISO times without a trailing Z or fractional seconds, names
+    without case."""
+    if isinstance(v, list):
+        return [_schedule_value(x) for x in v]
+    if isinstance(v, str):
+        return _FRACTION.sub("", v).removesuffix("Z").lower()
+    return v
+
+
+def _same_schedule(existing: dict, ours: dict) -> bool:
+    """Every field we set has the same value in the existing schedule; fields Fabric adds on its own do not count."""
+    return all(_schedule_value(existing.get(k)) == _schedule_value(v) for k, v in ours.items())
 
 
 def list_pipelines_by_name(client: FabricClient, workspace: str) -> dict[str, str]:

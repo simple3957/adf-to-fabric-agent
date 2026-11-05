@@ -45,6 +45,18 @@ the existing nine steps and flows.
   * *Deployment*: which pipelines, include child pipelines, allow unbound connections.
   * *Run and compare*: which pipelines and how long to wait for each run.
   The server checks every choice again (names, convert-only choices, the real-run rules).
+* **"Why, and what to do" under Convert, Validate and Deploy.** After every convert, deploy, run and validation the server writes the
+  diagnosis again from the project's records (no Fabric read). Each step shows, as escaped text in a bordered box, the pipelines whose problem
+  it can fix (Convert: not converted, unbound; Validate: those plus open final checks; Deploy: unbound, deploy failed, not deployed,
+  differs), each with its *Why:* and *What to do:* lines.
+* **Report, "What to fix first".** Runs `diagnose` as a job (`POST /projects/{id}/diagnosis`, `plans:generate`, read-only, audited;
+  with a workspace chosen it also reads what is deployed and the latest runs) and shows the ranked fixes, where each pipeline stops, and
+  the connections still to sort out (`GET /projects/{id}/diagnosis`, `reports:view`, redacted). See [troubleshooting.md](troubleshooting.md).
+* **Report, "Check a pipeline's output".** For a pipeline with no ADF run to compare with: pick the pipeline, give the source data and
+  what the run wrote (abfss locations, CSV or Parquet), and the server compares them as a job (`POST /projects/{id}/output-checks`,
+  `plans:generate`, read-only, audited; `GET` lists the verdicts and row counts, never a location). Only an ADLS Gen2 account or OneLake
+  is read, a OneLake workspace must be in the caller's grants, and demo mode refuses it. OneLake is read as the Fabric account, ADLS as
+  the source's sign-in. Same rules as the CLI's `output-check` ([migration-validation.md](migration-validation.md)).
 
 ## Loading and "what is needed from you"
 
@@ -73,12 +85,10 @@ Checked against the API routes and the CLI on 2026-10-29. Everything the API exp
 
 | Feature | CLI | Why it matters for "everything intact" |
 |---|---|---|
-| Generate, approve, deploy and record a run of Spark notebooks and jobs | `workloads-generate`, `workloads-approve`, `workloads-deploy`, `workloads-record-run` | The UI only assesses them (Review > Compute) |
+| Generate, approve, deploy and record a run of Spark notebooks and jobs | `workloads-generate`, `workloads-approve`, `workloads-deploy`, `workloads-record-run` | The UI assesses them (Review > Compute) and, on Deploy, binds a notebook already in the workspace to its generated notebook (Check / Bind; see [workload-migration.md](workload-migration.md)) |
 | Deploy proposed Spark pools and environments | `compute-deploy` | Review shows the proposals; creating them is CLI |
 | Storage map, OneLake shortcuts | `storage-map`, `create-shortcut` | Needed before Convert can repoint storage |
 | Notebook deploy, Git commit | `deploy-notebook`, `git-commit` | Notebooks are not deployed by Deploy |
-| Diagnosis (fix-first ranking) | `diagnose` | The Report step shows states, not the ranked fixes |
-| Output check (a pipeline with no ADF run to compare with) | `output-check` | Its result does reach the UI: Validate and Report read it through the runtime check |
 | Users and audit log | `auth-user-*`, `audit-verify` (the API has admin routes, no UI) | Administration |
 
 ## Things that go wrong in use, and what the UI does
@@ -115,6 +125,9 @@ Checked against the API routes and the CLI on 2026-10-29. Everything the API exp
 * A deploy made earlier is read back from the server, so a reload does not say "Deploy needs to run again". It counts only for the workspace it went to:
   with another workspace chosen in Connections, Deploy says "Not run yet" and the Report shows those pipelines as converted, "deployed to another Fabric workspace".
 * A run older than the pipeline's latest deploy never counts as proof (`verify.current_record`).
+* **Notebooks the pipelines run** (Deploy): an id box per generated notebook, filled with the id the pipeline runs, and **Check** / **Bind**.
+  Bind needs `provision:approve` and records the person as accepting the notebook; the first check can take half a minute (Fabric reads the
+  definition asynchronously).
 * **Connection ids** (Connect: "existing connection"; Convert: Invoke-pipeline and lakehouse): a pasted id is normalised (spaces, `{braces}`, capitals,
   `catalog.normalize_guid`). An existing connection must be the type the linked service needs. The Convert step checks a connection against the ones the
   account can see: a wrong type is refused, an id it cannot see is saved and shown as unverified.

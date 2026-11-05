@@ -250,6 +250,15 @@ ROUTES = [  # (method, path, body, permissions required)
     ("POST", "/projects/demo-estate/brief/approve", {"fingerprint": "0" * 16}, {G.provision_approve}),
     ("POST", "/projects/demo-estate/brief/import", {"questionnaire": {}}, {G.plans_generate}),
     ("POST", "/projects/demo-estate/brief/notes", {"text": "note"}, {G.plans_generate}),
+    ("GET", "/projects/demo-estate/workloads/notebooks", None, {G.reports_view}),
+    ("POST", "/projects/demo-estate/workloads/notebooks/bind", {"workload": "NB", "item_id": "11111111-2222-3333-4444-555555555555"}, {G.plans_generate}),
+    ("POST", "/projects/demo-estate/workloads/notebooks/bind", {"workload": "NB", "item_id": "11111111-2222-3333-4444-555555555555", "confirm": True},
+     {G.plans_generate, G.provision_approve}),
+    ("GET", "/projects/demo-estate/output-checks", None, {G.reports_view}),
+    ("GET", "/projects/demo-estate/diagnosis", None, {G.reports_view}),
+    ("POST", "/projects/demo-estate/diagnosis", None, {G.plans_generate}),
+    ("POST", "/projects/demo-estate/output-checks", {"pipeline": "PL", "source": "abfss://c@acct.dfs.core.windows.net/x",
+                                                     "target": "abfss://c@acct.dfs.core.windows.net/y"}, {G.plans_generate}),
     ("GET", "/admin/users", None, {G.users_manage}), ("GET", "/admin/audit", None, {G.users_manage}),
 ]
 ROLE_USERS = {"viewer": "vic", "analyst": "ann", "approver": "abe", "operator": "oscar", "admin": "root"}

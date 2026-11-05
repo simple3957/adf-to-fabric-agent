@@ -776,6 +776,28 @@ def _attach_storage_routes(store, project_name: str, opts, workspace: Optional[s
         opts.storage_routes = None
 
 
+def _explain_pipelines(store, project_name: str, workspace: str = "") -> None:
+    """After a stage: write each pipeline's "why and what to do" again (from the project's records, no Fabric read) and name the ones that
+    need attention. Never fails the stage it follows."""
+    from adf2fabric.agent.diagnose import engine
+
+    try:
+        pid = slugify(project_name)
+        d = engine.refresh(store, pid, workspace)
+    except Exception as exc:  # noqa: BLE001
+        click.secho(f"  (the per-pipeline explanations could not be updated: {type(exc).__name__})", fg="yellow")
+        return
+    need = engine.attention(d)
+    if not need:
+        return
+    click.secho(f"  {len(need)} pipeline(s) need attention. Why, and what to do:", fg="yellow")
+    for p in need[:8]:
+        click.echo(f"    {p['pipeline']}: {p['explanation'][0]}")
+        for line in p["explanation"][1:5]:
+            click.echo(f"      {line[:240]}")
+    click.echo(f"  all of it: {store.project_dir(pid) / 'diagnosis' / 'diagnosis.md'}")
+
+
 def _print_manifest(store, m) -> None:
     s = m.summary
     click.echo(f"  workloads: {s.total}   {s.by_classification}")
@@ -783,6 +805,8 @@ def _print_manifest(store, m) -> None:
                f"approved: {s.approved}   verified executing in Fabric: {s.executed_in_fabric}")
     for w in m.workloads:
         click.echo(f"  - {w.source_item}: {w.classification.value}; code {w.code.status.value}; {w.generation.status}; approval {w.approval.status}")
+    for note in m.notes:
+        click.secho(f"  note: {note}", fg="yellow")
     click.echo(f"  manifest: {store.workload_manifest_path(m.project_id)}")
     click.echo(f"  report:   {store.workload_report_path(m.project_id)}")
 
@@ -1112,6 +1136,7 @@ def validate_cmd(project_name: str, stages: tuple, workspace_id, runtime_flag: b
     click.echo(f"MIGRATION VALIDATION: {report.overall}")
     for r in report.overall_reasons:
         click.echo(f"  {r}")
+    _explain_pipelines(store, project_name, workspace_id or "")
     for s in report.stages:
         click.echo(f"  {s.stage.value:10} {s.status.value:8} pass {s.passed}  fail {s.failed}  blocked {s.blocked}  not run {s.not_run}")
     click.echo("  components: " + ", ".join(f"{v} {k}" for k, v in report.inventory.by_status.items()))
@@ -1602,6 +1627,7 @@ def convert(project_name: str, pipelines: tuple[str, ...], resolutions_path: str
     click.echo(f"  report:     {base / 'conversion-report.md'}")
     click.echo(f"  record:     {store.conversion_path(c.project_id)}")
     click.echo(f"  resolutions template: {base / 'resolutions.template.json'}")
+    _explain_pipelines(store, c.project_id)
 
 
 @cli.command(name="reconstruct")
@@ -1727,6 +1753,8 @@ def deploy_cmd(project_name: str, workspace_id: str, pipelines: tuple[str, ...],
             else:
                 deploy_record.note_dry_run(pdir, workspace_id, [i.name for i in items], sum(1 for r in results if r.action in ("failed", "refused")),
                                            allow_unbound=allow_unbound)
+            if apply_:
+                _explain_pipelines(store, project_name, workspace_id)
     except (DeployError, CredentialUnavailable) as exc:
         click.secho(f"Deploy failed: {getattr(exc, 'detail', None) or exc}", fg="red", err=True)
         sys.exit(1)
@@ -2135,6 +2163,7 @@ def verify_cmd(project_name: str, workspace_id: str, pipelines: tuple[str, ...],
     report.write_text(render_report(record), encoding="utf-8")
     click.echo(f"  record: {record_path}")
     click.echo(f"  report: {report}")
+    _explain_pipelines(store, project_name, workspace_id)
     if any(v.verdict in ("failed", "differs", "same_failure") for v in results):
         sys.exit(1)
 
@@ -2372,8 +2401,6 @@ def assist_discard_cmd(project_name: str, pipeline: str, everything: bool) -> No
 @_audited("diagnose")
 def diagnose_cmd(project_name: str, workspace_id: str | None, auth: str, **auth_env: str | None) -> None:
     """Why each pipeline and service is not yet running perfectly in Fabric, and what to do about it. Read-only: nothing is changed."""
-    import json
-
     from adf2fabric.agent.diagnose import engine
 
     config = load_config()
@@ -2394,11 +2421,9 @@ def diagnose_cmd(project_name: str, workspace_id: str | None, auth: str, **auth_
             report = structure_report.collect(store, pid, workspace_id, lambda: FabricClient(token))
         except (DeployError, CredentialUnavailable) as exc:
             click.secho(f"Could not read the workspace: {getattr(exc, 'detail', None) or exc}. Showing conversion and binding only.", fg="yellow", err=True)
-    d = engine.diagnose(store, pid, report)
+    d = engine.diagnose(store, pid, report, workspace=workspace_id or "")
+    engine.save(store, pid, d)
     out = store.project_dir(pid) / "diagnosis"
-    out.mkdir(parents=True, exist_ok=True)
-    (out / "diagnosis.md").write_text(engine.render(d), encoding="utf-8")
-    (out / "diagnosis.json").write_text(json.dumps(d, indent=2, default=str), encoding="utf-8")
     if not d["ready"]:
         click.secho(d["message"], fg="yellow")
         return

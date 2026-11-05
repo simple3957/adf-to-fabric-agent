@@ -14,11 +14,14 @@ import csv
 import hashlib
 import io
 import json
+import re
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable, Iterator, Optional
 from urllib.parse import urlparse
+
+from adf2fabric.project.locks import lock_for, read_text_retry, write_atomic
 
 MATCHES, COUNTS_MATCH, DIFFERS = "matches", "counts_match", "differs"
 
@@ -37,11 +40,26 @@ class Location:
         return f"abfss://{self.filesystem}@{self.account_url.removeprefix('https://')}/{self.path}"
 
 
+ONELAKE_HOST = "onelake.dfs.fabric.microsoft.com"
+_ADLS_HOST = re.compile(r"^[a-z0-9]{3,24}\.dfs\.core\.windows\.net$")
+
+
 def parse_location(url: str) -> Location:
     u = urlparse((url or "").strip())
     if u.scheme != "abfss" or not u.username or not u.hostname:
         raise OutputCheckError(f"'{url}' is not an abfss://<filesystem>@<host>/<path> location.")
     return Location(f"https://{u.hostname}", u.username, u.path.strip("/"))
+
+
+def storage_host(loc: Location) -> str:
+    """``"onelake"`` or ``"adls"`` for the two kinds of store a check may read; anything else (another host, a port, an address) is refused,
+    because the server reads it with its own sign-in."""
+    host = loc.account_url.removeprefix("https://").lower()
+    if host == ONELAKE_HOST:
+        return "onelake"
+    if _ADLS_HOST.match(host):
+        return "adls"
+    raise OutputCheckError(f"'{host}' is not an ADLS Gen2 account (<account>.dfs.core.windows.net) or OneLake ({ONELAKE_HOST}).")
 
 
 @dataclass
@@ -147,9 +165,11 @@ def service_for(loc: Location, credential: Any) -> Any:
 
 
 def check(name: str, pipeline: str, source: Location, target: Location, credential: Any, fmt: Optional[str] = None,
-          reader: Callable[[Any, Location], list[tuple[str, bytes]]] = read_location) -> dict:
+          reader: Optional[Callable[[Any, Location], list[tuple[str, bytes]]]] = None, target_credential: Any = None) -> dict:
+    """``target_credential`` reads the target when it needs another sign-in than the source (the Fabric account for OneLake)."""
+    reader = reader or read_location
     s = summarize(reader(service_for(source, credential), source), fmt)
-    t = summarize(reader(service_for(target, credential), target), fmt)
+    t = summarize(reader(service_for(target, target_credential or credential), target), fmt)
     verdict, detail = judge(s, t)
     return {"name": name, "pipeline": pipeline, "source": str(source), "target": str(target), "verdict": verdict, "detail": detail,
             "source_summary": asdict(s), "target_summary": asdict(t), "checked_at": datetime.now(timezone.utc).isoformat()}
@@ -161,18 +181,19 @@ def record_path(project_dir: Path) -> Path:
 
 def load(project_dir: Path) -> dict[str, dict[str, dict]]:
     try:
-        data = json.loads(record_path(project_dir).read_text(encoding="utf-8"))
+        data = json.loads(read_text_retry(record_path(project_dir)))
     except (FileNotFoundError, ValueError):
         return {}
     return data if isinstance(data, dict) else {}
 
 
 def save(project_dir: Path, result: dict) -> Path:
-    data = load(project_dir)
-    data.setdefault(result["pipeline"], {})[result["name"]] = result
     p = record_path(project_dir)
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")
+    with lock_for(p):  # read, merge and write as one step: two checks finishing together must not drop each other
+        data = load(project_dir)
+        data.setdefault(result["pipeline"], {})[result["name"]] = result
+        write_atomic(p, json.dumps(data, indent=2, sort_keys=True))
     return p
 
 

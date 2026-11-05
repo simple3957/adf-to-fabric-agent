@@ -721,6 +721,127 @@ def create_app(settings: Optional[Settings] = None, live: Optional[Container] = 
         ctx.audit("binding.set", resource="binding", resource_id=done["key"], changed=done["changed"], verified=verified)
         return {**done, "verified": verified}
 
+    @app.get("/projects/{pid}/workloads/notebooks")
+    def workload_notebooks(pid: str, ctx: Ctx = Depends(), _: Principal = need(P.reports_view)):
+        """The generated notebooks the converted pipelines run, the id each pipeline runs, and whether that id is bound to the workload."""
+        from adf2fabric.agent.workloads import lifecycle as L
+
+        slug = ctx.project(pid)
+        if not ctx.c.store.has_workload_manifest(slug):
+            return {"items": [], "note": "No Spark workloads were generated for this project."}
+        out = []
+        for w in ctx.c.store.load_workload_manifest(slug).workloads:
+            if w.artifact.kind != "fabric_notebook":
+                continue
+            used = L.pipeline_item(ctx.c.store, slug, w) or ""
+            bound = (w.artifact.fabric_item_id or "").lower()
+            out.append({"name": w.name, "used_by": list(w.used_by), "generated": w.generation.status == "generated",
+                        "pipeline_item_id": used, "bound_item_id": bound, "approval": w.approval.status,
+                        "state": "bound" if bound and bound == used.lower() and w.approval.status == "approved" else "not bound"})
+        return {"items": out, "note": ""}
+
+    @app.post("/projects/{pid}/workloads/notebooks/bind")
+    def bind_workload_notebook(pid: str, body: S.NotebookBindBody, ctx: Ctx = Depends(), _: Principal = need(P.plans_generate)):
+        """Check (read-only), or with confirm record, that a notebook already in the chosen workspace is this workload's notebook: its code must
+        equal the generated notebook. Confirming records the caller as accepting it (the approval), so it needs provision:approve."""
+        from adf2fabric.agent.deployment.fabric_deploy import DeployError, FabricClient
+        from adf2fabric.agent.workloads import lifecycle as L
+        from adf2fabric.connections.catalog import normalize_guid
+
+        slug = ctx.project(pid)
+        if body.confirm:  # before anything else: a caller who may not accept is refused whatever the request holds
+            ctx.require(P.provision_approve)
+        ws = ctx.session.destination.get("workspace_id")
+        if not ws:
+            raise HTTPException(422, "Choose the Fabric workspace in Connections first.")
+        ctx.grant("workspaces", ws, "workspace")
+        item = normalize_guid(body.item_id)
+        guards.valid_guid(item, "notebook id")
+        if not ctx.c.store.has_workload_manifest(slug):
+            raise HTTPException(409, "No Spark workloads were generated for this project.")
+        client = FabricClient(ctx.c.fabric_token(ctx.session), session=ctx.c.fabric_http)
+        try:
+            if not body.confirm:
+                _w, ok, why = L.check_deployed(ctx.c.store, slug, client, ws, body.workload, item)
+                return {"ok": ok, "detail": why, "bound": False}
+            L.bind_deployed(ctx.c.store, slug, client, ws, body.workload, item, by=ctx.principal.id,
+                            resolutions=ctx.c.store.conversion_dir(slug) / "resolutions.json")
+        except L.LifecycleError as exc:
+            ctx.audit("workload.bind", "refused", resource="project", resource_id=slug, workload=body.workload[:80])
+            raise HTTPException(409, str(exc)) from None
+        except DeployError as exc:
+            raise HTTPException(502, f"Fabric could not be read: {getattr(exc, 'detail', None) or exc}") from None
+        ctx.audit("workload.bind", "ok", resource="project", resource_id=slug, workload=body.workload[:80], item=item, workspace=ws)
+        return {"ok": True, "detail": "Bound. Validate again to see the notebook checks pass.", "bound": True}
+
+    @app.get("/projects/{pid}/output-checks")
+    def output_checks(pid: str, ctx: Ctx = Depends(), _: Principal = need(P.reports_view)):
+        """The recorded output checks: verdicts and counts per pipeline (never a location or a data value)."""
+        from adf2fabric.agent.deployment import output_check as oc
+
+        slug = ctx.project(pid)
+        rows = []
+        for pipeline, checks in sorted(oc.load(ctx.c.store.project_dir(slug)).items()):
+            for name, r in sorted(checks.items()):
+                s, t = r.get("source_summary") or {}, r.get("target_summary") or {}
+                rows.append({"pipeline": pipeline, "name": name, "verdict": r.get("verdict"), "detail": r.get("detail"),
+                             "checked_at": r.get("checked_at"), "source_rows": s.get("rows"), "target_rows": t.get("rows"),
+                             "columns": len(t.get("columns") or [])})
+        return {"items": rows}
+
+    @app.post("/projects/{pid}/output-checks", status_code=202)
+    def output_check_run(pid: str, body: S.OutputCheckBody, request: Request, ctx: Ctx = Depends(), _: Principal = need(P.plans_generate)):
+        """Compare what a pipeline wrote with its source data (read-only), for a pipeline with no earlier run to compare with. The server reads
+        both locations with the session's sign-in, so each must be an ADLS Gen2 account or OneLake, and a OneLake workspace must be granted."""
+        from adf2fabric.agent.deployment import output_check as oc
+
+        slug = ctx.project(pid)
+        if ctx.c.fabric_http is not None:
+            raise HTTPException(409, "Output checks read real storage, so they are not available in demo mode.")
+        if not ctx.c.store.has_conversion(slug):
+            raise HTTPException(409, "Nothing is converted yet.")
+        if body.pipeline.lower() not in {p.source_pipeline.lower() for p in ctx.c.store.load_conversion(slug).pipelines}:
+            raise HTTPException(422, "That pipeline is not converted in this project.")
+        try:
+            src, tgt = oc.parse_location(body.source), oc.parse_location(body.target)
+            kinds = (oc.storage_host(src), oc.storage_host(tgt))
+        except oc.OutputCheckError as exc:
+            raise guards.Rejected(str(exc)) from None
+        for loc, kind in zip((src, tgt), kinds):
+            if kind == "onelake":  # the filesystem is the workspace: the caller must be allowed to read it
+                guards.valid_guid(loc.filesystem, "OneLake workspace id")
+                ctx.grant("workspaces", loc.filesystem, "workspace")
+        name = (body.name or body.pipeline).strip()[:120]
+        key = _idem_key(ctx, request)
+        sig = _idem_sig(slug, "output_check", body)
+        with app.state.idem_lock:
+            replay = _idem_replay(key, sig)
+            if replay is not None:
+                return replay
+            ctx.audit("output_check", "requested", resource="project", resource_id=slug, pipeline=body.pipeline[:80], name=name[:80])
+            session = ctx.session
+
+            def work(log) -> dict[str, Any]:
+                from adf2fabric.connectivity._azure import _StaticTokenCredential
+
+                def cred(kind: str) -> Any:  # OneLake is read as the Fabric account; an ADLS account as the source's sign-in
+                    return _StaticTokenCredential(ctx.c.storage_token(session, "destination" if kind == "onelake" else "source"))
+
+                log("reading the source and the target")
+                try:
+                    result = oc.check(name, body.pipeline, src, tgt, cred(kinds[0]), body.format, target_credential=cred(kinds[1]))
+                except oc.OutputCheckError as exc:
+                    raise StageError(str(exc)) from None
+                except Exception as exc:  # noqa: BLE001  a storage read error is a failed check, not a verdict
+                    raise StageError(f"Could not read the data ({type(exc).__name__}).",
+                                     ["Check both locations, and that the signed-in account can read them."]) from None
+                oc.save(ctx.c.store.project_dir(slug), result)
+                s, t = result["source_summary"], result["target_summary"]
+                return {"message": f"{result['verdict']}: {result['detail']}", "verdict": result["verdict"], "source_rows": s["rows"],
+                        "target_rows": t["rows"], "columns": len(t["columns"])}
+
+            return _idem_remember(key, ctx.c.jobs.submit("output_check", slug, work, org=ctx.principal.org, owner=ctx.principal.id).public(), sig)
+
     @app.put("/projects/{pid}/connections/{ls}/choice")
     def set_choice(pid: str, ls: str, body: S.ChoiceBody, ctx: Ctx = Depends(), _: Principal = need(P.plans_generate)):
         slug = ctx.project(pid)
@@ -920,6 +1041,43 @@ def create_app(settings: Optional[Settings] = None, live: Optional[Container] = 
     # ---- views for the guided UI: redacted on the server ----------------------------------------------------------------
     def _roots() -> tuple[Path, ...]:
         return tuple(path_roots)
+
+    @app.get("/projects/{pid}/diagnosis")
+    def diagnosis_view(pid: str, ctx: Ctx = Depends(), _: Principal = need(P.reports_view)):
+        """The latest diagnosis (`POST` makes one): the first unmet stage per pipeline, the fixes ranked by pipelines unblocked, services."""
+        slug = ctx.project(pid)
+        p = ctx.c.store.project_dir(slug) / "diagnosis" / "diagnosis.json"
+        if not p.exists():
+            return {"available": False}
+        return {"available": True, **views.sanitize(json.loads(p.read_text(encoding="utf-8")), _roots())}
+
+    @app.post("/projects/{pid}/diagnosis", status_code=202)
+    def diagnosis_run(pid: str, ctx: Ctx = Depends(), _: Principal = need(P.plans_generate)):
+        """Diagnose the project (read-only). With a workspace chosen, also read what is deployed there and how the latest runs went."""
+        from adf2fabric.agent.deployment.fabric_deploy import FabricClient
+        from adf2fabric.agent.diagnose import engine
+        from adf2fabric.agent.structure import report as structure_report
+
+        slug = ctx.project(pid)
+        ws = ctx.session.destination.get("workspace_id")
+        if ws:
+            ctx.grant("workspaces", ws, "workspace")
+        session = ctx.session
+
+        def work(log) -> dict[str, Any]:
+            report = None
+            if ws:
+                log("reading the workspace: what is deployed and the latest runs")
+                try:
+                    report = structure_report.collect(ctx.c.store, slug, ws, lambda: FabricClient(ctx.c.fabric_token(session), session=ctx.c.fabric_http), log=log)
+                except Exception as exc:  # noqa: BLE001  a workspace that cannot be read narrows the diagnosis, it does not stop it
+                    log(f"the workspace could not be read ({type(exc).__name__}); conversion and binding only")
+            d = engine.diagnose(ctx.c.store, slug, report, workspace=ws or "")
+            engine.save(ctx.c.store, slug, d)
+            return {"message": d.get("message") or "Diagnosis ready.", "summary": d.get("summary", {}), "workspace_read": d.get("workspace_read", False)}
+
+        ctx.audit("diagnose", "requested", resource="project", resource_id=slug, workspace=ws or "")
+        return ctx.c.jobs.submit("diagnose", slug, work, org=ctx.principal.org, owner=ctx.principal.id).public()
 
     @app.get("/projects/{pid}/inventory")
     def inventory_view(pid: str, ctx: Ctx = Depends(), _: Principal = need(P.reports_view)):

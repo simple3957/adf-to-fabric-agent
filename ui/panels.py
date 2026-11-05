@@ -15,6 +15,7 @@ from components import STATE_LABELS, call, can, empty_state, intent, run_job, sh
 import panels_assist
 from journey import PROBLEM_STATES, READY_STATES
 import panels_bindings
+from panels_ext import explain_for_step
 
 
 # ---- 1. discover ----------------------------------------------------------------------------------------------------------
@@ -424,6 +425,7 @@ def convert(api: ApiClient, pid: str, result: dict | None) -> None:
     if open_ids:
         st.warning(f"{len(open_ids)} item(s) still open ({', '.join(open_ids[:5])}): pipelines that need them won't be ready to run.")
     panels_bindings.section(api, pid, result.get("unbound") or [])
+    explain_for_step(api, pid, "convert")
     if result.get("filled_at_deploy"):
         st.caption(f"{len(result['filled_at_deploy'])} child pipeline id(s) are filled in automatically when you deploy.")
     if result.get("assisted"):
@@ -508,7 +510,41 @@ def deploy(api: ApiClient, pid: str, dest: dict, conversion: dict | None, result
                     else theme.badge("Dry run: nothing was changed in Fabric", "info"), unsafe_allow_html=True)
         st.dataframe([{"pipeline": x["name"], "action": x["action"], "detail": x.get("detail") or "", "children": ", ".join(x.get("children") or [])}
                       for x in result.get("results", [])], hide_index=True)
+    explain_for_step(api, pid, "deploy")
+    _notebooks(api, pid)
     _compare(api, pid)
+
+
+def _notebooks(api: ApiClient, pid: str) -> None:
+    """The generated notebooks the pipelines run. Binding the deployed one tells validation its code is the generated, checked notebook."""
+    items = ((call(api.workload_notebooks, pid) or {}).get("items")) or []
+    if not items:
+        return
+    open_ = [i for i in items if i["state"] != "bound"]
+    with st.expander(f"Notebooks the pipelines run: {len(items) - len(open_)} of {len(items)} bound", expanded=bool(open_)):
+        st.caption("Validation checks that each notebook a pipeline runs is the generated one. The id the pipeline runs is filled in: "
+                   "**Check** reads that notebook from Fabric and compares its code with the generated notebook; **Bind** does the same and records "
+                   "you as accepting it. Nothing in Fabric is changed.")
+        for i in items:
+            name = i["name"]
+            st.markdown(f"**{theme.esc(name)}** · used by {', '.join(i['used_by']) or '-'} · " + ("✅ bound" if i["state"] == "bound" else "not bound"))
+            if not i["generated"]:
+                st.caption("No generated notebook to compare with: generate it first (`workloads-generate`).")
+                continue
+            c1, c2, c3 = st.columns([5, 1, 1])
+            nid = c1.text_input(f"Fabric notebook id for {name}", value=i["bound_item_id"] or i["pipeline_item_id"], key=f"nb-id-{pid}-{name}",
+                                placeholder="Fabric notebook id (GUID)", label_visibility="collapsed",
+                                help="Fabric: open the notebook; the id is the last GUID in the address bar.")
+            if c2.button("Check", key=f"nb-check-{pid}-{name}", disabled=not nid.strip() or not can("plans:generate")):
+                if (r := call(api.bind_workload_notebook, pid, name, nid.strip())) is not None:
+                    (st.success if r["ok"] else st.warning)(r["detail"])
+            if c3.button("Bind", type="primary", key=f"nb-bind-{pid}-{name}", disabled=not nid.strip() or not can("provision:approve"),
+                         help=None if can("provision:approve") else "Binding accepts the notebook: your role needs provision:approve."):
+                if (r := call(api.bind_workload_notebook, pid, name, nid.strip(), True)) is not None and r.get("bound"):
+                    st.session_state["nb-bound-note"] = f"{name}: {r['detail']}"
+                    st.rerun()
+        if note := st.session_state.pop("nb-bound-note", None):
+            st.success(note)
 
 
 def _when(stamp: str | None) -> str:

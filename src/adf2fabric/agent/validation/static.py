@@ -747,7 +747,13 @@ def compute(inp: Inputs, c: Collector) -> None:
                   remediation="Generate and deploy the notebook / Spark job (workloads-generate, workloads-approve, workloads-deploy), then convert with --resolutions.")
             continue
         entry = next((w for w in (wm.workloads if wm else []) if w.artifact.fabric_item_id and w.artifact.fabric_item_id.lower() == str(item).lower()), None)
-        if entry is None:
+        generated = next((w for w in (wm.workloads if wm else []) if f"{pname}/{a.name}".lower() in {u.lower() for u in w.used_by}
+                          and w.artifact.kind != "none"), None)
+        if entry is None and generated is not None:  # converted for Fabric, but the item the pipeline runs was never tied to it
+            c.add("compute.fabric_compute", K.compute, R.BLOCKED, f"'{a.name}' runs a Fabric item ({item}) that is not bound to its generated notebook "
+                  f"'{generated.name}', so nothing says the deployed code is the converted code.", component=comp,
+                  remediation="On the Deploy step, Check and Bind the notebook (its id is filled in); or deploy it with `workloads-deploy --apply`.")
+        elif entry is None:
             c.add("compute.fabric_compute", K.compute, R.BLOCKED, f"'{a.name}' runs a Fabric item ({item}) that has no migration record, so its content was never validated.", component=comp,
                   remediation="Run `workloads-assess` / `workloads-generate` so the item's source, rewrites and static checks are on record.")
         elif entry.generation.status != "generated":

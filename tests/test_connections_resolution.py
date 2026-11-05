@@ -629,6 +629,29 @@ def test_apply_reuses_an_existing_connection_and_auto_matches_only_exact_endpoin
     assert card.choice is not None and card.choice.values["connection_id"] == GUID1 and card.state == ConnectionState.connection_configured
 
 
+def test_applying_again_reuses_the_connection_it_made_and_never_creates_a_second(project):
+    s, pid = svc(project)
+    s.set_choice(pid, sql_choice(display_name="Sql prod"))
+    s.put_secret("sess", pid, "LS_SQL", "password", PW)
+    fab = FakeFabric(existing=[conn(GUID1, "SQL PROD", "SQL", "srv1.database.windows.net;db1")])  # as Fabric lists it after the first apply
+    for dry_run in (True, False):
+        item = next(i for i in s.apply(pid, "sess", fab, dry_run=dry_run).items if i.linked_service == "LS_SQL")
+        assert (item.action, item.connection_ids, item.bound) == ("reused", [GUID1], True) and "nothing was created" in item.detail
+    assert fab.created == []
+    res = json.loads((s.store.conversion_dir(pid) / "resolutions.json").read_text())
+    assert [e["value"] for e in res if e["key"] == "LS_SQL"] == [GUID1]
+
+
+def test_a_connection_name_taken_by_another_address_is_refused_not_duplicated(project):
+    s, pid = svc(project)
+    s.set_choice(pid, sql_choice(display_name="Sql prod"))
+    s.put_secret("sess", pid, "LS_SQL", "password", PW)
+    fab = FakeFabric(existing=[conn(GUID1, "Sql prod", "SQL", "other.database.windows.net;db9")])
+    item = next(i for i in s.apply(pid, "sess", fab).items if i.linked_service == "LS_SQL")
+    assert item.action == "failed" and "already exists with another type or address" in item.detail and fab.created == []
+    assert "another display name" in item.actions[0]
+
+
 def test_apply_will_not_create_what_needs_a_gateway_or_a_ui_signin(project):
     s, pid = svc(project)
     fab = FakeFabric(gateways=[{"id": "g", "type": "OnPremises", "displayName": "gw"}])

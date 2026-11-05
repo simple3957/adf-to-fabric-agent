@@ -25,7 +25,7 @@ from adf2fabric.connections.fabric import FabricApiError, FabricService
 from adf2fabric.connections.keyvault import KeyVaultError, normalize_vault_url
 from adf2fabric.connections.models import ConnectionState, TestReport
 from adf2fabric.connections.redaction import redact
-from adf2fabric.connections.resolution import ConnectionChoice, LinkedServiceCard, build_cards
+from adf2fabric.connections.resolution import ConnectionChoice, LinkedServiceCard, build_cards, existing_key, match_key
 from adf2fabric.connections.secret_vault import SecretVault
 from adf2fabric.connections.testing import ConnectorTester
 from adf2fabric.project.discovery import AdfSemanticDiscovery
@@ -279,6 +279,24 @@ class ConnectionService:
             return item
         variants = [endpoint] + [{**endpoint, **v} for v in choice.variants]
         name = _name(choice.display_name or card.name)
+        names = [name if i == 0 else f"{name}-{i + 1}" for i in range(len(variants))]
+        # a connection this name already has (an earlier apply, or made by hand) is reused when it is the same type and
+        # address, and refused when it is not; it is never created a second time
+        found = [_named(existing, n) for n in names]
+        clash = [n for n, c, ep in zip(names, found, variants) if c is not None and not _same_target(spec, c, ep)]
+        if clash:
+            item.action, item.state = "failed", ConnectionState.validation_failed
+            item.detail = (f"A Fabric connection named {', '.join(repr(n) for n in clash)} already exists with another type or "
+                           "address, so no second one was created.")
+            item.actions = ["Choose it as the existing connection if it is the right one, or give this linked service another "
+                            "display name."]
+            return item
+        if all(c is not None for c in found):
+            item.action, item.connection_ids = "reused", [str(c.get("id")) for c in found]
+            item.bound, item.state = len(found) == 1, ConnectionState.connection_configured
+            item.detail = (f"Reused {', '.join(repr(n) for n in names)}: a connection with this name, type and address already "
+                           "exists in Fabric (an earlier run, or made by hand), so nothing was created.")
+            return item
         if dry_run:
             item.action, item.state = "would_create", ConnectionState.connection_configured
             item.detail = f"Would create {len(variants)} connection(s) of type {spec.fabric_type} using '{method.label}'."
@@ -290,8 +308,10 @@ class ConnectionService:
             return item
         ids: list[str] = []
         for i, ep in enumerate(variants):
-            body = catalog.build_connection_body(spec, method, ep, choice.values, secrets,
-                                                 name if i == 0 else f"{name}-{i + 1}", choice.privacy_level)
+            if found[i] is not None:
+                ids.append(str(found[i].get("id")))
+                continue
+            body = catalog.build_connection_body(spec, method, ep, choice.values, secrets, names[i], choice.privacy_level)
             try:
                 made = fabric.create_connection(body)
             except FabricApiError as exc:
@@ -301,6 +321,7 @@ class ConnectionService:
                 item.connection_ids = ids
                 return item
             ids.append(str(made.get("id")))
+            existing[ids[-1].lower()] = {"displayName": names[i], **(made or {})}  # a later linked service in this run sees it
         item.action, item.connection_ids, item.fabric_validated = "created", ids, True
         item.bound = len(ids) == 1
         item.state = ConnectionState.connection_tested
@@ -422,6 +443,15 @@ def fabric_status(signed_in: bool, connections: Optional[list], error: str = "")
 
 def _name(raw: str) -> str:
     return (_NAME_BAD.sub("_", raw).strip() or "adf-connection")[:100]
+
+
+def _named(existing: dict, name: str) -> Optional[dict]:
+    return next((c for c in existing.values() if str(c.get("displayName") or "").lower() == name.lower()), None)
+
+
+def _same_target(spec: catalog.ConnectorSpec, conn: dict, endpoint: dict[str, str]) -> bool:
+    kind, key = existing_key(conn)
+    return kind == spec.fabric_type and bool(key) and key == match_key(spec, endpoint)
 
 
 def _hint(message: str, method: catalog.AuthMethod) -> list[str]:

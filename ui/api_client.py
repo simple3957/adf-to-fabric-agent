@@ -206,6 +206,26 @@ class ApiClient:
     def bindings(self, pid: str) -> dict:
         return self._get(f"/projects/{pid}/bindings")
 
+    def workload_notebooks(self, pid: str) -> dict:
+        return self._get(f"/projects/{pid}/workloads/notebooks")
+
+    def bind_workload_notebook(self, pid: str, workload: str, item_id: str, confirm: bool = False) -> dict:
+        return self._post(f"/projects/{pid}/workloads/notebooks/bind", {"workload": workload, "item_id": item_id, "confirm": confirm})
+
+    def diagnosis(self, pid: str) -> dict:
+        return self._get(f"/projects/{pid}/diagnosis")
+
+    def run_diagnosis(self, pid: str) -> dict:
+        return self._post(f"/projects/{pid}/diagnosis")
+
+    def output_checks(self, pid: str) -> dict:
+        return self._get(f"/projects/{pid}/output-checks")
+
+    def run_output_check(self, pid: str, pipeline: str, source: str, target: str, name: str = "", fmt: Optional[str] = None,
+                         idempotency_key: Optional[str] = None) -> dict:
+        return self._post(f"/projects/{pid}/output-checks", {"pipeline": pipeline, "name": name, "source": source, "target": target,
+                                                             "format": fmt}, idempotency_key=idempotency_key)
+
     def set_binding(self, pid: str, key: str, value: str) -> dict:
         return self._put(f"/projects/{pid}/bindings", {"key": key, "value": value})
 
