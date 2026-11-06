@@ -2103,14 +2103,16 @@ def git_commit_cmd(project_name: str, workspace_id: str, extra_items: tuple[str,
 @click.option("--project", "project_name", required=True, help="Project name (`convert` and `deploy` must have run).")
 @click.option("--workspace-id", "workspace_id", required=True, help="Fabric workspace id (GUID) that holds the pipelines.")
 @click.option("--pipeline", "pipelines", multiple=True, help="Verify only this pipeline. Repeatable. Default: every converted one.")
-@click.option("--no-adf", "no_adf", is_flag=True, help="Do not read the ADF factory's run history (compare with earlier Fabric runs only).")
+@click.option("--no-adf", "no_adf", is_flag=True,
+              help="Compare these pipelines with earlier Fabric runs only, not ADF. Remembered for them (the UI's re-read follows it) until --use-adf.")
+@click.option("--use-adf", "use_adf", is_flag=True, help="Undo --no-adf for these pipelines: compare with the last successful ADF run again.")
 @click.option("--timeout", "timeout_seconds", type=int, default=1800, show_default=True, help="Seconds to wait for each run.")
 @azure_auth_options()
 @click.option("--apply", "apply_", is_flag=True,
               help="Start a new Fabric run of each pipeline, then compare. Without it nothing is started: the latest finished "
                    "Fabric run of each pipeline is compared instead (read-only).")
 @_audited("verify")
-def verify_cmd(project_name: str, workspace_id: str, pipelines: tuple[str, ...], no_adf: bool, timeout_seconds: int,
+def verify_cmd(project_name: str, workspace_id: str, pipelines: tuple[str, ...], no_adf: bool, use_adf: bool, timeout_seconds: int,
                apply_: bool, auth: str, **auth_env: str | None) -> None:
     """Prove converted pipelines: compare each Fabric run with the last successful ADF run (or the previous Fabric run)."""
     from adf2fabric.agent.deployment.fabric_deploy import FABRIC_SCOPE, DeployError, FabricClient
@@ -2133,6 +2135,9 @@ def verify_cmd(project_name: str, workspace_id: str, pipelines: tuple[str, ...],
     previous = load_record(record_path)
     adf = None
     factory = Factory.from_source(store.load(pid).repository.repository_url if store.load(pid).repository else None)
+    if no_adf and use_adf:
+        click.secho("Verify failed: --no-adf and --use-adf contradict each other.", fg="red", err=True)
+        sys.exit(2)
     if factory and not no_adf:
         try:  # the factory's own subscription picks the signed-in account that owns it; the CLI default is not changed
             adf = AdfRuns(factory, AzureCliProvider().token(subscription=factory.subscription))
@@ -2144,7 +2149,8 @@ def verify_cmd(project_name: str, workspace_id: str, pipelines: tuple[str, ...],
         click.echo(f"RUN AND COMPARE ({'new runs' if apply_ else 'latest finished runs; nothing started, add --apply to run'})"
                    f"  workspace: {workspace_id}")
         results = verify_all(lambda: FabricClient(fabric_token), workspace_id, names, start=apply_, adf=adf,
-                             previous=previous, called=called, timeout_seconds=timeout_seconds)
+                             previous=previous, called=called, timeout_seconds=timeout_seconds,
+                             baseline="fabric" if no_adf else "adf" if use_adf else "")
         for n, v in zip(names, results):
             colour = {"matches": "green", "partial": "yellow", "differs": "yellow", "no_baseline": None, "failed": "red",
                       "not_run": None}[v.verdict]

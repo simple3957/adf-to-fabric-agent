@@ -16,6 +16,7 @@ import panels_assist
 from journey import PROBLEM_STATES, READY_STATES
 import panels_bindings
 from panels_ext import explain_for_step
+import panels_results
 
 
 # ---- 1. discover ----------------------------------------------------------------------------------------------------------
@@ -511,6 +512,7 @@ def deploy(api: ApiClient, pid: str, dest: dict, conversion: dict | None, result
         st.dataframe([{"pipeline": x["name"], "action": x["action"], "detail": x.get("detail") or "", "children": ", ".join(x.get("children") or [])}
                       for x in result.get("results", [])], hide_index=True)
     explain_for_step(api, pid, "deploy")
+    panels_results.results(api, pid, key="dep-res")
     _notebooks(api, pid)
     _compare(api, pid)
 

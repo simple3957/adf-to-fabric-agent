@@ -218,6 +218,9 @@ class ApiClient:
     def run_diagnosis(self, pid: str) -> dict:
         return self._post(f"/projects/{pid}/diagnosis")
 
+    def run_results(self, pid: str) -> dict:
+        return self._get(f"/projects/{pid}/run-results")
+
     def output_checks(self, pid: str) -> dict:
         return self._get(f"/projects/{pid}/output-checks")
 

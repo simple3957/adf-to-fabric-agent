@@ -256,6 +256,7 @@ ROUTES = [  # (method, path, body, permissions required)
      {G.plans_generate, G.provision_approve}),
     ("GET", "/projects/demo-estate/output-checks", None, {G.reports_view}),
     ("GET", "/projects/demo-estate/diagnosis", None, {G.reports_view}),
+    ("GET", "/projects/demo-estate/run-results", None, {G.reports_view}),
     ("POST", "/projects/demo-estate/diagnosis", None, {G.plans_generate}),
     ("POST", "/projects/demo-estate/output-checks", {"pipeline": "PL", "source": "abfss://c@acct.dfs.core.windows.net/x",
                                                      "target": "abfss://c@acct.dfs.core.windows.net/y"}, {G.plans_generate}),

@@ -348,6 +348,9 @@ def report(api: ApiClient, pid: str, rep: dict | None, dest: dict) -> None:
         empty_state("No report yet", "Run validation to get an honest account of what is and is not confirmed.")
         return
     {"success": st.success, "error": st.error, "warning": st.warning}.get(rep["tone"], st.info)(rep["headline"])
+    import panels_results  # here, not at the top: panels_results imports this module
+
+    panels_results.results(api, pid, key="rep-res")
     panels_confidence.confidence_panel(api, pid)
     st.markdown("##### Where each pipeline stands")
     with st.expander("What each state means"):

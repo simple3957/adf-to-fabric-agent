@@ -45,6 +45,21 @@ Verified live on 2026-10-16: `PL_SQL_Data_Validation` completed with its three L
 
 Endpoints and the create/update/list/long-running-operation flow follow the Fabric REST API. Verify against the official docs before changing them.
 
+## Results after deploy
+
+`agent/deployment/run_report.py` builds the results the UI shows on Deploy and Report ("Migration results"; [ui.md](ui.md)): per
+pipeline the deploy (to the chosen workspace only), the latest Fabric run (a run older than the latest deploy is not counted), the
+baseline it was compared with, the verdict, the checks matched, and the rows and files the Copy activities read and wrote, Fabric beside
+the baseline, down to each activity. It reads the deploy record, `verification/verification.json` and the output checks; it calls
+nothing. The baseline's figures come from `baseline_activities`, which `verify` records with each comparison.
+
+**Choosing the baseline.** `verify` compares with the pipeline's last successful ADF run, or with an earlier Fabric run when there is
+none. When the ADF run is known not to be comparable (it ran on other data, or hit the Lookup row limit), `verify --pipeline NAME
+--no-adf` compares that pipeline with earlier Fabric runs and records the choice (`baseline_choice: fabric`). Every later `verify`,
+including the UI's *Compare latest runs*, keeps it, so reading the runs again never swaps it for a newer ADF run; the results show
+"(chosen)". `verify --pipeline NAME --use-adf` undoes it. Reading the same Fabric run again with nothing new to compare reports the
+comparison already recorded for it.
+
 ## Committing to the workspace's Git branch (`git-commit`)
 
 `adf2fabric git-commit --project <name> --workspace-id <guid> [--item <name>] [--all-changes] [--comment ...] [--apply]` reads the

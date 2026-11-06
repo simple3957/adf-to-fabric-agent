@@ -789,6 +789,19 @@ def create_app(settings: Optional[Settings] = None, live: Optional[Container] = 
                              "columns": len(t.get("columns") or [])})
         return {"items": rows}
 
+    @app.get("/projects/{pid}/run-results")
+    def run_results(pid: str, ctx: Ctx = Depends(), _: Principal = need(P.reports_view)):
+        """After deploy: each pipeline's deploy, latest Fabric run, what it was compared with, and the rows and files it moved beside the
+        baseline's, activity by activity. Read from the project's records only (no Fabric call); no run, job or item id is returned."""
+        from adf2fabric.agent.deployment import run_report
+
+        slug = ctx.project(pid)
+        if not ctx.c.store.has_conversion(slug):
+            return {"available": False}
+        names = [p.source_pipeline for p in ctx.c.store.load_conversion(slug).pipelines]
+        ws = str(ctx.session.destination.get("workspace_id") or "")
+        return {"available": True, **views.sanitize(run_report.build(ctx.c.store.project_dir(slug), names, ws))}
+
     @app.post("/projects/{pid}/output-checks", status_code=202)
     def output_check_run(pid: str, body: S.OutputCheckBody, request: Request, ctx: Ctx = Depends(), _: Principal = need(P.plans_generate)):
         """Compare what a pipeline wrote with its source data (read-only), for a pipeline with no earlier run to compare with. The server reads

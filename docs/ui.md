@@ -49,6 +49,14 @@ the existing nine steps and flows.
   diagnosis again from the project's records (no Fabric read). Each step shows, as escaped text in a bordered box, the pipelines whose problem
   it can fix (Convert: not converted, unbound; Validate: those plus open final checks; Deploy: unbound, deploy failed, not deployed,
   differs), each with its *Why:* and *What to do:* lines.
+* **Deploy and Report, "Migration results".** After deploy, from the project's records only (`GET /projects/{id}/run-results`,
+  `reports:view`, redacted, no run, job or item id; built by `agent/deployment/run_report.py`): figures for deployed, ran, matching
+  the baseline, checks matched and rows copied; ADF beside Fabric for rows read and copied and files read and written, over the pipelines
+  whose baseline figures are kept; a table per pipeline (deploy time, Fabric run, what it was compared with, result, steps OK, checks,
+  differences, rows copied on both sides, output checks) with a CSV download; and, for a chosen pipeline, each activity with its status,
+  runs, rows and files as *baseline / Fabric* and the result of the comparison. A deploy to another workspace and a run older than the
+  latest deploy do not count. `verify` keeps the baseline run's own figures (`baseline_activities`) since 2026-11-06; a run compared
+  before that keeps its result and checks, and its baseline columns are empty.
 * **Report, "What to fix first".** Runs `diagnose` as a job (`POST /projects/{id}/diagnosis`, `plans:generate`, read-only, audited;
   with a workspace chosen it also reads what is deployed and the latest runs) and shows the ranked fixes, where each pipeline stops, and
   the connections still to sort out (`GET /projects/{id}/diagnosis`, `reports:view`, redacted). See [troubleshooting.md](troubleshooting.md).

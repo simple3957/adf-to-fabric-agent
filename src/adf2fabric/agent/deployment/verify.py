@@ -270,6 +270,8 @@ class Verification:
     fabric_only: list[str] = field(default_factory=list)
     differences: list[dict] = field(default_factory=list)
     activities: dict[str, dict] = field(default_factory=dict)
+    baseline_activities: Optional[dict[str, dict]] = None  # the baseline run's own figures, for the results report (None: not compared)
+    baseline_choice: str = ""  # "fabric": a person chose to compare this pipeline with earlier Fabric runs only (kept until they undo it)
     detail: str = ""
 
     def to_dict(self) -> dict:
@@ -326,6 +328,7 @@ def verify_pipeline(client: FabricClient, workspace: str, pipeline: str, *, star
 def _judge(v: Verification, base: dict[str, dict], how: str = "") -> Verification:
     """The verdict from comparing ``v.activities`` with ``base``; ``how`` says what was compared (for a batch)."""
     v.differences, v.matched = compare(v.activities, base)
+    v.baseline_activities = base
     v.baseline_only = sorted(set(base) - set(v.activities), key=str.lower)
     v.fabric_only = sorted(set(v.activities) - set(base), key=str.lower)
     notes = [how] if how else []
@@ -348,8 +351,12 @@ def _judge(v: Verification, base: dict[str, dict], how: str = "") -> Verificatio
 def verify_all(make_client: Callable[[], FabricClient], workspace: str, names: list[str], *, start: bool,
                adf: Optional[AdfRuns] = None, previous: Optional[dict[str, dict]] = None,
                called: Optional[dict[str, list[str]]] = None, timeout_seconds: int = 1800, workers: int = 10,
-               log: Callable[[str], None] = lambda _m: None) -> list[Verification]:
+               log: Callable[[str], None] = lambda _m: None, baseline: str = "") -> list[Verification]:
     """Verify ``names`` and return the results in the same order.
+
+    ``baseline`` is a person's choice for these pipelines: "fabric" compares them with earlier Fabric runs only and is remembered in the
+    record, "adf" undoes that, "" follows what the record says. So reading the runs again never swaps a chosen Fabric baseline for a
+    newer ADF run that is known not to be comparable (the Lookup row limit, for one).
 
     The workspace's pipeline list and the factory's run history are read once for all of them. Reading is done in
     parallel (each worker has its own HTTP sessions); starting runs (``start``) stays one at a time so a verification
@@ -370,9 +377,18 @@ def verify_all(make_client: Callable[[], FabricClient], workspace: str, names: l
 
     def one(name: str) -> Verification:
         log(f"comparing {name}")
-        return verify_pipeline(make_client(), workspace, name, start=start, adf=adf.clone() if adf else None,
-                               previous=previous.get(name), timeout_seconds=timeout_seconds,
-                               called_by=called.get(name), ids=ids)
+        choice = baseline or (previous.get(name) or {}).get("baseline_choice") or ""
+        choice = "" if choice == "adf" else choice
+        v = verify_pipeline(make_client(), workspace, name, start=start, adf=adf.clone() if adf and choice != "fabric" else None,
+                            previous=previous.get(name), timeout_seconds=timeout_seconds,
+                            called_by=called.get(name), ids=ids)
+        v.baseline_choice = choice
+        prev = previous.get(name) or {}
+        if v.verdict == "no_baseline" and v.job_id and prev.get("job_id") == v.job_id and prev.get("baseline"):
+            # the same run read again, with nothing new to compare it with: its recorded comparison still stands, so report that
+            v = Verification(**{k: prev[k] for k in Verification.__dataclass_fields__ if k in prev})
+            v.baseline_choice = choice
+        return v
 
     if start or workers <= 1 or len(names) <= 1:
         # A pipeline another one calls is judged by the runs its caller starts, so callers go first; results keep the order asked for.
@@ -634,7 +650,8 @@ def _save_record_locked(path: Path, results: list[Verification]) -> dict[str, di
             continue
         old = record.get(v.pipeline)
         if old and old.get("job_id") == v.job_id and old.get("baseline") and not v.baseline:
-            continue  # the same run, already compared with a real baseline: a weaker re-read does not replace it
+            old["baseline_choice"] = v.baseline_choice  # the same run, already compared with a real baseline: a weaker re-read does not
+            continue                                     # replace it; only the person's baseline choice is kept
         entry = v.to_dict()
         good = entry if v.fabric_status == "Completed" else last_completed(old)
         entry["last_completed"] = ({k: good.get(k) for k in ("job_id", "ran_at", "fabric_status", "activities")}
