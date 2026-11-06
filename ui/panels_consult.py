@@ -85,8 +85,12 @@ def _simple(api: ApiClient, pid: str, brief: dict) -> None:
     st.markdown(theme.badge("Settings saved" if saved else "Nothing saved yet", "success" if saved else "neutral"), unsafe_allow_html=True)
     st.caption("Each setting below is already chosen from what discovery found, with the reason. Change what you need and save. "
                "If you save nothing, the run uses its normal defaults.")
-    if brief.get("workspace_changed"):
-        st.warning("The Fabric workspace chosen now is not the one these settings were saved for. Save them again to use them with this workspace.")
+    if brief.get("workspace_changed") or brief.get("deploy_refused"):
+        st.warning("The Fabric workspace chosen now is not the one these settings were saved for, so deploying and real runs there are refused. "
+                   "Click **Save settings** below: they are then saved for the workspace chosen now.")
+    elif not brief.get("workspace_chosen"):
+        st.info("No Fabric workspace is chosen in this session, so saving keeps the workspace the settings were saved for before. To use another "
+                "workspace, choose it on **Connections** (and Test connection) first, then Save settings here.")
     for x in brief["conflicts"]:
         st.error(x)
     with st.form("consult-simple", border=False):

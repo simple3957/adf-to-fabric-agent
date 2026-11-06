@@ -271,6 +271,7 @@ class Verification:
     differences: list[dict] = field(default_factory=list)
     activities: dict[str, dict] = field(default_factory=dict)
     baseline_activities: Optional[dict[str, dict]] = None  # the baseline run's own figures, for the results report (None: not compared)
+    workspace: str = ""  # the Fabric workspace the run was in: a run in one workspace says nothing about another
     baseline_choice: str = ""  # "fabric": a person chose to compare this pipeline with earlier Fabric runs only (kept until they undo it)
     detail: str = ""
 
@@ -383,11 +384,12 @@ def verify_all(make_client: Callable[[], FabricClient], workspace: str, names: l
                             previous=previous.get(name), timeout_seconds=timeout_seconds,
                             called_by=called.get(name), ids=ids)
         v.baseline_choice = choice
+        v.workspace = workspace.lower()
         prev = previous.get(name) or {}
         if v.verdict == "no_baseline" and v.job_id and prev.get("job_id") == v.job_id and prev.get("baseline"):
             # the same run read again, with nothing new to compare it with: its recorded comparison still stands, so report that
             v = Verification(**{k: prev[k] for k in Verification.__dataclass_fields__ if k in prev})
-            v.baseline_choice = choice
+            v.baseline_choice, v.workspace = choice, workspace.lower()
         return v
 
     if start or workers <= 1 or len(names) <= 1:
@@ -582,9 +584,18 @@ def load_record(path: Path) -> dict[str, dict]:
     return data if isinstance(data, dict) else {}
 
 
-def current_record(project_dir: Path) -> dict[str, dict]:
+def run_workspace(entry: dict, deployed_row: Optional[dict]) -> str:
+    """The workspace a recorded run was in. A run recorded before runs carried it ran where the pipeline was deployed."""
+    return str(entry.get("workspace") or (deployed_row or {}).get("workspace") or "").lower()
+
+
+OTHER_WORKSPACE = "Its recorded run was in another Fabric workspace, so it says nothing about the one chosen now. Deploy and run it here."
+
+
+def current_record(project_dir: Path, workspace: str = "") -> dict[str, dict]:
     """The run-and-compare record as evidence about what is deployed NOW: a run that ended before the pipeline's latest deploy ran the previous
-    definition, so it is reported as ``not_run`` (with why) instead of vouching for the new one."""
+    definition, so it is reported as ``not_run`` (with why) instead of vouching for the new one. With ``workspace``, a run in another workspace
+    is ``not_run`` too (``other_workspace``): its success is not this workspace's."""
     from adf2fabric.agent.deployment import record as deploy_record
 
     record = load_record(record_path(project_dir))
@@ -593,6 +604,10 @@ def current_record(project_dir: Path) -> dict[str, dict]:
     for name, entry in record.items():
         row = deployed.get(name.lower())
         ran = _parse(entry.get("ran_at"))
+        where = run_workspace(entry, row)
+        if workspace and where and where != workspace.lower():
+            out[name] = {"pipeline": name, "verdict": "not_run", "detail": OTHER_WORKSPACE, "other_workspace": True, "workspace": where}
+            continue
         if row and row.get("ok") and ran is not None and ran.timestamp() < float(row.get("at") or 0):
             entry = {**entry, "verdict": "not_run", "detail": "Its last recorded run is older than the latest deploy, so it does not vouch for what is deployed now. Run it again.",
                      "stale_run": True}

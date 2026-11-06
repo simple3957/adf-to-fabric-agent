@@ -97,6 +97,40 @@ def deploy(store: ProjectStore, project_id: str, client: FabricClient, workspace
     return results
 
 
+def create_notebook(store: ProjectStore, project_id: str, client: FabricClient, workspace: str, ident: str, *, by: str, apply: bool,
+                    resolutions: Optional[Path] = None, now: Optional[datetime] = None) -> tuple[WorkloadEntry, str, Optional[str]]:
+    """Put this workload's generated notebook into ``workspace`` and take its id: (workload, what happened, item id).
+
+    Dry run unless ``apply``: it says whether Fabric would create the notebook or replace the content of the one with its name. With ``apply`` the
+    person who asks accepts the generated notebook (the approval, with their name), the id is recorded on the workload and, in ``resolutions``,
+    for the next Convert. A notebook whose content was replaced keeps no earlier run as evidence: that run ran other code."""
+    m = store.load_workload_manifest(project_id)
+    w = _find(m, ident)
+    if w.artifact.kind != "fabric_notebook" or w.generation.status != "generated":
+        raise LifecycleError(f"'{w.name}' has no generated notebook to create: generate it first (workloads-generate).")
+    if apply and not by.strip():
+        raise LifecycleError("Say who is creating the notebook.")
+    path = store.project_dir(project_id) / str(w.artifact.file)
+    if not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest() != w.artifact.sha256:
+        raise LifecycleError("The generated notebook changed since it was generated; run workloads-generate again.")
+    r = notebook_deploy.deploy_notebook(client, workspace, w.artifact.display_name or w.name, notebook_deploy.build_definition(path), apply=apply)
+    if not apply:
+        return w, ("Fabric would create a new notebook" if r.action == "create" else
+                   "A notebook with this name is already in the workspace: its content would be replaced by the generated notebook"), r.item_id
+    item_id = str(r.item_id).lower()
+    at = now or datetime.now(timezone.utc)
+    w.artifact.fabric_item_id = item_id
+    w.approval = Approval(status="approved", by=by.strip(), at=at, note=f"Accepted by creating the generated notebook in Fabric as {item_id} ({r.action})"[:300])
+    if r.action == "update" or (w.execution.fabric_item_id or "").lower() != item_id:
+        w.execution = ExecutionEvidence()
+    m.summary = summarize(m)
+    m.updated_at = at
+    store.save_workload_manifest(project_id, m)
+    if resolutions is not None:
+        notebook_deploy.bind_resolutions(resolutions, w.name, item_id, workspace)
+    return w, ("Created in Fabric" if r.action == "create" else "Content replaced in Fabric") + ": its id is saved. Convert again to use it.", item_id
+
+
 def _bound_item(store: ProjectStore, project_id: str, pipeline: str, activity: str) -> Optional[str]:
     """The item id the converted pipeline's activity is bound to (notebookId / sparkJobDefinitionId)."""
     path = store.conversion_dir(project_id) / "pipelines" / f"{pipeline}.DataPipeline" / "pipeline-content.json"
@@ -150,12 +184,12 @@ def record_run(store: ProjectStore, project_id: str, ident: str, run: Any, *, no
     return w
 
 
-def recorded_run(store: ProjectStore, project_id: str, w: WorkloadEntry, item_id: str) -> Optional[ExecutionEvidence]:
+def recorded_run(store: ProjectStore, project_id: str, w: WorkloadEntry, item_id: str, workspace: str = "") -> Optional[ExecutionEvidence]:
     """The run evidence already in the run-and-compare record: the latest completed Fabric run of a pipeline that runs this workload, newer
     than that pipeline's latest deploy, whose activity is bound to ``item_id`` and succeeded. None when there is no such run."""
     from adf2fabric.agent.deployment import verify
 
-    record = {k.lower(): v for k, v in verify.current_record(store.project_dir(project_id)).items()}
+    record = {k.lower(): v for k, v in verify.current_record(store.project_dir(project_id), workspace).items()}
     for u in w.used_by:
         pipeline, _, activity = u.partition("/")
         entry = record.get(pipeline.lower()) or {}
@@ -219,7 +253,7 @@ def bind_deployed(store: ProjectStore, project_id: str, client: FabricClient, wo
     at = now or datetime.now(timezone.utc)
     w.artifact.fabric_item_id = item_id
     w.approval = Approval(status="approved", by=by.strip(), at=at, note=f"Accepted by binding the deployed notebook {item_id}: {why}"[:300])
-    if w.execution.status == "not_run" and (ran := recorded_run(store, project_id, w, item_id)) is not None:
+    if w.execution.status == "not_run" and (ran := recorded_run(store, project_id, w, item_id, workspace)) is not None:
         w.execution = ran
     m.summary = summarize(m)
     m.updated_at = at

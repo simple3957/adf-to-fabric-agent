@@ -60,6 +60,11 @@ class NotebookBindBody(_In):
     confirm: bool = False  # False: only check; True: record the binding (the caller is recorded as accepting the generated notebook)
 
 
+class NotebookCreateBody(_In):
+    workload: str = Field(max_length=200)
+    confirm: bool = False  # False: say what Fabric would do; True: create it (the caller is recorded as accepting the generated notebook)
+
+
 class OutputCheckBody(_In):
     pipeline: str = Field(max_length=200)
     name: str = Field(default="", max_length=120)  # the same name replaces an earlier check

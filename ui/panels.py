@@ -11,7 +11,7 @@ import streamlit as st
 import theme
 from api_client import ApiClient
 import options
-from components import STATE_LABELS, call, can, empty_state, intent, run_job, short_source, state_badge, status_badge, test_report, typed_confirm
+from components import STATE_LABELS, call, can, empty_state, intent, read, run_job, short_source, state_badge, status_badge, test_report, typed_confirm
 import panels_assist
 from journey import PROBLEM_STATES, READY_STATES
 import panels_bindings
@@ -466,6 +466,9 @@ def deploy(api: ApiClient, pid: str, dest: dict, conversion: dict | None, result
                                help="A caller is refused unless every child is selected or already in the workspace.")
         unbound = st.checkbox("Allow unbound connections (not recommended)", value=False, key="dep-unbound",
                               help="Deploys pipelines whose connections aren't set yet. They won't run until fixed.")
+    refused = (read(api, "brief", pid) or {}).get("deploy_refused") or ""
+    if refused:  # the server refuses the real deploy for this workspace: say so before the dry run, not after the last click
+        st.error("The real deploy to this workspace will be refused. " + refused)
     a, b = st.columns(2)
     stage = None
     a.markdown(theme.badge("Dry run: changes nothing", "info"), unsafe_allow_html=True)
@@ -493,8 +496,9 @@ def deploy(api: ApiClient, pid: str, dest: dict, conversion: dict | None, result
     b.markdown(theme.badge("Deploy: changes Fabric", "warning"), unsafe_allow_html=True)
     b.caption("Creates or updates the dry-run pipelines in Fabric. Unlocks after a clean dry run of the same pipelines and options.")
     asking = st.session_state.get("dep-ask") == (pid, sig)  # a second click confirms: the question names exactly what will be deployed
-    if not asking and b.button("Deploy", disabled=not (dry_done and can("migration:execute")), key="dep-go",
-                               help=None if can("migration:execute") else "Your role cannot deploy (needs migration:execute)."):
+    if not asking and b.button("Deploy", disabled=not (dry_done and can("migration:execute")) or bool(refused), key="dep-go",
+                               help="Refused for this workspace: see the message above." if refused else
+                               None if can("migration:execute") else "Your role cannot deploy (needs migration:execute)."):
         st.session_state["dep-ask"] = (pid, sig)
         st.rerun()
     if asking:

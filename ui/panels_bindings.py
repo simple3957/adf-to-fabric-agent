@@ -11,6 +11,7 @@ import streamlit as st
 
 from api_client import ApiClient
 from components import call, can, read
+from panels_ext import _plain
 
 CHOOSE = "- choose a Fabric item -"
 
@@ -28,8 +29,12 @@ def section(api: ApiClient, pid: str, unbound: list[str]) -> None:
         return
     if note := st.session_state.pop("bind-note", None):
         st.warning(note)
+    if done := st.session_state.pop("bind-done", None):
+        st.success(done)
+    generated = {n["name"] for n in (read(api, "workload_notebooks", pid) or {}).get("items") or [] if n.get("generated")}
     st.markdown(f"#### Things you need to set · {len(open_)} open" + (f" · {len(items) - len(open_)} set" if len(items) > len(open_) else ""))
-    st.caption("These ids only exist once the item is in Fabric. Pick it from the list (read live from your workspace) or paste its id, then Convert again.")
+    st.caption("These ids only exist once the item is in Fabric. Pick it from the list (read live from your workspace), paste its id, or create a "
+               "generated notebook in Fabric from here; then Convert again.")
     if got.get("fabric_note") and open_:
         st.info(got["fabric_note"])
     for i in items:
@@ -58,5 +63,37 @@ def section(api: ApiClient, pid: str, unbound: list[str]) -> None:
                         if done.get("verified") is False:  # kept across the rerun below
                             st.session_state["bind-note"] = f"'{i['name']}': that connection id is not among the connections this account can see. It is saved; the deploy fails if it does not exist."
                         st.rerun()
+            if i["kind"] == "notebook" and i["name"] in generated:
+                _create(api, pid, i["name"])
     if elsewhere:
         st.info("Set on the **Connect** step (a linked service's connection; one you skipped there stays open): " + ", ".join(f"`{u}`" for u in elsewhere))
+
+
+def _create(api: ApiClient, pid: str, name: str) -> None:
+    """Create the generated notebook in the chosen workspace and save its id. The first click asks Fabric what would happen; the second, after
+    the person reads it, creates it and records them as accepting the generated notebook."""
+    key = f"nb-create-{pid}-{name}"
+    ask = st.session_state.get(key)
+    allowed = can("migration:execute")
+    if not ask:
+        if st.button("Create it in Fabric from the generated notebook", key=f"{key}-go", disabled=not allowed,
+                     help="Puts the generated notebook into the chosen workspace and saves its id here. You are asked to confirm first."
+                     if allowed else "Creating items in Fabric needs migration:execute."):
+            if (r := call(api.create_workload_notebook, pid, name)) is not None:
+                st.session_state[key] = (r["detail"], bool(r.get("exists")))
+                st.rerun()
+        return
+    detail, exists = ask
+    verb = "Replace the content of" if exists else "Create"
+    st.warning(f"{_plain(detail)}. {verb} '{_plain(name)}' in the chosen workspace and use its id? You are recorded as accepting the generated notebook.")
+    yes, no = st.columns(2)
+    if yes.button("Yes, replace it" if exists else "Yes, create", type="primary", key=f"{key}-yes", disabled=not (allowed and can("provision:approve")),
+                  help=None if can("provision:approve") else "Accepting a generated notebook needs provision:approve."):
+        st.session_state.pop(key, None)
+        if (r := call(api.create_workload_notebook, pid, name, True)) is not None:
+            st.session_state["bind-done"] = f"{name}: {r['detail']}"
+        st.rerun()
+    if no.button("Cancel", key=f"{key}-no"):
+        st.session_state.pop(key, None)
+        st.rerun()
+

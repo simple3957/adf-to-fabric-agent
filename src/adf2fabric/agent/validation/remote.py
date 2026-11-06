@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from adf2fabric.agent.deployment import output_check
+from adf2fabric.agent.deployment import record as deploy_record
 from adf2fabric.agent.deployment import verify as verify_mod
 from adf2fabric.agent.provisioning.transport import FabricGateway, ProvisionError
 from adf2fabric.agent.validation import views
@@ -210,13 +211,14 @@ def _deployed(inp: Inputs, c: Collector, fab: FabricGateway, workspace: str, pip
 # =====================================================================================================================
 
 
-def runtime(inp: Inputs, c: Collector, project_dir: Path, requested: bool) -> None:
+def runtime(inp: Inputs, c: Collector, project_dir: Path, requested: bool, workspace: Optional[str] = None) -> None:
     if not requested:
         c.add("runtime.execution", K.runtime, R.NOT_RUN, "Runtime validation was not requested. Static, API and deployment results say nothing about whether the pipelines run correctly.",
               stage=Stage.runtime, remediation="Run the pipelines (`adf2fabric run --apply`), compare them with ADF (`adf2fabric verify`), then validate with --runtime.")
         return
     rec = verify_mod.load_record(verify_mod.record_path(project_dir))
     by = {k.lower(): v for k, v in rec.items()}
+    deployed = {k.lower(): v for k, v in (deploy_record.load(project_dir).get("pipelines") or {}).items() if isinstance(v, dict)}
     if not rec:
         c.add("runtime.execution", K.runtime, R.NOT_RUN, "There is no run-and-compare record: no pipeline has been run and compared.", stage=Stage.runtime,
               remediation="Run `adf2fabric verify --apply` (it runs the pipelines and uses capacity) against an authorised workspace.")
@@ -227,6 +229,11 @@ def runtime(inp: Inputs, c: Collector, project_dir: Path, requested: bool) -> No
         if e is None:
             c.add("runtime.execution", K.runtime, R.NOT_RUN, f"Pipeline '{tp.name}' has never been run and compared.", stage=Stage.runtime, component=comp,
                   remediation=f"Run `adf2fabric verify --pipeline {tp.name} --apply`.")
+            continue
+        where = verify_mod.run_workspace(e, deployed.get(tp.name.lower()))
+        if workspace and where and where != workspace.lower():
+            c.add("runtime.execution", K.runtime, R.NOT_RUN, f"The recorded run of '{tp.name}' was in another Fabric workspace, so it says nothing about the one validated now.",
+                  stage=Stage.runtime, component=comp, remediation="Deploy the pipeline to this workspace and run it here (Report: Run in Fabric and compare).")
             continue
         art = project_dir / "conversion" / tp.path
         stale = False

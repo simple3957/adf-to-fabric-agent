@@ -316,8 +316,12 @@ def _run_stage(c: Container, session: Session, pid: str, stage: str, log: Log, o
                                    allow_unbound=bool(options.get("allow_unbound")))
     from adf2fabric.project import bindings as bindings_mod
 
+    from adf2fabric.agent.consultation import brief_record
+
     note = bindings_mod.workspace_mismatch(c.store, pid, workspace)  # bound for one workspace, deployed to another: warn, do not refuse (the person may know)
+    refused = brief_record.workspace_mismatch(c.store, pid, workspace) if stage == "deploy_dry_run" else None
+    warnings = ([f"The real deploy to this workspace will be refused: {refused}"] if refused else []) + ([note] if note else [])
     return {"applied": stage == "deploy_apply",
             "results": [{"name": r.name, "action": r.action, "detail": r.detail, "children": r.children}
                         for r in results],
-            "warnings": [note] if note else []}
+            "warnings": warnings}

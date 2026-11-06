@@ -737,8 +737,15 @@ def test_deploy_and_real_runs_are_refused_for_another_workspace_than_the_brief_w
         assert r.status_code == 409 and "different Fabric workspace" in r.json()["error"] and other not in r.json()["error"]
     r = stage(world, "oscar", "verify", {"workspace_id": other, "run": True, "confirm": True, "pipelines": [name]})
     assert r.status_code == 409 and "different Fabric workspace" in r.json()["error"]
-    # a dry run reads only: it is never refused for this
-    assert stage(world, "oscar", "deploy_dry_run", {"workspace_id": other, "allow_unbound": True}).status_code in (202, 403, 409)
+    # a dry run reads only: it is never refused for this, but it says the real deploy will be
+    dry = stage(world, "oscar", "deploy_dry_run", {"workspace_id": other, "allow_unbound": True})
+    assert dry.status_code in (202, 403, 409)
+    if dry.status_code == 202:
+        job = world.wait("oscar", dry.json())
+        if job["state"] == "succeeded":
+            assert any("will be refused" in w for w in job["result"]["warnings"])
+    world.call("oscar", "PUT", "/session/destination", json_body={"provider": "azure_cli", "workspace_id": other})
+    assert "different Fabric workspace" in world.call("oscar", "GET", B).json()["deploy_refused"]  # the Deploy step shows it up front
     v = world.call("oscar", "GET", B).json()
     assert v["state"] == "approved" and not PATH_RE.search(json.dumps(v)) and DEMO_WS not in json.dumps(v)
 

@@ -13,9 +13,19 @@ authorised by the server (see [security.md](security.md)).
 | 4 | Connect | connection cards, tests, apply | every linked service has a verdict |
 | 5 | Plan target | `/provisioning` plan, approve, dry run, apply, verify | a current plan exists; apply only after approval and a dry run |
 | 6 | Convert | `convert` stage | pipelines generated |
-| 7 | Validate | `validate` stage | a validation result exists |
-| 8 | Deploy | `deploy_dry_run`, `deploy_apply` | dry run done; apply confirmed |
+| 7 | Deploy | `deploy_dry_run`, `deploy_apply` | dry run done; apply confirmed |
+| 8 | Validate | `validate` stage | a validation result exists |
 | 9 | Report | `GET /report` | always readable; "verified" only if the backend says so |
+
+When the approved brief was agreed for another workspace than the one chosen, the server refuses a real deploy and real runs there; the
+Deploy step says so before the dry run (`GET /brief` carries `deploy_refused`), keeps **Deploy** disabled with that reason, and the dry run's
+warnings repeat it. Fix: Consult, 'Use the workspace chosen now' and save again; or choose the workspace the brief was agreed for.
+
+Deploy comes before Validate (since 2026-11-06), so validation checks what is deployed (its API and deployment stages read the workspace).
+On Convert, "Things you need to set" lists each notebook a pipeline runs; for a notebook the tool generated, **Create it in Fabric from the
+generated notebook** first asks Fabric what would happen (a new notebook, or the content of the one with that name replaced), then **Yes,
+create** (or **Yes, replace it** when one with that name exists) puts it in the chosen workspace, records the person as accepting it and saves its id; Convert again uses the id
+(`POST /projects/{id}/workloads/notebooks/create`, `migration:execute`, and `provision:approve` to confirm; audited as `workload.create`).
 
 Sign-in (token mode) and project access come first: no project data is requested before `/me` succeeds. A step stays locked until the
 steps before it are confirmed and complete.

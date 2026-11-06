@@ -91,7 +91,7 @@ def pipeline_states(store: ProjectStore, pid: str, workspace: str = "") -> dict[
     conv = _try(lambda: store.load_conversion(pid)) if store.has_conversion(pid) else None
     conv_by = {p.source_pipeline.lower(): p for p in conv.pipelines} if conv else {}
     rec = deploy_record.load(store.project_dir(pid)).get("pipelines", {})
-    verified = verify_mod.current_record(store.project_dir(pid))
+    verified = verify_mod.current_record(store.project_dir(pid), workspace)
     out: dict[str, dict[str, Any]] = {}
     for p in d.pipelines:
         confs = [x.confidence.value for x in _walk(p.activities)]
@@ -187,11 +187,12 @@ def _dependencies(store: ProjectStore, pid: str) -> dict[str, Any]:
             "access_checks": "run" if inv.checks_requested else "not run: nothing external was contacted"}
 
 
-def confidence(store: ProjectStore, pid: str, roots: tuple[Path, ...] = ()) -> dict[str, Any]:
-    """The confidence range per area and per item, with the criteria behind it and the questions that would narrow it. Read-only; names, states and counts."""
+def confidence(store: ProjectStore, pid: str, roots: tuple[Path, ...] = (), workspace: str = "") -> dict[str, Any]:
+    """The confidence range per area and per item, with the criteria behind it and the questions that would narrow it. Read-only; names, states and counts.
+    With ``workspace`` only runs in that workspace count."""
     from adf2fabric.agent.confidence import engine
 
-    return sanitize(engine.assess(store, pid), roots)
+    return sanitize(engine.assess(store, pid, workspace=workspace), roots)
 
 
 def waves(store: ProjectStore, pid: str, roots: tuple[Path, ...] = (), workspace: str = "") -> dict[str, Any]:

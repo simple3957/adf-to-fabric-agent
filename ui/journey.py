@@ -25,8 +25,8 @@ STEPS: tuple[Step, ...] = (
     Step("connect", "Connect", "🔌", "Decide how each linked service becomes a Fabric connection, and test it."),
     Step("plan", "Plan target", "🏗️", "See what the target needs, what exists, and approve what may be created."),
     Step("convert", "Convert", "🔁", "Turn the ADF pipelines into Fabric pipelines."),
-    Step("validate", "Validate", "🧪", "Re-read the source and the generated files and compare them, independently of the converter."),
     Step("deploy", "Deploy", "🚀", "Publish the converted pipelines to the Fabric workspace."),
+    Step("validate", "Validate", "🧪", "Re-read the source and the generated files and compare them with what is deployed, independently of the converter."),
     Step("report", "Report", "📋", "The honest account: what is confirmed, what is not, and what is left."),
 )
 KEYS = tuple(s.key for s in STEPS)

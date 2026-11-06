@@ -126,3 +126,21 @@ def test_choosing_fabric_is_remembered_in_the_record(tmp_path, monkeypatch):
     assert not used_adf and v.baseline_choice == "fabric"
     rec = verify.save_record(tmp_path / "verification" / "verification.json", [v])
     assert rec["PL_Rig"]["baseline_choice"] == "fabric"
+
+
+def test_a_run_in_another_workspace_is_not_counted_and_an_old_run_belongs_where_the_pipeline_was_deployed(tmp_path):
+    other = "99999999-0000-0000-0000-000000000000"
+    runs = {"PL_A": {"verdict": "matches", "fabric_status": "Completed", "ran_at": "2026-11-04T06:18:06Z", "baseline": "adf", "matched": 6,
+                     "differences": [], "activities": {"Copy1": _copy(10)}}}  # recorded before runs carried their workspace
+    project = _project(tmp_path, runs, {"PL_A": {"ok": True, "at": 1793772000, "workspace": WS}})
+    assert verify.current_record(project, WS)["PL_A"]["verdict"] == "matches"  # it ran where it was deployed
+    seen = verify.current_record(project, other)["PL_A"]
+    assert seen["verdict"] == "not_run" and seen["other_workspace"] and "another Fabric workspace" in seen["detail"]
+    d = run_report.build(project, ["PL_A"], other)
+    assert (d["summary"]["deployed"], d["summary"]["ran"], d["summary"]["matches"]) == (0, 0, 0)
+
+
+def test_verify_records_the_workspace_each_run_was_in(monkeypatch):
+    v, _ = _reread(monkeypatch, {})
+    assert v.workspace == WS.lower()
+

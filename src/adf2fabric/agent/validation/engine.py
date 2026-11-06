@@ -140,7 +140,7 @@ def validate(store: ProjectStore, pid: str, *, stages: set[str], fab: Optional[F
                         "This says what the comparison used. It is not evidence that the edit keeps the pipeline's behaviour: only a run compared with a baseline is."],
               remediation="Make the same change in the ADF source (and re-run discovery) so the repository and Fabric agree.")
     remote.api_and_deployment(inp, c, fab, workspace, "api" in stages, "deployment" in stages)
-    remote.runtime(inp, c, store.project_dir(pid), "runtime" in stages)
+    remote.runtime(inp, c, store.project_dir(pid), "runtime" in stages, workspace)
     checks = c.checks
     comps = sorted(c.components.values(), key=lambda x: x.id)
     by_status: dict[str, int] = {}

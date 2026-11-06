@@ -58,6 +58,15 @@ Code: `src/adf2fabric/agent/workloads/` (`source.py` retrieval, `notebook_format
 Everything else stays as written and is listed as an open issue (mounts, DBFS, volumes, `%run`, `dbutils.notebook.run`,
 credentials in code, `getSecretWithLS`, ...).
 
+## Creating the notebook in Fabric from the UI
+
+On the Convert step, "Things you need to set" offers **Create it in Fabric from the generated notebook** for each notebook a pipeline runs
+that the tool generated (`lifecycle.create_notebook`). Without confirmation it only says whether Fabric would create a notebook or replace
+the content of the one with that name. Confirmed, it creates (or replaces) it in the chosen workspace from the generated file (refused if
+the file changed since generation), records the person as accepting the generated notebook, records the id on the workload and as
+`ItemToId notebook:<name>` in `conversion/resolutions.json`; the next Convert points the pipeline's notebook activity at it. A notebook
+whose content was replaced keeps no earlier run as evidence. Same Fabric calls as `workloads-deploy --apply`.
+
 ## Binding a notebook that is already deployed
 
 A notebook that reached the workspace another way (`deploy-notebook`, by hand, an earlier `workloads-deploy`) can be recorded as the

@@ -774,6 +774,38 @@ def create_app(settings: Optional[Settings] = None, live: Optional[Container] = 
         ctx.audit("workload.bind", "ok", resource="project", resource_id=slug, workload=body.workload[:80], item=item, workspace=ws)
         return {"ok": True, "detail": "Bound. Validate again to see the notebook checks pass.", "bound": True}
 
+    @app.post("/projects/{pid}/workloads/notebooks/create")
+    def create_workload_notebook(pid: str, body: S.NotebookCreateBody, ctx: Ctx = Depends(), _: Principal = need(P.migration_execute)):
+        """Put a workload's generated notebook into the chosen workspace and save its id for the next Convert. Without confirm only says
+        what Fabric would do (create, or replace the content of the notebook with that name). Confirming records the caller as accepting the
+        generated notebook, so it also needs provision:approve."""
+        from adf2fabric.agent.deployment.fabric_deploy import DeployError, FabricClient
+        from adf2fabric.agent.workloads import lifecycle as L
+
+        slug = ctx.project(pid)
+        if body.confirm:
+            ctx.require(P.provision_approve)
+        ws = ctx.session.destination.get("workspace_id")
+        if not ws:
+            raise HTTPException(422, "Choose the Fabric workspace in Connections first.")
+        ctx.grant("workspaces", ws, "workspace")
+        if not ctx.c.store.has_workload_manifest(slug):
+            raise HTTPException(409, "No Spark workloads were generated for this project.")
+        client = FabricClient(ctx.c.fabric_token(ctx.session), session=ctx.c.fabric_http)
+        try:
+            _w, detail, item = L.create_notebook(ctx.c.store, slug, client, ws, body.workload, by=ctx.principal.id, apply=body.confirm,
+                                                 resolutions=ctx.c.store.conversion_dir(slug) / "resolutions.json")
+        except L.LifecycleError as exc:
+            ctx.audit("workload.create", "refused", resource="project", resource_id=slug, workload=body.workload[:80])
+            raise HTTPException(409, str(exc)) from None
+        except DeployError as exc:
+            if body.confirm:
+                ctx.audit("workload.create", "failed", resource="project", resource_id=slug, workload=body.workload[:80], workspace=ws)
+            raise HTTPException(502, f"Fabric refused or could not be reached: {getattr(exc, 'detail', None) or exc}") from None
+        if body.confirm:
+            ctx.audit("workload.create", "ok", resource="project", resource_id=slug, workload=body.workload[:80], item=item, workspace=ws)
+        return {"done": body.confirm, "detail": detail, "exists": bool(item) and not body.confirm}
+
     @app.get("/projects/{pid}/output-checks")
     def output_checks(pid: str, ctx: Ctx = Depends(), _: Principal = need(P.reports_view)):
         """The recorded output checks: verdicts and counts per pipeline (never a location or a data value)."""
@@ -1109,7 +1141,7 @@ def create_app(settings: Optional[Settings] = None, live: Optional[Container] = 
     @app.get("/projects/{pid}/confidence")
     def confidence_view(pid: str, ctx: Ctx = Depends(), _: Principal = need(P.reports_view)):
         slug = ctx.project(pid)
-        return views.confidence(ctx.c.store, slug, _roots())
+        return views.confidence(ctx.c.store, slug, _roots(), str(ctx.session.destination.get("workspace_id") or ""))
 
     @app.get("/projects/{pid}/compatibility")
     def compatibility_view(pid: str, ctx: Ctx = Depends(), _: Principal = need(P.reports_view)):
@@ -1134,7 +1166,7 @@ def create_app(settings: Optional[Settings] = None, live: Optional[Container] = 
     from adf2fabric.project.provisioning import ProvisioningApproval, ProvisioningPlan, ProvisioningRun, TargetSpec
 
     # ---- journey: which steps a person confirmed, kept per project so a page reload does not reset the walk-through ------------
-    JOURNEY_STEPS = ("discover", "review", "consult", "connect", "plan", "convert", "validate", "deploy", "report")
+    JOURNEY_STEPS = ("discover", "review", "consult", "connect", "plan", "convert", "deploy", "validate", "report")
 
     def _journey_file(ctx: Ctx, slug: str) -> Path:
         return ctx.c.store.project_dir(slug) / "journey.json"
@@ -1233,7 +1265,10 @@ def create_app(settings: Optional[Settings] = None, live: Optional[Container] = 
         return slug
 
     def _brief_view(ctx: Ctx, slug: str) -> dict:
-        return brief_record.view(ctx.c.store, slug, ctx.session.destination)
+        # the same check a real deploy and a real run make: say it before the person gets there, not only when they click
+        refused = brief_record.workspace_mismatch(ctx.c.store, slug, ctx.session.destination.get("workspace_id"))
+        return {**brief_record.view(ctx.c.store, slug, ctx.session.destination), "deploy_refused": refused or "",
+                "workspace_chosen": bool(ctx.session.destination.get("workspace_id"))}
 
     @app.get("/projects/{pid}/brief")
     def brief_view(pid: str, ctx: Ctx = Depends(), _: Principal = need(P.reports_view)):

@@ -189,7 +189,7 @@ def diagnose(store: Any, pid: str, report: Optional[dict] = None, workspace: str
     else:
         from adf2fabric.agent.deployment.verify import current_record
 
-        verification = current_record(store.project_dir(pid))
+        verification = current_record(store.project_dir(pid), workspace)
     rows = ({r["pipeline"].lower(): r for r in report.get("pipelines", [])} if report is not None
             else _local_rows(store.project_dir(pid), verification, workspace))
     checks = _open_checks(store.project_dir(pid))

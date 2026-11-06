@@ -618,6 +618,17 @@ def test_every_pipeline_run_and_matching_gives_migration_verified_only_when_ever
     assert r2.overall == "NOT_VALIDATED" and not r2.full_success_claimed
 
 
+def test_a_run_in_another_workspace_says_nothing_about_the_one_validated(project):
+    store, pid = project
+    record(store, pid, "PL_Main", workspace="99999999-0000-0000-0000-000000000000")
+    r = engine.validate(store, pid, stages={"static", "runtime"}, workspace=WS, now=NOW)
+    c = check(r, "runtime.execution", "pipeline:PL_Main")[0]
+    assert c.result is R.NOT_RUN and "another Fabric workspace" in c.summary
+    record(store, pid, "PL_Main", workspace=WS.upper())  # the same workspace, however it is written
+    r = engine.validate(store, pid, stages={"static", "runtime"}, workspace=WS, now=NOW)
+    assert results(r, "runtime.execution", "pipeline:PL_Main") == {R.PASS}
+
+
 def test_a_differing_or_failed_run_fails(project):
     store, pid = project
     record(store, pid, "PL_Main", verdict="differs", differences=[{"activity": "Copy_Customer", "what": "rowsCopied", "fabric": 1, "baseline": 2}])

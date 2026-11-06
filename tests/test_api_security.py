@@ -254,6 +254,8 @@ ROUTES = [  # (method, path, body, permissions required)
     ("POST", "/projects/demo-estate/workloads/notebooks/bind", {"workload": "NB", "item_id": "11111111-2222-3333-4444-555555555555"}, {G.plans_generate}),
     ("POST", "/projects/demo-estate/workloads/notebooks/bind", {"workload": "NB", "item_id": "11111111-2222-3333-4444-555555555555", "confirm": True},
      {G.plans_generate, G.provision_approve}),
+    ("POST", "/projects/demo-estate/workloads/notebooks/create", {"workload": "NB"}, {G.migration_execute}),
+    ("POST", "/projects/demo-estate/workloads/notebooks/create", {"workload": "NB", "confirm": True}, {G.migration_execute, G.provision_approve}),
     ("GET", "/projects/demo-estate/output-checks", None, {G.reports_view}),
     ("GET", "/projects/demo-estate/diagnosis", None, {G.reports_view}),
     ("GET", "/projects/demo-estate/run-results", None, {G.reports_view}),

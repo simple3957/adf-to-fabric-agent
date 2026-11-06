@@ -815,3 +815,54 @@ def test_binding_takes_no_run_when_the_step_failed_or_runs_another_item(generate
     _ran(store, pid, w, "99999999-0000-0000-0000-000000000000")
     assert lifecycle.recorded_run(store, pid, w, NB_ID) is None
 
+
+
+class CreatingFabric:
+    """A workspace that lists notebooks by name and creates or updates them (nothing else)."""
+
+    def __init__(self, names: dict | None = None):
+        self.names = dict(names or {})  # display name -> id
+        self.writes = []
+
+    def _call(self, method, url, body=None):
+        class R:
+            def __init__(s, status, data):
+                s.status_code, s._d, s.headers, s.text, s.content = status, data, {}, "", b"x"
+
+            def json(s):
+                return s._d
+
+        if method == "GET" and "/notebooks" in url:
+            return R(200, {"value": [{"id": i, "displayName": n} for n, i in self.names.items()]})
+        self.writes.append((method, url.rsplit("/", 1)[-1]))
+        if method == "POST" and url.endswith("/notebooks"):
+            self.names[body["displayName"]] = NB_ID
+            return R(201, {"id": NB_ID})
+        return R(200, {})
+
+    def _finish(self, resp, what):
+        return resp.json()
+
+
+def test_creating_a_notebook_dry_run_first_then_records_the_id_the_person_and_the_resolution(generated, tmp_path):
+    store, pid = generated
+    fab, res = CreatingFabric(), tmp_path / "resolutions.json"
+    w, detail, item = lifecycle.create_notebook(store, pid, fab, WS, "nb_clean", by="", apply=False)
+    assert "would create a new notebook" in detail and item is None and fab.writes == []  # a dry run writes nothing
+    with pytest.raises(lifecycle.LifecycleError):
+        lifecycle.create_notebook(store, pid, fab, WS, "nb_clean", by=" ", apply=True)
+    w, detail, item = lifecycle.create_notebook(store, pid, fab, WS, "nb_clean", by="Pat", apply=True, resolutions=res, now=NOW)
+    assert item == NB_ID and "Convert again" in detail and fab.writes == [("POST", "notebooks")]
+    w = _w(store.load_workload_manifest(pid), "nb_clean")
+    assert w.artifact.fabric_item_id == NB_ID and w.approval.by == "Pat" and "creating the generated notebook" in w.approval.note
+    assert any(r["value"] == NB_ID for r in json.loads(res.read_text(encoding="utf-8")))
+
+
+def test_creating_over_a_notebook_of_the_same_name_says_so_and_drops_its_old_run(generated):
+    store, pid = generated
+    w = _w(store.load_workload_manifest(pid), "nb_clean")
+    fab = CreatingFabric({w.artifact.display_name or w.name: NB_ID})
+    assert "already in the workspace" in lifecycle.create_notebook(store, pid, fab, WS, "nb_clean", by="", apply=False)[1]
+    lifecycle.create_notebook(store, pid, fab, WS, "nb_clean", by="Pat", apply=True, now=NOW)
+    w = _w(store.load_workload_manifest(pid), "nb_clean")
+    assert w.execution.status == "not_run" and fab.writes == [("POST", "updateDefinition")]

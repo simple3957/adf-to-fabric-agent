@@ -86,7 +86,7 @@ def test_concurrent_brief_notes_and_journey_confirmations_lose_nothing(world):
         list(ex.map(lambda i: brief_record.add_note(store, "demo-estate", f"note {i}", "ann"), range(20)))
     assert len(brief_record.load(store, "demo-estate")["notes"]) == before + 20
 
-    steps = ["discover", "review", "consult", "connect", "plan", "convert", "validate", "deploy", "report"]
+    steps = ["discover", "review", "consult", "connect", "plan", "convert", "deploy", "validate", "report"]
     gate = threading.Barrier(len(steps))
 
     def confirm(step):

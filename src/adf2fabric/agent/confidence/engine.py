@@ -411,14 +411,14 @@ def _questions(items: list[Item], base: tuple[float, float, float], limit: int =
     return sorted(out, key=lambda q: (-q["raises_low_by"], -q["raises_high_by"], q["criterion"]))[:limit]
 
 
-def assess(store: Any, pid: str, now: Optional[datetime] = None) -> dict[str, Any]:
+def assess(store: Any, pid: str, now: Optional[datetime] = None, workspace: str = "") -> dict[str, Any]:
     now = now or datetime.now(timezone.utc)
     if not store.has_conversion(pid):
         return {"project": pid, "ready": False, "message": "Nothing is converted yet: run `convert` first. Confidence is judged on what conversion produced.", "note": EVIDENCE_NOTE}
     conv = store.load_conversion(pid)
     project = store.load(pid)
     stale = bool(project.repository and conv.source_commit_sha != project.repository.commit_sha)
-    verification = current_record(store.project_dir(pid))
+    verification = current_record(store.project_dir(pid), workspace)
     errors: dict[str, list[Any]] = {}
     for f in conv.preflight:
         if f.severity == "error":

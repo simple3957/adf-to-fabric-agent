@@ -75,7 +75,7 @@ def _activities(entry: dict) -> list[dict]:
 def build(project_dir: Path, pipelines: list[str], workspace: str = "") -> dict[str, Any]:
     """The results of every converted pipeline in ``pipelines`` (source names). ``workspace``, when given, counts only deploys to it."""
     deployed = {k.lower(): v for k, v in (deploy_record.load(project_dir).get("pipelines") or {}).items() if isinstance(v, dict)}
-    runs = {k.lower(): v for k, v in verify.current_record(project_dir).items() if isinstance(v, dict)}
+    runs = {k.lower(): v for k, v in verify.current_record(project_dir, workspace).items() if isinstance(v, dict)}
     checks = {k.lower(): v for k, v in output_check.load(project_dir).items() if isinstance(v, dict)}
     rows = []
     for name in sorted(pipelines, key=str.lower):

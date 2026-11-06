@@ -218,6 +218,9 @@ class ApiClient:
     def run_diagnosis(self, pid: str) -> dict:
         return self._post(f"/projects/{pid}/diagnosis")
 
+    def create_workload_notebook(self, pid: str, workload: str, confirm: bool = False) -> dict:
+        return self._post(f"/projects/{pid}/workloads/notebooks/create", {"workload": workload, "confirm": confirm})
+
     def run_results(self, pid: str) -> dict:
         return self._get(f"/projects/{pid}/run-results")
 

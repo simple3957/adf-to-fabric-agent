@@ -25,7 +25,11 @@ A Fabric run that **fails** is compared with ADF's own failed run around the sam
 own check, not the conversion. It is never proof (the runtime stage is `BLOCKED`, not passed): nothing completed, so nothing was compared. A failure ADF does
 not reproduce, or one with a different message, stays `failed`, and the detail says so.
 
-Runtime never starts a run. It reads the run-and-compare record written by `adf2fabric verify` / `run --apply`, and refuses a run
+Runtime never starts a run. It reads the run-and-compare record written by `adf2fabric verify` / `run --apply`. Each recorded run carries the
+workspace it ran in (`workspace`; a run recorded before that belongs to the workspace its pipeline was deployed to): validating another
+workspace reports that pipeline's runtime check as NOT_RUN, "was in another Fabric workspace", never as passed. The results, the pipeline
+states, the diagnosis, confidence and the notebook run taken at Bind follow the same rule (`verify.current_record(project_dir, workspace)`).
+It also refuses a run
 older than the generated file it is supposed to vouch for. Each saved run is pinned to a hash of the generated file it ran (only when
 that file was saved before the run ended; `verify` adds the pin to older records too). For a pinned run the content decides, not the
 save time: converting again to the same output, such as a consultation answer changed and changed back, keeps the run's evidence,
