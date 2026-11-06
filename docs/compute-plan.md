@@ -81,7 +81,7 @@ Spark properties and libraries.
 | `node_type_unresolved` / `exceeds_largest_node` | vCPUs unreadable / larger than XX-Large |
 | `gpu_not_available` | the documented pool API offers only the MemoryOptimized family |
 | `driver_larger_than_workers` | a pool has one node size |
-| `platform_spark_conf` | `spark.databricks.*` (and `spark.master`) are not carried |
+| `platform_spark_conf` | `spark.databricks.*` (and `spark.master`) are not carried. Not raised when they are only `spark.master` and `spark.databricks.cluster.profile` on a cluster with no workers: the one-node pool carries them (a note on the compute use says so) |
 | `secret_in_spark_conf` | a secret or `{{secrets/...}}` reference in a Spark property: use Key Vault in the notebook |
 | `init_scripts` | not carried; re-express as Environment libraries, Spark properties or notebook code |
 | `custom_library` | non-PyPI libraries (jar, Maven, CRAN, wheel, egg) |

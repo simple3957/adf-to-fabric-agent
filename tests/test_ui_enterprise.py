@@ -167,6 +167,24 @@ def test_apply_stays_disabled_until_a_dry_run_is_done_and_APPLY_is_typed(worked,
     assert worked.provisioning(PID)["plan_ref_full"] == ref and "DRY RUN" in _everything_shown(at)
 
 
+def test_deploy_unlocks_after_a_clean_dry_run_and_asks_once_more_before_changing_fabric(worked, open_steps):
+    at = _step(worked, "deploy")
+    assert at.button(key="dep-go").disabled  # no dry run yet
+    at.button(key="dep-dry").click().run()
+    assert not at.exception, at.exception
+    assert at.button(key="dep-go").disabled  # the demo's dry run refuses PL_Daily_Load (an unbound connection): not clean
+    at.checkbox(key="dep-unbound").check().run()  # the options changed, so a new dry run is needed; this one refuses nothing
+    at.button(key="dep-dry").click().run()
+    assert not at.exception, at.exception
+    assert not at.button(key="dep-go").disabled, [str(w.value)[:200] for w in at.warning]
+    at.button(key="dep-go").click().run()  # one click only asks
+    assert not at.exception, at.exception
+    assert "for real?" in _everything_shown(at) and not [b for b in at.button if b.key == "dep-go"]
+    at.button(key="dep-no").click().run()  # cancel puts the Deploy button back and deploys nothing
+    assert [b for b in at.button if b.key == "dep-go"] and not [b for b in at.button if b.key == "dep-yes"]
+    assert "Deployed to Fabric" not in _everything_shown(at)
+
+
 def test_a_dry_run_changes_nothing_and_the_apply_is_labelled_as_real(worked, demo, open_steps):
     d, _ = demo
     _planned_and_approved(worked)

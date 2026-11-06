@@ -513,6 +513,15 @@ def _propose(inv: _Inventory) -> tuple[list[FabricPoolProposal], list[FabricEnvi
 _DBX_ONLY_PREFIX = "spark.databricks."
 
 
+SINGLE_NODE_KEYS = {"spark.master", "spark.databricks.cluster.profile"}
+
+
+def single_node_only(keys: Any, max_workers: Optional[int]) -> bool:
+    """Databricks settings that only make a cluster single-node: a pool sized to one node carries them, so nothing is lost."""
+    keys = set(keys)
+    return bool(keys) and keys <= SINGLE_NODE_KEYS and not max_workers
+
+
 def _environments(inv: _Inventory, pool_of: dict[str, str]) -> list[FabricEnvironmentProposal]:
     groups: dict[tuple, FabricEnvironmentProposal] = {}
     for u in sorted(inv.uses.values(), key=lambda x: x.id):
@@ -529,7 +538,9 @@ def _environments(inv: _Inventory, pool_of: dict[str, str]) -> list[FabricEnviro
                         "Read the secret from Azure Key Vault in the notebook instead of a Spark property.")
             else:
                 props[k] = v
-        if dropped:
+        if dropped and single_node_only(dropped, u.max_workers):
+            u.notes.append("Single-node settings (" + ", ".join(dropped) + ") are carried by the pool size: one node.")
+        elif dropped:
             inv.gap("platform_spark_conf", u.id, "Databricks-specific Spark settings are not carried: "
                     + ", ".join(dropped) + ".", "Review each; most tune the Databricks engine and have no Fabric setting.")
         libs = list(u.libraries)

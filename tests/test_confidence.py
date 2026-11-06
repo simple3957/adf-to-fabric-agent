@@ -227,3 +227,39 @@ def test_a_not_needed_linked_service_leaves_the_score_and_is_listed_in_the_repor
     assert [n["name"] for n in d["not_needed"]] == [ls] and "replaced by the lakehouse" in d["not_needed"][0]["reason"]
     assert ls not in [it["name"] for a in d["areas"].values() for it in a["items"]]  # listed, not scored
     assert "Not needed by the migration" in engine.render(d)
+
+
+# ---- what a run already proves, and what moved to Fabric ------------------------------------------------------------------------------
+
+def test_single_node_databricks_settings_are_carried_by_a_one_node_pool():
+    from adf2fabric.agent.conversion.compute_plan import single_node_only
+
+    assert single_node_only(["spark.master", "spark.databricks.cluster.profile"], 0)
+    assert not single_node_only(["spark.master"], 4)  # a multi-node cluster: the setting means something else
+    assert not single_node_only(["spark.databricks.delta.optimizeWrite.enabled"], 0)  # a tuning setting is still a gap
+
+
+def test_a_compute_linked_service_whose_work_runs_in_fabric_is_not_needed():
+    from types import SimpleNamespace as N
+
+    from adf2fabric.agent.confidence.engine import _compute_moved
+
+    plan = N(inventory=[N(id="dbx:1", source_ref="LS_Databricks")],
+             targets=[N(source_compute_id="dbx:1", target_execution="FabricNotebook")])
+    conv = N(compute_plan=plan)
+    assert "runs in Fabric" in _compute_moved(conv, "LS_Databricks", True)
+    assert _compute_moved(conv, "LS_Databricks", False) == ""  # a pipeline held back may still need it
+    plan.targets.append(N(source_compute_id="dbx:1", target_execution="Databricks"))
+    assert _compute_moved(conv, "LS_Databricks", True) == ""
+
+
+def test_a_matched_fabric_run_proves_a_bound_connection_works():
+    from types import SimpleNamespace as N
+
+    from adf2fabric.agent.confidence.engine import _proven_by_run
+
+    conn = N(kind="connection", bound=True, name="LS_Lake")
+    conv = N(pipelines=[N(source_pipeline="PL_A", prerequisites=[conn])])
+    assert "PL_A ran with it" in _proven_by_run(conv, "LS_Lake", {"PL_A": {"fabric_status": "Completed", "verdict": "matches"}})
+    assert _proven_by_run(conv, "LS_Lake", {"PL_A": {"fabric_status": "Completed", "verdict": "matches", "stale_run": True}}) == ""
+    assert _proven_by_run(conv, "LS_Lake", {"PL_A": {"fabric_status": "Failed", "verdict": "failed"}}) == ""

@@ -150,6 +150,29 @@ def record_run(store: ProjectStore, project_id: str, ident: str, run: Any, *, no
     return w
 
 
+def recorded_run(store: ProjectStore, project_id: str, w: WorkloadEntry, item_id: str) -> Optional[ExecutionEvidence]:
+    """The run evidence already in the run-and-compare record: the latest completed Fabric run of a pipeline that runs this workload, newer
+    than that pipeline's latest deploy, whose activity is bound to ``item_id`` and succeeded. None when there is no such run."""
+    from adf2fabric.agent.deployment import verify
+
+    record = {k.lower(): v for k, v in verify.current_record(store.project_dir(project_id)).items()}
+    for u in w.used_by:
+        pipeline, _, activity = u.partition("/")
+        entry = record.get(pipeline.lower()) or {}
+        if entry.get("stale_run") or entry.get("fabric_status") != "Completed" or _bound_item(store, project_id, pipeline, activity) != item_id:
+            continue
+        act = next((a for n, a in (entry.get("activities") or {}).items() if n.lower() == activity.lower()), None)
+        if act and act.get("status") == "Succeeded":
+            try:
+                finished = datetime.fromisoformat(str(entry.get("ran_at")).replace("Z", "+00:00"))
+                finished = finished if finished.tzinfo else finished.replace(tzinfo=timezone.utc)
+            except ValueError:
+                finished = None
+            return ExecutionEvidence(status="succeeded", fabric_item_id=item_id, run_id=entry.get("job_id") or None, finished_at=finished,
+                                     detail=f"'{activity}' succeeded in the recorded Fabric run of {pipeline} ({entry.get('verdict')} against its baseline)")
+    return None
+
+
 def pipeline_item(store: ProjectStore, project_id: str, w: WorkloadEntry) -> Optional[str]:
     """The Fabric item id the converted pipelines run for this workload (the first activity that uses it and is bound), or None."""
     for u in w.used_by:
@@ -196,6 +219,8 @@ def bind_deployed(store: ProjectStore, project_id: str, client: FabricClient, wo
     at = now or datetime.now(timezone.utc)
     w.artifact.fabric_item_id = item_id
     w.approval = Approval(status="approved", by=by.strip(), at=at, note=f"Accepted by binding the deployed notebook {item_id}: {why}"[:300])
+    if w.execution.status == "not_run" and (ran := recorded_run(store, project_id, w, item_id)) is not None:
+        w.execution = ran
     m.summary = summarize(m)
     m.updated_at = at
     store.save_workload_manifest(project_id, m)

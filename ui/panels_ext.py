@@ -297,7 +297,12 @@ def validate(api: ApiClient, pid: str, val: dict | None, dest: dict | None = Non
     ver = brief["version"] if brief else 0
     with options.card("validate", "Validation options", "Which checks run. Only a recorded real run that matches ADF makes a pipeline runtime-validated.",
                       options.source_label(brief)):
-        options.seed(f"val-stages-{pid}-{ver}", [s for s in (brief or {}).get("validate_stages") or ["static"] if s in VALIDATION_STAGES])
+        # the brief's checks, plus every check the last validation answered: running fewer would record those as "not run" and drop their evidence
+        answered = {x["stage"] for x in (val or {}).get("stages") or [] if x.get("status") not in (None, "NOT_RUN")} if (val or {}).get("available") else set()
+        if not has_ws:
+            answered -= {"api", "deployment"}
+        wanted = set((brief or {}).get("validate_stages") or ["static"]) | answered
+        options.seed(f"val-stages-{pid}-{ver}", [s for s in VALIDATION_STAGES if s in wanted])
         stages = st.multiselect("Checks to run", list(VALIDATION_STAGES), key=f"val-stages-{pid}-{ver}", format_func=lambda s: VALIDATION_STAGES[s])
         needs_ws = [s for s in stages if s in ("api", "deployment")]
         if needs_ws and not has_ws:
@@ -335,7 +340,8 @@ def _validation_body(val: dict) -> None:
 def report(api: ApiClient, pid: str, rep: dict | None, dest: dict) -> None:
     ws = bool(dest.get("workspace_id"))
     with st.form("report-form", border=False):
-        runtime = st.checkbox("Include recorded run evidence (from `verify`)", key="rep-runtime", help="Reads results of real Fabric runs. It never starts a run.")
+        runtime = st.checkbox("Include recorded run evidence (from `verify`)", key="rep-runtime", value=True,
+                              help="Reads results of real Fabric runs. It never starts a run. Leaving it out records the run check as not run.")
         go = st.form_submit_button("Validate the migration now (files, Fabric, deployment)", type="primary", disabled=not (ws and can("plans:generate")))
     if not ws:
         st.caption("Connect a Fabric workspace to validate the deployment.")

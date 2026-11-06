@@ -99,7 +99,7 @@ def needed(s: StepStatus, prev_title: Optional[str] = None, next_title: Optional
     if s.confirmed:
         return "done", f"Nothing needed. Confirmed" + (f"; next is {next_title}." if next_title else ".")
     if f.complete and f.attention:
-        return "attention", f"Look at: {f.attention}. Then continue, or fix it first."
+        return "attention", f"Look at: {f.attention.rstrip('.')}. Then continue, or fix it first."
     if f.complete:
         return "act", f"Check the result, then confirm to continue" + (f" to {next_title}." if next_title else ".")
     return "act", f.waiting or "Run this step."

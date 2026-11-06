@@ -783,3 +783,35 @@ def test_binding_records_the_id_the_person_and_the_resolution_and_writes_nothing
     assert w.artifact.fabric_item_id == NB_ID and w.approval.status == "approved" and w.approval.by == "Pat" and NB_ID in w.approval.note
     assert any(r["value"] == NB_ID for r in json.loads(res.read_text(encoding="utf-8")))
     assert fab.writes == []
+
+
+def _ran(store, pid, w, item, status="Succeeded", ran_at="2026-11-04T06:22:29Z"):
+    """The converted pipeline's activity bound to ``item`` and a matched run of it in the run-and-compare record."""
+    pipeline, _, activity = w.used_by[0].partition("/")
+    d = store.conversion_dir(pid) / "pipelines" / f"{pipeline}.DataPipeline"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "pipeline-content.json").write_text(json.dumps({"properties": {"activities": [
+        {"name": activity, "type": "TridentNotebook", "typeProperties": {"notebookId": item, "workspaceId": WS}}]}}), encoding="utf-8")
+    v = store.project_dir(pid) / "verification"
+    v.mkdir(parents=True, exist_ok=True)
+    (v / "verification.json").write_text(json.dumps({pipeline: {
+        "verdict": "matches", "fabric_status": "Completed", "job_id": "job-1", "ran_at": ran_at, "baseline": "adf",
+        "activities": {activity: {"type": "TridentNotebook", "status": status, "runs": 1, "metrics": {}}}}}), encoding="utf-8")
+
+
+def test_binding_takes_the_run_from_the_recorded_pipeline_run_that_ran_this_notebook(generated):
+    store, pid = generated
+    _ran(store, pid, _w(store.load_workload_manifest(pid), "nb_clean"), NB_ID)
+    lifecycle.bind_deployed(store, pid, NotebookFabric({NB_ID: _generated_cells(store, pid, "nb_clean")}), WS, "nb_clean", NB_ID, by="Pat", now=NOW)
+    w = _w(store.load_workload_manifest(pid), "nb_clean")
+    assert w.execution.status == "succeeded" and w.execution.run_id == "job-1" and "recorded Fabric run" in w.execution.detail
+
+
+def test_binding_takes_no_run_when_the_step_failed_or_runs_another_item(generated):
+    store, pid = generated
+    w = _w(store.load_workload_manifest(pid), "nb_clean")
+    _ran(store, pid, w, NB_ID, status="Failed")
+    assert lifecycle.recorded_run(store, pid, w, NB_ID) is None
+    _ran(store, pid, w, "99999999-0000-0000-0000-000000000000")
+    assert lifecycle.recorded_run(store, pid, w, NB_ID) is None
+

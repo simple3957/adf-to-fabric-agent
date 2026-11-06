@@ -38,6 +38,13 @@ A linked service no generated activity binds is **not needed**, so listed and no
 repointed to the Lakehouse ("replaced by the lakehouse") or used by no pipeline while every source pipeline was converted ("no pipeline uses it").
 What became of each dataset comes from the conversion's dataset ledger. A linked service without datasets (Key Vault, compute) or with a dataset
 still read through its connection is scored as before, and so is one whose datasets are unused while a pipeline was held back from conversion.
+A compute linked service (Databricks, Synapse Spark) that no converted pipeline binds is **not needed** when every pipeline was converted and
+every activity that ran on it now runs a Fabric notebook or Spark job definition ("its Spark work runs in Fabric now").
+
+A bound connection's credentials count as checked when Fabric tested them at creation, or when a pipeline bound to it has a current Fabric
+run that completed and matched its baseline (the run used them). A cluster's single-node settings (`spark.master`,
+`spark.databricks.cluster.profile` on a cluster with no workers) are not an open gap: the one-node pool carries them (also for plans made
+before the converter stopped reporting them).
 
 Each item gets a label, the worst thing in its way: `blocked`, `failing` (a run failed or differs), `needs_input`, `unproven` or `proven`.
 A criterion made unmet only because something it needs is unmet is *gated*: the cause is counted once, on the criterion that holds it up, so a pipeline with an

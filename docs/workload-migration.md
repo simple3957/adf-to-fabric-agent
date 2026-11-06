@@ -70,7 +70,9 @@ the id each pipeline runs filled in (`GET /projects/{id}/workloads/notebooks`).
   in the manifest and `ItemToId notebook:<name>` in `conversion/resolutions.json`, and records the signed-in person as accepting the
   generated notebook (the approval, with the id in its note). Audited as `workload.bind`. Nothing in Fabric is changed.
 - An id that is not a notebook in the workspace, or a notebook whose code differs, is refused. Static validation then passes the
-  notebook check (`compute.fabric_compute`); execution evidence is still `workloads-record-run`'s.
+  notebook check (`compute.fabric_compute`). Binding also takes the execution evidence from the run-and-compare record when a current,
+  completed Fabric run of a pipeline that runs this notebook has the step bound to that id and succeeded (`lifecycle.recorded_run`; the
+  run id and the pipeline are in its detail); otherwise execution evidence is `workloads-record-run`'s.
 - Code: `agent/workloads/lifecycle.py` (`check_deployed`, `bind_deployed`), `agent/deployment/notebook_deploy.read_cells`. Live-checked on
   2026-11-04 against the two notebooks in `Practise` (equal) and a mismatched id (refused).
 

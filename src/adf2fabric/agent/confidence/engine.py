@@ -208,16 +208,43 @@ def _not_needed(treatments: list[str], all_converted: bool) -> str:
     return ""  # a pipeline was held back from conversion: it may still need this one
 
 
-def _service_items(conv: Any, applied: dict[str, dict], ls_datasets: Optional[dict[str, list[str]]] = None, all_converted: bool = False) -> list[Item]:
+def _compute_moved(conv: Any, linked_service: str, all_converted: bool) -> str:
+    """Why a compute linked service (Databricks, Synapse Spark) that no converted pipeline binds is not needed: every activity that ran on it
+    now runs in Fabric (a notebook or Spark job definition). "" when that is not shown."""
+    plan = getattr(conv, "compute_plan", None)
+    if plan is None or not all_converted:
+        return ""
+    ids = {u.id for u in plan.inventory if (u.source_ref or "").lower() == linked_service.lower()}
+    targets = [t for t in plan.targets if t.source_compute_id in ids]
+    if not targets or any(not str(t.target_execution or "").startswith("Fabric") for t in targets):
+        return ""
+    return "its Spark work runs in Fabric now: every activity that used it runs a Fabric notebook or Spark job definition"
+
+
+def _proven_by_run(conv: Any, linked_service: str, verification: Optional[dict[str, dict]]) -> str:
+    """A completed Fabric run of a pipeline bound to this connection that matched its baseline: the connection worked with the
+    credentials Fabric holds. The evidence sentence, or "" when there is none."""
+    for p in sorted(getattr(conv, "pipelines", None) or [], key=lambda x: x.source_pipeline.lower()):
+        if not any(q.kind == "connection" and q.bound and q.name.lower() == linked_service.lower() for q in p.prerequisites):
+            continue
+        v = (verification or {}).get(p.source_pipeline) or {}
+        if v.get("fabric_status") == "Completed" and v.get("verdict") == "matches" and not v.get("stale_run"):
+            return f"it worked in a Fabric run: {p.source_pipeline} ran with it and matched its baseline"
+    return ""
+
+
+def _service_items(conv: Any, applied: dict[str, dict], ls_datasets: Optional[dict[str, list[str]]] = None, all_converted: bool = False,
+                   verification: Optional[dict[str, dict]] = None) -> list[Item]:
     items: list[Item] = []
     bound = {q.name.lower(): q for q in conv.connections if q.kind == "connection"}
     for c in conv.connector_coverage:
         q = bound.get(c.linked_service.lower())
         ap = applied.get(c.linked_service.lower())
-        why = "" if q is not None else _not_needed((ls_datasets or {}).get(c.linked_service.lower(), []), all_converted)
+        why = "" if q is not None else _not_needed((ls_datasets or {}).get(c.linked_service.lower(), []), all_converted)             or _compute_moved(conv, c.linked_service, all_converted)
         if why:
             items.append(Item("linked_services", c.linked_service, 1.0, [], not_needed=why))
             continue
+        ran = _proven_by_run(conv, c.linked_service, verification) if q is not None and q.bound else ""
         cs = [Criterion("connector_supported", "Fabric has a connector for it", 3.0,
                         UNMET if c.level == "unsupported" else UNKNOWN if c.level == "unlisted" else MET,
                         {"created": "the tool can create this connection", "manual": "Fabric supports it; the connection is made by hand", "unsupported": "Fabric has no connector for it",
@@ -229,9 +256,9 @@ def _service_items(conv: Any, applied: dict[str, dict], ls_datasets: Optional[di
                         "Pipelines reach a store through a Fabric connection; an unbound one blocks the deploy.", ask=f"Which Fabric connection should '{c.linked_service}' use?",
                         do="Connect step (or `adf2fabric connections`), then bind its id and convert again."),
               Criterion("credentials_validated", "Its credentials were checked", 1.5, UNKNOWN if q is None else
-                        MET if ap and (ap.get("fabric_validated") or ap.get("state") == "connection_tested") else UNKNOWN,
+                        MET if ran or (ap and (ap.get("fabric_validated") or ap.get("state") == "connection_tested")) else UNKNOWN,
                         "Fabric tested the credentials when it created the connection" if ap and ap.get("fabric_validated") else
-                        "a reused or hand-made connection: its credentials were not checked by this tool",
+                        ran or "a reused or hand-made connection: its credentials were not checked by this tool",
                         "A bound connection can still hold a wrong or expired credential; only a test shows it works.", needs=("connection_bound",),
                         ask=f"Does the connection for '{c.linked_service}' work with the credentials Fabric holds?", do="Test the connection in Fabric (Manage connections and gateways).")]
         _apply_gates(cs)
@@ -297,8 +324,15 @@ def _cluster_items(conv: Any) -> list[Item]:
     if plan is None:
         return []
     out: list[Item] = []
+    from adf2fabric.agent.conversion.compute_plan import single_node_only
+
+    use_of = {u.id: u for u in plan.inventory}
     gaps: dict[str, list[Any]] = {}
     for g in plan.gaps:
+        u = use_of.get(g.compute_id)
+        dropped = [k for k in (u.spark_conf if u else {}) if k.startswith("spark.databricks.") or k == "spark.master"]
+        if g.code == "platform_spark_conf" and u is not None and single_node_only(dropped, u.max_workers):
+            continue  # single-node settings: the one-node pool carries them (a plan made before the converter stopped reporting this)
         gaps.setdefault(g.compute_id, []).append(g)
     for use in plan.inventory:
         pools = [p for p in plan.pools if use.id in p.replaces]
@@ -393,7 +427,7 @@ def assess(store: Any, pid: str, now: Optional[datetime] = None) -> dict[str, An
     level_of = {c.linked_service.lower(): c.level for c in conv.connector_coverage}
     assisted = {n.pipeline for n in conv.assisted}
     items: list[Item] = [_pipeline_item(p, conv, level_of, errors, assisted, verification.get(p.source_pipeline), pid) for p in conv.pipelines]
-    items += _service_items(conv, _applied_connections(store, pid), *_dataset_use(store, pid, conv))
+    items += _service_items(conv, _applied_connections(store, pid), *_dataset_use(store, pid, conv), verification=verification)
     items += _trigger_items(conv)
     if store.has_workload_manifest(pid):
         items += _workload_items(store.load_workload_manifest(pid))

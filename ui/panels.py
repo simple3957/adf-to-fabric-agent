@@ -491,11 +491,22 @@ def deploy(api: ApiClient, pid: str, dest: dict, conversion: dict | None, result
             st.button(f"Leave out the refused and dry-run the other {len(passed)}", key="dep-only-passed", on_click=_only_passed,
                       help="Narrows the scope to the pipelines that passed and runs the dry run again. The refused ones stay unconverted for Fabric until their cause is fixed.")
     b.markdown(theme.badge("Deploy: changes Fabric", "warning"), unsafe_allow_html=True)
-    with b:
-        sure = typed_confirm("Deploy for real: this creates or updates pipelines in Fabric", "DEPLOY", "dep-sure", disabled=not dry_done)
-    if b.button("Deploy", disabled=not (dry_done and sure and can("migration:execute")), key="dep-go",
-                help=None if can("migration:execute") else "Your role cannot deploy (needs migration:execute)."):
-        stage = "deploy_apply"
+    b.caption("Creates or updates the dry-run pipelines in Fabric. Unlocks after a clean dry run of the same pipelines and options.")
+    asking = st.session_state.get("dep-ask") == (pid, sig)  # a second click confirms: the question names exactly what will be deployed
+    if not asking and b.button("Deploy", disabled=not (dry_done and can("migration:execute")), key="dep-go",
+                               help=None if can("migration:execute") else "Your role cannot deploy (needs migration:execute)."):
+        st.session_state["dep-ask"] = (pid, sig)
+        st.rerun()
+    if asking:
+        n = len([r for r in (result or {}).get("results", []) if r.get("action") not in ("failed", "refused")])
+        b.warning(f"Deploy {n} pipeline(s) to Fabric for real? This creates or updates them in the workspace.")
+        yes, no = b.columns(2)
+        if yes.button("Yes, deploy", type="primary", key="dep-yes", disabled=not (dry_done and can("migration:execute"))):
+            st.session_state.pop("dep-ask", None)
+            stage = "deploy_apply"
+        if no.button("Cancel", key="dep-no"):
+            st.session_state.pop("dep-ask", None)
+            st.rerun()
     if stage:
         job = run_job(lambda: api.run_stage(pid, stage, pipelines=pipes, with_children=children, allow_unbound=unbound, confirm=(stage == "deploy_apply"),
                                             idempotency_key=intent(stage)),

@@ -84,8 +84,8 @@ the existing nine steps and flows.
 - **Linked services of one type.** On Connect, a sign-in method and details saved for one service are offered to the other not-yet-ready services of the same
   connector type (`panels.share_targets`), ticked by default and listed. Each keeps its own server or account from the source. An existing-connection id is
   never shared (it belongs to one account), and a secret typed once is held for each service that takes the answer.
-- **Not merged, on purpose.** The typed confirmations (CREATE, DEPLOY, APPLY, RUN) stay on every step that changes Fabric: they are the protection, not a
-  repeated question.
+- **Not merged, on purpose.** The confirmations stay on every step that changes Fabric (typed CREATE, APPLY, RUN; a second click for Deploy): they are the
+  protection, not a repeated question.
 
 ## What the UI does not cover yet (CLI only)
 
@@ -110,7 +110,8 @@ Checked against the API routes and the CLI on 2026-10-29. Everything the API exp
 ## Safety rules
 
 * Dry runs are labelled "nothing is changed"; real runs are labelled "APPLIED". Real provisioning needs a dry run, then typing `APPLY`;
-  deploy needs a dry run of the same pipelines, then typing `DEPLOY`; connection creation needs `CREATE`. The API requires `confirm: true`
+  deploy needs a clean dry run of the same pipelines and options, then **Deploy** and **Yes, deploy** (the question names how many
+  pipelines; **Cancel** deploys nothing; no word is typed since 2026-11-06, at the user's request); connection creation needs `CREATE`. The API requires `confirm: true`
   as well, so the UI is not the only gate.
 * Report → *Run in Fabric and compare* starts REAL runs of up to 20 chosen, deployed pipelines (they read sources and write
   targets) after typing `RUN`; it needs `migration:execute`. A pipeline becomes runtime-validated only when its run completes and
