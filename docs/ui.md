@@ -33,6 +33,8 @@ On Convert, "Things you need to set" lists each notebook a pipeline runs; for a 
 generated notebook** first asks Fabric what would happen (a new notebook, or the content of the one with that name replaced), then **Yes,
 create** (or **Yes, replace it** when one with that name exists) puts it in the chosen workspace, records the person as accepting it and saves its id; Convert again uses the id
 (`POST /projects/{id}/workloads/notebooks/create`, `migration:execute`, and `provision:approve` to confirm; audited as `workload.create`).
+A generated Databricks notebook (or a Databricks job's notebook task) is not in that list, because the pipeline refers to it only once it
+exists in Fabric; the Deploy step's **Notebooks the pipelines run** offers the same Create for every generated notebook not bound yet.
 
 Sign-in (token mode) and project access come first: no project data is requested before `/me` succeeds. A step stays locked until the
 steps before it are confirmed and complete.
@@ -101,6 +103,9 @@ the existing nine steps and flows.
 - **Linked services of one type.** On Connect, a sign-in method and details saved for one service are offered to the other not-yet-ready services of the same
   connector type (`panels.share_targets`), ticked by default and listed. Each keeps its own server or account from the source. An existing-connection id is
   never shared (it belongs to one account), and a secret typed once is held for each service that takes the answer.
+- **Skipped linked services.** "Skip this one" saves the decision (and removes any earlier binding of it). "Set up a connection after all" only
+  reopens the form in that browser session; until something is saved the service stays skipped, and **Keep it skipped** closes the form again
+  without saving (added 2026-11-10: before, the reopened form asked for a connection id with no way back).
 - **Not merged, on purpose.** The confirmations stay on every step that changes Fabric (typed CREATE, APPLY, RUN; a second click for Deploy): they are the
   protection, not a repeated question.
 

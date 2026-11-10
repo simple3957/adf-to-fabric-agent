@@ -876,3 +876,26 @@ def test_a_run_with_no_baseline_passes_only_when_its_output_matched_the_source(p
     assert c.result is R.PASS and "no earlier run" in c.summary and "Only the checked outputs" in c.summary
     oc.save(store.project_dir(pid), {**chk, "verdict": oc.MATCHES, "checked_at": "2025-01-01T00:00:00+00:00"})  # made before the run
     assert results(rt(store, pid), "runtime.execution", "pipeline:PL_Main") == {R.BLOCKED}
+
+
+def _child_id(value):
+    def fn(d):
+        a = next(x for x in acts(d) if x.name == "Run_Child")
+        a.raw["typeProperties"]["pipelineId"] = value
+    return fn
+
+
+def test_a_child_pipeline_of_this_conversion_is_filled_in_at_deploy_not_unbound(project):
+    # found live (2026-11-10): validation BLOCKED a project whose deployed parent already called the real child, because the generated
+    # file keeps the child's placeholder for deploy to fill in
+    store, pid = project
+    edit_target(store, pid, "PL_Main", _child_id("<item:pipeline:PL_Child>"))
+    r = run(store, pid)
+    assert results(r, "reference_integrity.target_unbound") == {R.PASS}
+    assert results(r, "reference_integrity.child_pipelines") == {R.PASS}
+
+
+def test_a_child_pipeline_that_was_not_generated_still_blocks(project):
+    store, pid = project
+    edit_target(store, pid, "PL_Main", _child_id("<item:pipeline:PL_Elsewhere>"))
+    assert results(run(store, pid), "reference_integrity.target_unbound") == {R.BLOCKED}

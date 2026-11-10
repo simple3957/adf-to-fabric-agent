@@ -132,7 +132,11 @@ def _editor(api: ApiClient, pid: str, card: dict, known: dict[str, str], sibling
             st.session_state[f"reopen-{name}"] = True
             st.rerun()
         return
-    if not skipped:
+    if skipped:  # reopened: the stored choice is still "skip" until something is saved, so offer the way back
+        if st.button("Keep it skipped", key=f"keep-skip-{name}", help="Nothing is saved: it stays skipped."):
+            st.session_state.pop(f"reopen-{name}", None)
+            st.rerun()
+    else:
         if st.button("Skip this one: it needs no connection", key=f"skip-{name}",
                      help="Nothing is created for it. Pipelines that use it stay unbound until you bind it."):
             if call(api.set_choice, pid, name, "skip") is not None:
@@ -541,7 +545,8 @@ def _notebooks(api: ApiClient, pid: str) -> None:
     with st.expander(f"Notebooks the pipelines run: {len(items) - len(open_)} of {len(items)} bound", expanded=bool(open_)):
         st.caption("Validation checks that each notebook a pipeline runs is the generated one. The id the pipeline runs is filled in: "
                    "**Check** reads that notebook from Fabric and compares its code with the generated notebook; **Bind** does the same and records "
-                   "you as accepting it. Nothing in Fabric is changed.")
+                   "you as accepting it. Neither changes Fabric. A generated notebook that is not in the workspace yet can be **created** from "
+                   "here (you confirm first); then Convert again so the pipeline runs it.")
         for i in items:
             name = i["name"]
             st.markdown(f"**{theme.esc(name)}** · used by {', '.join(i['used_by']) or '-'} · " + ("✅ bound" if i["state"] == "bound" else "not bound"))
@@ -560,6 +565,12 @@ def _notebooks(api: ApiClient, pid: str) -> None:
                 if (r := call(api.bind_workload_notebook, pid, name, nid.strip(), True)) is not None and r.get("bound"):
                     st.session_state["nb-bound-note"] = f"{name}: {r['detail']}"
                     st.rerun()
+            if i["state"] != "bound" and not i["bound_item_id"]:
+                # a Databricks notebook (or a Databricks job's notebook task) is only referred to by the pipeline once it exists in Fabric,
+                # so the Convert step's list of ids to set never offers it: create it here
+                panels_bindings._create(api, pid, name)
+        if note := st.session_state.pop("bind-done", None):
+            st.success(note)
         if note := st.session_state.pop("nb-bound-note", None):
             st.success(note)
 

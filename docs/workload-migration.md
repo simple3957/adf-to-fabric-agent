@@ -67,6 +67,11 @@ the file changed since generation), records the person as accepting the generate
 `ItemToId notebook:<name>` in `conversion/resolutions.json`; the next Convert points the pipeline's notebook activity at it. A notebook
 whose content was replaced keeps no earlier run as evidence. Same Fabric calls as `workloads-deploy --apply`.
 
+A Databricks notebook (or a Databricks job's notebook task) is referred to by the converted pipeline only once it exists in Fabric, so
+it never appears in that Convert list. For those, the Deploy step's **Notebooks the pipelines run** offers the same **Create it in
+Fabric from the generated notebook** for every generated notebook that is not bound yet (added 2026-11-10; before that only
+`workloads-deploy` could create them). Then Convert again.
+
 ## One notebook per workspace
 
 A generated notebook's storage paths name a workspace and a lakehouse by id (`abfss://<workspace>@onelake.dfs.fabric.microsoft.com/<lakehouse>/Files/<shortcut>/...`).

@@ -175,13 +175,24 @@ def reference_integrity(inp: Inputs, c: Collector) -> None:
               evidence=broken, remediation="Add the missing definitions to the source (or fix the references); the migration cannot be complete without them.")
     else:
         c.add("reference_integrity.source", K.reference_integrity, R.PASS, "Every dataset, linked service, pipeline, data flow and runtime reference in the source resolves.")
-    # target: unbound placeholders and internal references
+    # target: unbound placeholders and internal references. A child pipeline the conversion also generated is not unbound: deploy
+    # publishes children first and fills in their ids (the deployment stage then reads back what was published).
+    generated = {tp.name.lower() for tp in inp.paired.values() if tp.content is not None}
+    at_deploy: dict[str, list[str]] = {}
     unbound: dict[str, list[str]] = {}
     for low, tp in inp.paired.items():
         if tp.content is not None:
             t = _tokens(tp.content)
+            children = [x for x in t if x.lower().startswith("<item:pipeline:") and x[len("<item:pipeline:"):-1].lower() in generated]
+            if children:
+                at_deploy[tp.name] = children
+            t = [x for x in t if x not in children]
             if t:
                 unbound[tp.name] = t
+    if at_deploy:
+        c.add("reference_integrity.child_pipelines", K.reference_integrity, R.PASS,
+              f"{len(at_deploy)} generated pipeline(s) call child pipelines of this conversion; deploy fills in their ids.",
+              evidence=[f"{p}: {', '.join(t[:4])}" for p, t in sorted(at_deploy.items())])
     if unbound:
         c.add("reference_integrity.target_unbound", K.reference_integrity, R.BLOCKED,
               f"{len(unbound)} generated pipeline(s) still contain unbound placeholders (connection / item / workspace ids).",

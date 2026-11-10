@@ -39,7 +39,8 @@ while any real change to the file still blocks it.
 
 1 source inventory (readable, manifest, an independent cross-check of discovery's counts); 2 reference integrity (source
 references resolve; generated pipelines hold no unbound placeholders and resolve their dependencies, parameters, variables and
-`activity()` reads); 3 target schema (documented Fabric schema, schedules); 4 parameters, variables and expressions (global
+`activity()` reads; a child pipeline this conversion also generated, `<item:pipeline:X>`, is not unbound: deploy publishes children
+first and fills in its id, so it is reported as `child_pipelines` (since 2026-11-10; it used to BLOCK the whole validation); 3 target schema (documented Fabric schema, schedules); 4 parameters, variables and expressions (global
 parameters normalise to `gp_<name>`; dropped expressions fail, rewritten ones are listed; a dataset parameter the dataset never
 reads is ignored); 5 activity count, nesting and dependency-graph equivalence (conditions included; a placeholder `Fail` stand-in is
 BLOCKED, never matched); 6 linked services, datasets, connections and secrets (plaintext secrets in generated files fail without
