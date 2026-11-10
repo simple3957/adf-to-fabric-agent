@@ -56,7 +56,7 @@ class DeployItem:
 @dataclass
 class DeployResult:
     name: str
-    action: str  # create | update | refused | failed
+    action: str  # create | update | refused | failed | pending (a dry run: waits for notebooks Deploy creates first)
     item_id: Optional[str] = None
     detail: str = ""
     problems: list[str] = field(default_factory=list)

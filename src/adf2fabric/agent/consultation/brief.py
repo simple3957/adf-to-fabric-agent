@@ -138,7 +138,9 @@ def read_facts(store: Any, pid: str, destination: Optional[dict] = None) -> Fact
             rule = rule_for(t)
             return rule is None or rule.strategy == ConversionStrategy.manual
 
-        per = {p.name: sum(1 for a in walk(p.activities) if a.type and no_route(a.type)) for p in d.pipelines}
+        ready = _migrated_notebook_users(store, pid)
+        per = {p.name: sum(1 for a in walk(p.activities) if a.type and no_route(a.type) and not _job_migrated(store, pid, p.name, a, ready))
+               for p in d.pipelines}
         f.blocked_activities = sum(per.values())
         f.blocked_pipelines = sorted(n for n, k in per.items() if k)
     except Exception as exc:  # noqa: BLE001 - one unreadable record hides nothing else; it is named, not dropped
@@ -638,6 +640,36 @@ class Settings:
 
     def to_dict(self) -> dict[str, Any]:
         return dict(self.__dict__)
+
+
+def _migrated_notebook_users(store: Any, pid: str) -> set[str]:
+    """``pipeline/activity`` (lower case) of every activity a generated, approved notebook replaces (the workload manifest)."""
+    try:
+        if not store.has_workload_manifest(pid):
+            return set()
+        return {u.lower() for w in store.load_workload_manifest(pid).workloads
+                if w.artifact.kind == "fabric_notebook" and w.generation.status == "generated" and w.approval.status == "approved" for u in w.used_by}
+    except Exception:  # noqa: BLE001 - an unreadable manifest only means nothing counts as migrated
+        return set()
+
+
+def _job_migrated(store: Any, pid: str, pipeline: str, a: Any, ready: set[str]) -> bool:
+    """A Databricks Job activity whose job was read, can run as Fabric notebooks, and whose every notebook task is generated and approved:
+    convert replaces it with Fabric notebook activities once Deploy has created them, so it is not an activity with no Fabric route
+    (found 2026-11-10: 'hold back' removed such a pipeline, so the deploy that would create its notebooks never saw it)."""
+    if a.type != "DatabricksJob" or not ready:
+        return False
+    from adf2fabric.agent.workloads import databricks_jobs as J
+
+    job_id = J.job_id_of(a.raw_properties)
+    struct = J.load(store.project_dir(pid), job_id) if job_id else None
+    if struct is None:
+        return False
+    shape = J.fabric_shape(struct, bool(a.raw_properties.get("jobParameters")))
+    if shape.reasons:
+        return False
+    single = len(shape.tasks) == 1
+    return all(f"{pipeline}/{J.task_activity_name(a.name, t['key'], single)}".lower() in ready for t in shape.tasks)
 
 
 def _pick(a: Answers, qid: str, default: str) -> str:

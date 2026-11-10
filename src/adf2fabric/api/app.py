@@ -735,8 +735,8 @@ def create_app(settings: Optional[Settings] = None, live: Optional[Container] = 
         for w in ctx.c.store.load_workload_manifest(slug).workloads:
             if w.artifact.kind != "fabric_notebook":
                 continue
-            used = L.pipeline_item(ctx.c.store, slug, w) or ""
             ws = str(ctx.session.destination.get("workspace_id") or "").lower()
+            used = L.pipeline_item_here(ctx.c.store, slug, w, ws) or ""
             bound = (w.artifact.fabric_item_ids.get(ws) if ws and w.artifact.fabric_item_ids else w.artifact.fabric_item_id or "") or ""
             bound = bound.lower()
             out.append({"name": w.name, "used_by": list(w.used_by), "generated": w.generation.status == "generated",
@@ -1040,6 +1040,10 @@ def create_app(settings: Optional[Settings] = None, live: Optional[Container] = 
                 raise HTTPException(409, "None of the chosen pipelines is converted.")
             if not deploy_record.dry_run_ok(ctx.c.store.project_dir(slug), ws or "", names, allow_unbound=body.allow_unbound):
                 raise HTTPException(409, "Run a dry run of exactly these pipelines first, with the same options (it must finish with nothing refused, within the last hour).")
+            from adf2fabric.agent.workloads import lifecycle as wl
+
+            if wl.notebooks_to_create(ctx.c.store, slug, ws or "", body.pipelines):
+                ctx.require(P.provision_approve)  # creating a generated notebook records the caller as accepting it, as Create does
         if stage == "deploy_apply" and body.allow_unbound:
             ctx.require(P.migration_execute)
         if body.run:
@@ -1070,6 +1074,8 @@ def create_app(settings: Optional[Settings] = None, live: Optional[Container] = 
             if replay is not None:
                 return replay
             opts = body.model_dump()
+            if stage == "deploy_apply":
+                opts["by"] = ctx.principal.id  # who accepts any generated notebook the deploy creates: never taken from the request
             if body.run:  # after the replay check: a repeated submission starts nothing and is not a new request
                 ctx.audit("verify.run", "requested", resource="project", resource_id=slug, workspace=ws, pipelines=len(body.pipelines))
             ctx.audit(f"stage.{stage}", "requested", resource="project", resource_id=slug, workspace=ws or "")

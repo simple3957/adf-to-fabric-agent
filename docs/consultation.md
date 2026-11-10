@@ -160,8 +160,10 @@ before anything moves (`agent/consultation/brief.py`, `brief_record.py`). Ideas 
 
 * **Grounded in discovery.** A question is asked only when discovery found what it is about: notebook activities, file
   datasets, self-hosted runtimes, Key Vault secrets, linked-service parameters without a value, schedule or event triggers,
-  data flows, activity types with no automatic Fabric route (from the conversion rules, over the whole estate), safe
-  reconstruction proposals. Things discovery cannot see (network rules, data volumes, the capacity actually needed) are asked
+  data flows, activity types with no automatic Fabric route (from the conversion rules, over the whole estate; a Databricks
+  Job activity whose job was read, can run as Fabric notebooks and has every notebook task generated and approved is not
+  counted, since Deploy creates those notebooks and convert replaces it — so "hold back" no longer removes it, since
+  2026-11-10), safe reconstruction proposals. Things discovery cannot see (network rules, data volumes, the capacity actually needed) are asked
   and listed as not visible.
 * **Read, not asked.** The Fabric workspace chosen on the Connections step, a lakehouse already bound and the Invoke-pipeline
   connection are read from the configuration. That configuration is recorded with the brief, so everyone who looks at it

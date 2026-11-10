@@ -507,7 +507,10 @@ def deploy(api: ApiClient, pid: str, dest: dict, conversion: dict | None, result
         st.rerun()
     if asking:
         n = len([r for r in (result or {}).get("results", []) if r.get("action") not in ("failed", "refused")])
-        b.warning(f"Deploy {n} pipeline(s) to Fabric for real? This creates or updates them in the workspace.")
+        waits = [r for r in (result or {}).get("results", []) if r.get("action") == "pending"]
+        b.warning(f"Deploy {n} pipeline(s) to Fabric for real? This creates or updates them in the workspace."
+                  + (f" {len(waits)} of them run generated notebooks this workspace does not have yet: Deploy first creates those notebooks "
+                     "here (you are recorded as accepting them) and converts again with their ids." if waits else ""))
         yes, no = b.columns(2)
         if yes.button("Yes, deploy", type="primary", key="dep-yes", disabled=not (dry_done and can("migration:execute"))):
             st.session_state.pop("dep-ask", None)

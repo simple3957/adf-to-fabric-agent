@@ -35,6 +35,8 @@ create** (or **Yes, replace it** when one with that name exists) puts it in the 
 (`POST /projects/{id}/workloads/notebooks/create`, `migration:execute`, and `provision:approve` to confirm; audited as `workload.create`).
 A generated Databricks notebook (or a Databricks job's notebook task) is not in that list, because the pipeline refers to it only once it
 exists in Fabric; the Deploy step's **Notebooks the pipelines run** offers the same Create for every generated notebook not bound yet.
+Deploy itself also creates approved generated notebooks the chosen workspace lacks, then converts again and deploys (the dry run lists them as
+`pending`, the confirmation says so, and it needs `provision:approve`); Bind there is pre-filled only with this workspace's notebook id.
 
 Sign-in (token mode) and project access come first: no project data is requested before `/me` succeeds. A step stays locked until the
 steps before it are confirmed and complete.

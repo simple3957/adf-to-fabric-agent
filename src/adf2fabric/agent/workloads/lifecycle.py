@@ -224,6 +224,17 @@ def pipeline_item(store: ProjectStore, project_id: str, w: WorkloadEntry) -> Opt
     return None
 
 
+def pipeline_item_here(store: ProjectStore, project_id: str, w: WorkloadEntry, workspace: str) -> Optional[str]:
+    """``pipeline_item``, but only when the last Convert used ``workspace``'s ids: another workspace's notebook id, offered for binding
+    here, could only be refused (found 2026-11-10: Bind in a new workspace was pre-filled with the previous workspace's notebook)."""
+    from adf2fabric.project import bindings as B
+
+    converted_for = (B.bound_workspace(store, project_id) or "").lower()
+    if workspace and converted_for and converted_for != workspace.lower():
+        return None
+    return pipeline_item(store, project_id, w)
+
+
 _G = r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
 _ONELAKE_ABFSS = re.compile(r"abfss://(" + _G + r")@onelake\.dfs\.fabric\.microsoft\.com/(" + _G + r")/", re.I)
 _ONELAKE_HTTPS = re.compile(r"https://onelake\.dfs\.fabric\.microsoft\.com/(" + _G + r")/(" + _G + r")/", re.I)
@@ -274,6 +285,24 @@ def workspace_cells(store: ProjectStore, project_id: str, client: FabricClient, 
         raise LifecycleError(f"'{w.name}' reads its data through lakehouse '{name}' and its OneLake shortcuts, which this workspace does not "
                              "have yet. Create them first (Plan target: approve and apply the lakehouse and shortcut steps), then create the notebook.")
     return retarget(cells, workspace, lh), True
+
+
+def notebooks_to_create(store: ProjectStore, project_id: str, workspace: str, pipelines: Optional[list[str]] = None) -> list[WorkloadEntry]:
+    """The generated notebooks Deploy creates in ``workspace`` before deploying: generated, approved by a person at least once (an approval is
+    reset when the code changes), used by a pipeline in scope (``pipelines``: source names; empty = all), and with no id in that workspace yet."""
+    if not workspace or not store.has_workload_manifest(project_id):
+        return []
+    scope = {p.lower() for p in pipelines} if pipelines else None
+    out = []
+    for w in store.load_workload_manifest(project_id).workloads:
+        if w.artifact.kind != "fabric_notebook" or w.generation.status != "generated" or w.approval.status != "approved":
+            continue
+        if (w.artifact.fabric_item_ids or {}).get(workspace.lower()):
+            continue
+        users = {u.split("/", 1)[0].lower() for u in w.used_by}
+        if scope is None or users & scope:
+            out.append(w)
+    return out
 
 
 def _record_item(w: WorkloadEntry, workspace: str, item_id: str) -> None:

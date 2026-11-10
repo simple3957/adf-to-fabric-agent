@@ -906,3 +906,74 @@ def test_creating_a_notebook_in_a_workspace_without_its_lakehouse_is_refused_wit
 
     with pytest.raises(lifecycle.LifecycleError, match="Plan target"):
         lifecycle.create_notebook(store, pid, NoLakehouse(), WS, "nb_clean", by="Pat", apply=True)
+
+
+# --- Deploy creates the generated notebooks a workspace is missing (2026-11-10) ---------------------------------------------------
+
+
+def test_only_approved_generated_notebooks_missing_from_the_workspace_are_created_at_deploy(generated):
+    store, pid = generated
+    assert lifecycle.notebooks_to_create(store, pid, WS) == []  # nothing approved yet
+    lifecycle.approve(store, pid, "nb_clean", by="Pat")
+    assert [w.name for w in lifecycle.notebooks_to_create(store, pid, WS)] == ["nb_clean"]
+    assert [w.name for w in lifecycle.notebooks_to_create(store, pid, WS, ["PL_Dbx"])] == ["nb_clean"]
+    assert lifecycle.notebooks_to_create(store, pid, WS, ["PL_Jobs"]) == []  # not used by the pipelines being deployed
+    lifecycle.create_notebook(store, pid, CreatingFabric(), WS, "nb_clean", by="Pat", apply=True, now=NOW)
+    assert lifecycle.notebooks_to_create(store, pid, WS) == []  # it has an id in this workspace now
+    assert [w.name for w in lifecycle.notebooks_to_create(store, pid, "11111111-2222-3333-4444-555555555555")] == ["nb_clean"]  # not in another
+
+
+def _deploy_prep(generated, monkeypatch, fab):
+    from types import SimpleNamespace
+
+    from adf2fabric.agent.conversion import ConversionAgent, ConversionRequest
+    from adf2fabric.api import stages
+
+    store, pid = generated
+    ConversionAgent(store).run(ConversionRequest(project_name=pid))
+    lifecycle.approve(store, pid, "nb_clean", by="Pat")
+    converted = []
+    monkeypatch.setattr(stages, "FabricClient", lambda token, session=None: fab)
+    monkeypatch.setattr(stages, "_run_stage", lambda c, s, p, stage, log, options=None: converted.append((stage, (options or {}).get("workspace_id"))))
+    c = SimpleNamespace(store=store, fabric_http=None, fabric_token=lambda session: "tok")
+    return stages, c, SimpleNamespace(destination={"workspace_id": WS}), pid, converted
+
+
+def test_a_deploy_dry_run_names_the_notebooks_it_would_create_and_writes_nothing(generated, monkeypatch):
+    fab = CreatingFabric()
+    stages, c, session, pid, converted = _deploy_prep(generated, monkeypatch, fab)
+    pending, refused = stages._notebooks_for_deploy(c, session, pid, WS, "deploy_dry_run", {}, lambda m: None)
+    assert fab.writes == [] and refused == {}
+    assert "nb_clean" in pending["PL_Dbx"] and "Deploy creates them first" in pending["PL_Dbx"]
+    assert converted == [("convert", WS)]  # converted again for this workspace (project files only)
+
+
+def test_deploy_creates_the_missing_notebook_as_the_deploying_person_then_converts_again(generated, monkeypatch):
+    fab = CreatingFabric()
+    stages, c, session, pid, converted = _deploy_prep(generated, monkeypatch, fab)
+    pending, refused = stages._notebooks_for_deploy(c, session, pid, WS, "deploy_apply", {"by": "Sam"}, lambda m: None)
+    assert pending == {} and refused == {} and fab.writes == [("POST", "notebooks")]
+    w = _w(c.store.load_workload_manifest(pid), "nb_clean")
+    assert w.artifact.fabric_item_ids[WS] == NB_ID and w.approval.by == "Sam"
+    assert converted == [("convert", WS)]
+
+
+def test_deploy_never_replaces_a_notebook_of_the_same_name_it_refuses_its_pipelines(generated, monkeypatch):
+    store, pid = generated
+    w = _w(store.load_workload_manifest(pid), "nb_clean")
+    fab = CreatingFabric({w.artifact.display_name or w.name: NB_ID})
+    stages, c, session, pid, _ = _deploy_prep(generated, monkeypatch, fab)
+    pending, refused = stages._notebooks_for_deploy(c, session, pid, WS, "deploy_apply", {"by": "Sam"}, lambda m: None)
+    assert fab.writes == [] and pending == {} and "already in this workspace" in refused["PL_Dbx"]
+
+
+def test_bind_is_offered_only_the_notebook_id_of_the_workspace_being_deployed_to(generated, monkeypatch):
+    store, pid = generated
+    w = _w(store.load_workload_manifest(pid), "nb_clean")
+    monkeypatch.setattr(lifecycle, "pipeline_item", lambda s, p, x: NB_ID)  # the id the last converted pipeline runs
+    res = store.conversion_dir(pid) / "resolutions.json"
+    res.parent.mkdir(parents=True, exist_ok=True)
+    res.write_text(json.dumps([{"type": "WorkspaceId", "key": "*", "value": "11111111-2222-3333-4444-555555555555"}]), encoding="utf-8")
+    assert lifecycle.pipeline_item_here(store, pid, w, WS) is None  # converted for another workspace: its id is not offered
+    res.write_text(json.dumps([{"type": "WorkspaceId", "key": "*", "value": WS}]), encoding="utf-8")
+    assert lifecycle.pipeline_item_here(store, pid, w, WS) == NB_ID

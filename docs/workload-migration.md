@@ -72,6 +72,8 @@ it never appears in that Convert list. For those, the Deploy step's **Notebooks 
 Fabric from the generated notebook** for every generated notebook that is not bound yet (added 2026-11-10; before that only
 `workloads-deploy` could create them). Then Convert again.
 
+Since 2026-11-10 the UI's **Deploy** also does this for you: approved generated notebooks the chosen workspace lacks are created there first, Convert runs again with their ids, and the pipelines deploy in the same action (the dry run lists them; see [deploy.md](deploy.md)). On the Deploy step, **Bind** is pre-filled only with an id from the workspace being deployed to: another workspace's notebook id is never offered (found live: Bind in a second workspace was pre-filled with the first one's notebook and could only be refused).
+
 ## One notebook per workspace
 
 A generated notebook's storage paths name a workspace and a lakehouse by id (`abfss://<workspace>@onelake.dfs.fabric.microsoft.com/<lakehouse>/Files/<shortcut>/...`).

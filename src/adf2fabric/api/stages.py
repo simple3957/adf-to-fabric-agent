@@ -210,6 +210,49 @@ def refresh_diagnosis(c: Container, pid: str, workspace: str = "") -> None:
     engine.refresh(c.store, pid, workspace)
 
 
+def _notebooks_for_deploy(c: Container, session: Session, pid: str, workspace: str, stage: str, options: dict,
+                          log: Log) -> tuple[dict[str, str], dict[str, str]]:
+    """Deploy creates the generated notebooks the pipelines run that are missing from ``workspace`` (approved ones only; see
+    ``lifecycle.notebooks_to_create``), then converts again so the pipelines use this workspace's ids. A dry run changes nothing in Fabric:
+    it asks Fabric what would happen and converts again (project files only), and the pipelines that wait for those notebooks are reported
+    as pending, not refused. A notebook with that name already in the workspace is never replaced: its pipelines are refused until it is
+    bound. Returns (pending, refused): Fabric pipeline name -> why."""
+    from adf2fabric.agent.workloads import lifecycle as wl
+    from adf2fabric.project import bindings as bindings_mod
+
+    need = wl.notebooks_to_create(c.store, pid, workspace, options.get("pipelines"))
+    if not need:
+        return {}, {}
+    client = FabricClient(c.fabric_token(session), session=c.fabric_http)
+    bindings_mod.use_workspace(c.store, pid, workspace)  # the ids saved for this workspace; the other workspace's are kept for it
+    res = c.store.conversion_dir(pid) / "resolutions.json"
+    names = {p.source_pipeline.lower(): p.fabric_pipeline_name for p in c.store.load_conversion(pid).pipelines} if c.store.has_conversion(pid) else {}
+    pending: dict[str, list[str]] = {}
+    clash: dict[str, list[str]] = {}
+    for w in need:
+        try:
+            _w, _detail, existing = wl.create_notebook(c.store, pid, client, workspace, w.id, by="", apply=False)
+            if existing:  # same name already there: never replaced here
+                target = clash
+            elif stage == "deploy_apply":
+                wl.create_notebook(c.store, pid, client, workspace, w.id, by=str(options.get("by") or ""), apply=True, resolutions=res)
+                log(f"created notebook {w.name} in the workspace")
+                continue
+            else:
+                target = pending
+        except (wl.LifecycleError, DeployError) as exc:
+            raise StageError(f"Notebook '{w.name}' could not be prepared for this workspace: {getattr(exc, 'detail', None) or exc}") from None
+        for u in w.used_by:
+            pipe = names.get(u.split("/", 1)[0].lower())
+            if pipe:
+                target.setdefault(pipe, []).append(w.name)
+    log("converting again with this workspace's notebook ids")
+    _run_stage(c, session, pid, "convert", log, {"workspace_id": workspace})
+    return ({n: f"deploys once its notebook(s) {', '.join(sorted(set(v)))} are created: Deploy creates them first" for n, v in pending.items()},
+            {n: f"a notebook named {', '.join(sorted(set(v)))} is already in this workspace and is not replaced: bind it (Deploy step, "
+                "Notebooks the pipelines run), then deploy again" for n, v in clash.items()})
+
+
 def run_stage(c: Container, session: Session, pid: str, stage: str, log: Log, options: Optional[dict] = None) -> dict[str, Any]:
     try:
         return _run_stage(c, session, pid, stage, log, options)
@@ -307,18 +350,24 @@ def _run_stage(c: Container, session: Session, pid: str, stage: str, log: Log, o
         raise StageError("No destination workspace is selected.", ["Choose a workspace on the Connections screen."])
     from adf2fabric.project import bindings as bindings_mod
 
+    waiting, blocked = _notebooks_for_deploy(c, session, pid, workspace, stage, options, log)
     other = bindings_mod.workspace_mismatch(c.store, pid, workspace)
     if other:  # the converted pipelines name items of another workspace: deploying them here would run that workspace's notebooks
         raise StageError(other, ["Choose this workspace, create or bind its notebooks on Convert, and Convert again."])
     items = assemble_items(c.store, pid, options.get("pipelines"), bool(options.get("with_children")))
     if not items:
         raise StageError("Nothing to deploy.", ["Run the convert stage first."])
+    held = {**waiting, **blocked}  # fabric pipeline name -> why it is not pushed in this call
     try:
         token = c.fabric_token(session)
-        results = deploy(FabricClient(token, session=c.fabric_http), workspace, items, apply=stage == "deploy_apply",
-                         allow_unbound=bool(options.get("allow_unbound")))
+        results = deploy(FabricClient(token, session=c.fabric_http), workspace, [i for i in items if i.name not in held],
+                         apply=stage == "deploy_apply", allow_unbound=bool(options.get("allow_unbound")))
     except DeployError as exc:
         raise StageError(str(exc)) from None
+    from adf2fabric.agent.deployment.fabric_deploy import DeployResult
+
+    results += [DeployResult(n, "pending", detail=why) for n, why in sorted(waiting.items()) if any(i.name == n for i in items)]
+    results += [DeployResult(n, "refused", detail=why) for n, why in sorted(blocked.items()) if any(i.name == n for i in items)]
     if stage == "deploy_apply":
         deploy_record.note_apply(c.store.project_dir(pid), workspace, results)
     else:

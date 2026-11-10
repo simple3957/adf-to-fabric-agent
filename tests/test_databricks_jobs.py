@@ -382,3 +382,23 @@ def test_the_real_client_is_given_a_url_for_the_bare_host_the_linked_service_res
     # found by the first live run: the host reached the client without https:// and every real read was refused as a bad URL
     client = SourceResolver(tmp_path)._client(HOST, "tok")
     assert isinstance(client, DatabricksClient) and client.host == f"https://{HOST}"
+
+
+def test_a_job_whose_notebooks_are_generated_and_approved_is_not_held_back_as_unconvertible(job_estate):
+    # found 2026-11-10: the brief's 'hold back' removed PL_Spark_Test, so the deploy that creates its notebooks never saw it
+    from adf2fabric.agent.consultation.brief import read_facts
+    from adf2fabric.agent.workloads import lifecycle
+
+    store, pid = job_estate
+    before = read_facts(store, pid)
+    assert "PL_Spark" in before.blocked_pipelines and before.blocked_activities == 5  # every DatabricksJob activity, by type
+    plain = "# Databricks notebook source\nprint(spark.range(3).count())\n"  # nothing left open, so it is 'generated' and can be created
+    FakeDbx.notebooks = {k: plain for k in FakeDbx.notebooks}
+    m = build_manifest(store, pid, Options(tokens=TokenSource(env_names={"databricks": "JOB_TOKEN"}), fetch=True, client_factory=FakeDbx,
+                                           generate=True), NOW)
+    store.save_workload_manifest(pid, m)
+    lifecycle.approve(store, pid, "NB_Read", by="Pat")
+    after = read_facts(store, pid)
+    assert after.blocked_activities == 4  # Generate's only notebook is approved; Transform's is not yet, Mixed/Unreadable/Dynamic stay blocked
+    lifecycle.approve(store, pid, "NB_Transform", by="Pat")
+    assert read_facts(store, pid).blocked_activities == 3 and "PL_Spark" in read_facts(store, pid).blocked_pipelines  # Mixed etc. still there
