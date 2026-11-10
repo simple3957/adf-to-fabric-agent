@@ -866,3 +866,43 @@ def test_creating_over_a_notebook_of_the_same_name_says_so_and_drops_its_old_run
     lifecycle.create_notebook(store, pid, fab, WS, "nb_clean", by="Pat", apply=True, now=NOW)
     w = _w(store.load_workload_manifest(pid), "nb_clean")
     assert w.execution.status == "not_run" and fab.writes == [("POST", "updateDefinition")]
+
+
+def test_a_notebook_copy_for_another_workspace_reads_that_workspaces_lakehouse():
+    home, there = "20a53380-5e45-4865-ad6e-857633511290", WS.lower()
+    lh_home, lh_there = "d75e351a-7f8c-484f-a00a-16a48148e3e6", "88888888-8888-8888-8888-888888888888"
+    cells = [{"cell_type": "markdown", "source": [f"abfss://{home}@onelake.dfs.fabric.microsoft.com/{lh_home}/Files/x"]},
+             {"cell_type": "code", "source": [f'p = "abfss://{home}@onelake.dfs.fabric.microsoft.com/{lh_home}/Files/migrationcontainer/a"\n',
+                                              f'q = "https://onelake.dfs.fabric.microsoft.com/{home}/{lh_home}/Files/b"']}]
+    assert lifecycle.onelake_workspaces(cells) == {home}
+    out = lifecycle.retarget(cells, there, lh_there)
+    code = "".join(out[1]["source"])
+    assert f"abfss://{there}@onelake.dfs.fabric.microsoft.com/{lh_there}/Files/migrationcontainer/a" in code
+    assert f"https://onelake.dfs.fabric.microsoft.com/{there}/{lh_there}/Files/b" in code and home not in code
+    assert out[0] == cells[0]  # only code changes
+    assert lifecycle.retarget(cells, home, lh_there) == cells  # its own workspace: unchanged
+
+
+def test_creating_a_notebook_in_a_workspace_without_its_lakehouse_is_refused_with_what_to_do(generated, tmp_path):
+    store, pid = generated
+    m = store.load_workload_manifest(pid)
+    w = _w(m, "nb_clean")
+    path = store.project_dir(pid) / w.artifact.file
+    nb = json.loads(path.read_text(encoding="utf-8"))
+    nb["cells"].append({"cell_type": "code", "metadata": {}, "outputs": [], "execution_count": None,
+                        "source": ['df = spark.read.csv("abfss://20a53380-5e45-4865-ad6e-857633511290@onelake.dfs.fabric.microsoft.com/'
+                                   'd75e351a-7f8c-484f-a00a-16a48148e3e6/Files/c/x.csv")']})
+    path.write_text(json.dumps(nb), encoding="utf-8")
+    w.artifact.sha256 = __import__("hashlib").sha256(path.read_bytes()).hexdigest()
+    store.save_workload_manifest(pid, m)
+    (store.project_dir(pid) / "storage").mkdir(exist_ok=True)
+    (store.project_dir(pid) / "storage" / "storage-map.json").write_text(json.dumps({"lakehouse": "LH_Main"}), encoding="utf-8")
+
+    class NoLakehouse(CreatingFabric):
+        def _call(self, method, url, body=None):
+            if method == "GET" and url.endswith("/lakehouses"):
+                return super()._call("GET", url.replace("/lakehouses", "/notebooks-none"))
+            return super()._call(method, url, body)
+
+    with pytest.raises(lifecycle.LifecycleError, match="Plan target"):
+        lifecycle.create_notebook(store, pid, NoLakehouse(), WS, "nb_clean", by="Pat", apply=True)

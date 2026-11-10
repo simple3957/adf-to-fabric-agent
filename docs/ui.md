@@ -17,9 +17,16 @@ authorised by the server (see [security.md](security.md)).
 | 8 | Validate | `validate` stage | a validation result exists |
 | 9 | Report | `GET /report` | always readable; "verified" only if the backend says so |
 
+Ids are kept per workspace. The notebook, child-pipeline and lakehouse ids saved for one workspace are never used in another:
+"Things you need to set" shows the chosen workspace's own ids, Convert with a workspace chosen sets the other workspace's ids aside
+(`conversion/bindings-by-workspace/<workspace>.json`) and brings back this one's, and a deploy of a conversion made with another
+workspace's ids is refused (dry run included) with what to do. Connections are not tied to a workspace and stay.
+
 When the approved brief was agreed for another workspace than the one chosen, the server refuses a real deploy and real runs there; the
 Deploy step says so before the dry run (`GET /brief` carries `deploy_refused`), keeps **Deploy** disabled with that reason, and the dry run's
 warnings repeat it. Fix: Consult, 'Use the workspace chosen now' and save again; or choose the workspace the brief was agreed for.
+Likewise `runs_refused` (that reason, or a brief whose validation depth does not allow real runs) is shown at the top of
+**Run in Fabric and compare**, whose pipeline list and **Run and compare** stay disabled, so nobody chooses pipelines and types RUN only to be refused.
 
 Deploy comes before Validate (since 2026-11-06), so validation checks what is deployed (its API and deployment stages read the workspace).
 On Convert, "Things you need to set" lists each notebook a pipeline runs; for a notebook the tool generated, **Create it in Fabric from the

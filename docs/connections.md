@@ -37,6 +37,18 @@ refused, and the person chooses it as the existing connection or gives another d
 (`name-2`, `name-3`…) are checked one by one, so only missing ones are created. A connection created earlier in the same apply counts too.
 (Added 2026-11-05; before that every apply posted a new connection.)
 
+## Existing connections offered for a linked service
+
+Each card lists the Fabric connections of the same type that may fit: **exact** (same address) or **partial** (same server, another
+database / container / path; reuse only if its credentials cover it). Only exact matches are bound automatically. For a connection
+identified by a URL (Databricks, REST) the server is the URL's host. Until 2026-11-10 it was the text before the first `/`, which is
+`https:` for every URL, so any Databricks connection was offered for any Databricks linked service (found live: a workspace's
+linked service was offered, and bound by hand to, another workspace's connection).
+
+Choosing **Skip** for a linked service also removes its earlier bindings (its own and its variants' `<name>?...` keys) from
+`conversion/resolutions.json`, so convert no longer uses a connection the card says is not bound (fixed 2026-11-10; before that the
+binding stayed until it was edited by hand).
+
 ## Not implemented / cannot be (and why)
 
 * Interactive OAuth and gateway-backed connections cannot be created through Fabric's API: create them in Fabric, then choose

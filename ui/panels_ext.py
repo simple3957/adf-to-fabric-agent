@@ -186,7 +186,9 @@ def plan(api: ApiClient, pid: str, dest: dict, prov: dict | None) -> None:
             return
     with st.form("plan-form", border=False):
         a, b = st.columns(2)
-        lakehouses = a.text_input("Lakehouse name(s), comma-separated", key="plan-lh", help="A name is never invented: leave empty if none is needed.")
+        lakehouses = a.text_input("Lakehouse name(s), comma-separated", key="plan-lh",
+                                  help="Leave empty and the plan uses the lakehouse name chosen for the storage map when the notebooks need one, "
+                                       "with the OneLake shortcuts they read through. A name is never invented.")
         warehouses = b.text_input("Warehouse name(s), comma-separated", key="plan-wh")
         identity = st.checkbox("Plan a workspace identity", key="plan-id")
         go = st.form_submit_button("Build / refresh the plan", type="primary", disabled=not (has_ws and can("plans:generate")))
@@ -387,15 +389,18 @@ def _run_and_compare(api: ApiClient, pid: str, rep: dict, ws: bool) -> None:
         if not deployed:
             st.caption("Deploy pipelines first: only deployed pipelines can be run.")
             return
-        chosen = st.multiselect("Pipelines to run (up to 20)", deployed, key="run-pipes", max_selections=20)
+        refused = (read(api, "brief", pid) or {}).get("runs_refused") or ""
+        if refused:  # the server refuses real runs here: say so before a pipeline is chosen and RUN typed, not after the last click
+            st.error("Real runs will be refused. " + refused)
+        chosen = st.multiselect("Pipelines to run (up to 20)", deployed, key="run-pipes", max_selections=20, disabled=bool(refused))
         wait = st.select_slider("Wait for each run up to", [5, 10, 20, 30, 50], value=30, key="run-wait", format_func=lambda m: f"{m} min",
                                 help="A run that takes longer keeps running in Fabric; it is simply not compared. Kept within one sign-in's lifetime.")
         then_validate = st.checkbox("Then validate the migration (files, Fabric, deployment and these runs)", value=True, key="run-then-validate",
                                     help="Runs the validation once the runs are recorded, so the verdict below includes them. It starts nothing more.")
         sure = typed_confirm("Start real runs of the selected pipelines in Fabric", "RUN", "run-confirm", disabled=not chosen)
         allowed = can("migration:execute")
-        if st.button("Run and compare", key="run-go", type="primary", disabled=not (ws and chosen and sure and allowed),
-                     help=None if allowed else "Your role cannot start runs (needs migration:execute)."):
+        if st.button("Run and compare", key="run-go", type="primary", disabled=bool(refused) or not (ws and chosen and sure and allowed),
+                     help=refused or (None if allowed else "Your role cannot start runs (needs migration:execute).")):
             ran = run_job(lambda: api.run_stage(pid, "verify", pipelines=chosen, run=True, confirm=True, run_timeout=wait * 60, idempotency_key=intent("run-verify")),
                           "Running in Fabric and comparing", intent_name="run-verify")
             if ran and ran["state"] == "succeeded":

@@ -115,8 +115,26 @@ class ConnectionService:
         choices = self.load_choices(pid)
         choices[ls.name.lower()] = choice
         self._save_choices(pid, choices)
+        if choice.method == catalog.SKIP_METHOD:  # "no connection" must not leave an earlier binding for convert to use
+            self._unbind(pid, ls.name)
         self._states.pop((pid, ls.name), None)
         return choice
+
+    def _unbind(self, pid: str, ls_name: str) -> None:
+        """Drop this linked service's connection bindings (its own and its variants' ``<name>?...`` keys) from resolutions.json."""
+        path = self.store.conversion_dir(pid) / "resolutions.json"
+        if not path.exists():
+            return
+        with lock_for(path):
+            try:
+                entries = json.loads(read_text_retry(path))
+            except ValueError:
+                return  # damaged: left for a person, as _merge_resolutions does
+            low = ls_name.lower()
+            keep = [e for e in entries if not (e.get("type") == "LinkedServiceToConnectionId"
+                                               and (str(e.get("key", "")).lower() == low or str(e.get("key", "")).lower().startswith(low + "?")))]
+            if len(keep) != len(entries):
+                write_atomic(path, json.dumps(keep, indent=2) + "\n")
 
     def put_secret(self, session: str, pid: str, linked_service: str, field: str, value: str) -> None:
         """Hold a secret for one linked service field. It is never persisted, logged or returned."""

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
@@ -74,7 +75,7 @@ def deploy(store: ProjectStore, project_id: str, client: FabricClient, workspace
                 r = notebook_deploy.deploy_notebook(client, workspace, w.artifact.display_name or w.name,
                                                     notebook_deploy.build_definition(project_dir / str(w.artifact.file)), apply=apply)
                 if apply and r.item_id:
-                    w.artifact.fabric_item_id = r.item_id
+                    _record_item(w, workspace, r.item_id)
                     if resolutions is not None:
                         notebook_deploy.bind_resolutions(resolutions, w.name, r.item_id, workspace)
             elif w.artifact.kind == "fabric_spark_job_definition":
@@ -84,7 +85,7 @@ def deploy(store: ProjectStore, project_id: str, client: FabricClient, workspace
                 definition = json.loads((project_dir / str(w.artifact.definition_file)).read_text(encoding="utf-8"))
                 r = sjd_deploy.deploy_spark_job_definition(client, workspace, w.artifact.display_name or w.name, definition, apply=apply)
                 if apply and r.item_id:
-                    w.artifact.fabric_item_id = r.item_id
+                    _record_item(w, workspace, r.item_id)
             else:
                 results.append((w, f"skipped: unsupported artifact kind {w.artifact.kind}"))
                 continue
@@ -113,13 +114,19 @@ def create_notebook(store: ProjectStore, project_id: str, client: FabricClient, 
     path = store.project_dir(project_id) / str(w.artifact.file)
     if not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest() != w.artifact.sha256:
         raise LifecycleError("The generated notebook changed since it was generated; run workloads-generate again.")
+    cells, moved = workspace_cells(store, project_id, client, workspace, w)
+    if moved:  # this workspace's copy: the same code, its OneLake paths pointed at this workspace's lakehouse
+        nb = json.loads(path.read_text(encoding="utf-8"))
+        path = path.parent / "workspaces" / f"{workspace.lower()}.ipynb"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({**nb, "cells": cells}, indent=1), encoding="utf-8")
     r = notebook_deploy.deploy_notebook(client, workspace, w.artifact.display_name or w.name, notebook_deploy.build_definition(path), apply=apply)
     if not apply:
         return w, ("Fabric would create a new notebook" if r.action == "create" else
                    "A notebook with this name is already in the workspace: its content would be replaced by the generated notebook"), r.item_id
     item_id = str(r.item_id).lower()
     at = now or datetime.now(timezone.utc)
-    w.artifact.fabric_item_id = item_id
+    _record_item(w, workspace, item_id)
     w.approval = Approval(status="approved", by=by.strip(), at=at, note=f"Accepted by creating the generated notebook in Fabric as {item_id} ({r.action})"[:300])
     if r.action == "update" or (w.execution.fabric_item_id or "").lower() != item_id:
         w.execution = ExecutionEvidence()
@@ -128,7 +135,8 @@ def create_notebook(store: ProjectStore, project_id: str, client: FabricClient, 
     store.save_workload_manifest(project_id, m)
     if resolutions is not None:
         notebook_deploy.bind_resolutions(resolutions, w.name, item_id, workspace)
-    return w, ("Created in Fabric" if r.action == "create" else "Content replaced in Fabric") + ": its id is saved. Convert again to use it.", item_id
+    return w, (("Created in Fabric" if r.action == "create" else "Content replaced in Fabric")
+               + (", reading this workspace's lakehouse" if moved else "") + ": its id is saved. Convert again to use it."), item_id
 
 
 def _bound_item(store: ProjectStore, project_id: str, pipeline: str, activity: str) -> Optional[str]:
@@ -216,6 +224,63 @@ def pipeline_item(store: ProjectStore, project_id: str, w: WorkloadEntry) -> Opt
     return None
 
 
+_G = r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+_ONELAKE_ABFSS = re.compile(r"abfss://(" + _G + r")@onelake\.dfs\.fabric\.microsoft\.com/(" + _G + r")/", re.I)
+_ONELAKE_HTTPS = re.compile(r"https://onelake\.dfs\.fabric\.microsoft\.com/(" + _G + r")/(" + _G + r")/", re.I)
+
+
+def onelake_workspaces(cells: list[dict]) -> set[str]:
+    """The workspaces the code's OneLake paths (by id) name."""
+    code = "\n".join(_code(cells))
+    return {m.group(1).lower() for rx in (_ONELAKE_ABFSS, _ONELAKE_HTTPS) for m in rx.finditer(code)}
+
+
+def retarget(cells: list[dict], workspace: str, lakehouse_id: str) -> list[dict]:
+    """The cells with every OneLake path (by id) of another workspace pointed at ``workspace``'s lakehouse ``lakehouse_id``. Paths below the
+    lakehouse (Files/<shortcut>/...) stay the same: the plan makes the shortcuts with the same names in every workspace."""
+    ws, lh = workspace.lower(), lakehouse_id.lower()
+
+    def one(text: str) -> str:
+        text = _ONELAKE_ABFSS.sub(lambda m: m.group(0) if m.group(1).lower() == ws else f"abfss://{ws}@onelake.dfs.fabric.microsoft.com/{lh}/", text)
+        return _ONELAKE_HTTPS.sub(lambda m: m.group(0) if m.group(1).lower() == ws else f"https://onelake.dfs.fabric.microsoft.com/{ws}/{lh}/", text)
+
+    out = []
+    for c in cells:
+        c = dict(c)
+        if c.get("cell_type") == "code":
+            src = c.get("source", "")
+            c["source"] = [one(x) for x in src] if isinstance(src, list) else one(str(src))
+        out.append(c)
+    return out
+
+
+def workspace_cells(store: ProjectStore, project_id: str, client: FabricClient, workspace: str, w: WorkloadEntry) -> tuple[list[dict], bool]:
+    """(cells, retargeted): the generated notebook as it must be in ``workspace``. When its OneLake paths name another workspace, they are
+    pointed at this workspace's lakehouse of the name the storage map chose; that lakehouse must exist here."""
+    from adf2fabric.agent.deployment.shortcut_deploy import list_lakehouses
+
+    cells = json.loads((store.project_dir(project_id) / str(w.artifact.file)).read_text(encoding="utf-8")).get("cells", [])
+    if not (onelake_workspaces(cells) - {workspace.lower()}):
+        return cells, False
+    try:
+        name = str(json.loads((store.project_dir(project_id) / "storage" / "storage-map.json").read_text(encoding="utf-8")).get("lakehouse") or "")
+    except (OSError, ValueError):
+        name = ""
+    if not name:
+        raise LifecycleError(f"'{w.name}' reads its data through a lakehouse in another workspace, and no lakehouse name is chosen for this "
+                             "project (the storage map). Run the storage map, then plan the lakehouse on Plan target.")
+    lh = list_lakehouses(client, workspace).get(name.lower())
+    if not lh:
+        raise LifecycleError(f"'{w.name}' reads its data through lakehouse '{name}' and its OneLake shortcuts, which this workspace does not "
+                             "have yet. Create them first (Plan target: approve and apply the lakehouse and shortcut steps), then create the notebook.")
+    return retarget(cells, workspace, lh), True
+
+
+def _record_item(w: WorkloadEntry, workspace: str, item_id: str) -> None:
+    w.artifact.fabric_item_id = item_id
+    w.artifact.fabric_item_ids[workspace.lower()] = item_id
+
+
 def _code(cells: list[dict]) -> list[str]:
     return [("".join(c.get("source", "")) if isinstance(c.get("source"), list) else str(c.get("source", ""))).strip()
             for c in cells if c.get("cell_type") == "code"]
@@ -231,7 +296,7 @@ def check_deployed(store: ProjectStore, project_id: str, client: FabricClient, w
     if item_id not in {i.lower() for i in notebook_deploy.list_notebooks(client, workspace).values()}:
         return w, False, "That id is not a notebook in the chosen Fabric workspace."
     deployed = _code(notebook_deploy.read_cells(client, workspace, item_id))
-    generated = _code(json.loads((store.project_dir(project_id) / str(w.artifact.file)).read_text(encoding="utf-8")).get("cells", []))
+    generated = _code(workspace_cells(store, project_id, client, workspace, w)[0])
     if deployed != generated:
         return w, False, (f"The deployed notebook's code differs from the generated one ({len(deployed)} vs {len(generated)} code cell(s)). "
                           "Deploy the generated notebook (or regenerate from the code that is deployed), then bind it.")
@@ -251,7 +316,7 @@ def bind_deployed(store: ProjectStore, project_id: str, client: FabricClient, wo
     w = _find(m, w.id)
     item_id = item_id.strip().strip("{}").lower()
     at = now or datetime.now(timezone.utc)
-    w.artifact.fabric_item_id = item_id
+    _record_item(w, workspace, item_id)
     w.approval = Approval(status="approved", by=by.strip(), at=at, note=f"Accepted by binding the deployed notebook {item_id}: {why}"[:300])
     if w.execution.status == "not_run" and (ran := recorded_run(store, project_id, w, item_id, workspace)) is not None:
         w.execution = ran

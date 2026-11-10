@@ -17,7 +17,7 @@ from adf2fabric.ids import GUID as GUID
 ID = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 _.\-]{0,127}$")  # a project / linked-service / factory display name: no separators, no traversal
 RESOURCE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.()\- ]{0,89}$")  # Azure resource group / factory names
-_ABS_PATH = re.compile(r"([A-Za-z]:[\\/][^\s'\"<>|]*|(?<![\w:/])/(?:home|Users|tmp|var|etc|opt|usr|mnt|private)[^\s'\"<>|]*)")
+_ABS_PATH = re.compile(r"((?<!\w)[A-Za-z]:[\\/][^\s'\"<>|]*|(?<![\w:/])/(?:home|Users|tmp|var|etc|opt|usr|mnt|private)[^\s'\"<>|]*)")
 _BLOCKED_HOSTS = {"localhost", "metadata.google.internal", "metadata", "instance-data"}
 _BLOCKED_SUFFIXES = (".internal", ".local", ".localhost", ".lan", ".corp", ".home")
 

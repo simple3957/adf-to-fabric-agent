@@ -12,6 +12,7 @@ import base64
 import json
 import re
 import uuid
+from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
 DEMO_WS = "00000000-0000-0000-0000-00000000aa01"
@@ -82,7 +83,9 @@ class DemoFabricHttp:
                 return _Resp(200, {"value": []})
             if a in self.pipes and rest == "jobs/Pipeline/instances" and method == "POST":
                 job = str(uuid.uuid4())
-                self.runs[job] = {"id": job, "pipeline": a, "status": "Completed", "startTimeUtc": "2026-01-01T00:00:00Z", "endTimeUtc": "2026-01-01T00:01:00Z"}
+                now = datetime.now(timezone.utc)  # stamped now: a run recorded before the latest deploy is (rightly) not counted for it
+                self.runs[job] = {"id": job, "pipeline": a, "status": "Completed", "startTimeUtc": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                                  "endTimeUtc": (now + timedelta(minutes=1)).strftime("%Y-%m-%dT%H:%M:%SZ")}
                 return _Resp(202, None, {"Location": f"{FABRIC}workspaces/{DEMO_WS}/items/{a}/jobs/instances/{job}", "Retry-After": "0"})
             if a in self.pipes and rest == "jobs/instances" and method == "GET":
                 return _Resp(200, {"value": [{k: v for k, v in r.items() if k != "pipeline"} for r in self.runs.values() if r["pipeline"] == a]})

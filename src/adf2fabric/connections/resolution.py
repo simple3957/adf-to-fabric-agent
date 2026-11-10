@@ -199,13 +199,21 @@ def existing_key(conn: dict) -> tuple[str, str]:
     return t, path.rstrip("/")
 
 
+def _key_host(key: str) -> str:
+    """The server part of a match key: the host of a URL (``https://adb-1.azuredatabricks.net`` -> its host), else the text
+    before the first ``;`` or ``/`` (``server;database``, ``host/container``)."""
+    if "://" in key:
+        return (urlparse(key).hostname or "").lower()
+    return key.split(";")[0].split("/")[0]
+
+
 def match_existing(spec: Optional[catalog.ConnectorSpec], fields: list[EndpointField], connections: list[dict],
                    method: Optional[catalog.AuthMethod]) -> list[ExistingMatch]:
     if spec is None or not connections:
         return []
     ep = {f.name: f.value or "" for f in fields}
     want = match_key(spec, ep)
-    want_host = want.split(";")[0].split("/")[0]
+    want_host = _key_host(want)
     out = []
     for c in connections:
         t, key = existing_key(c)
@@ -214,7 +222,7 @@ def match_existing(spec: Optional[catalog.ConnectorSpec], fields: list[EndpointF
         cred = (c.get("credentialDetails") or {}).get("credentialType")
         if want and key == want:
             kind = "exact"
-        elif want_host and key.split(";")[0].split("/")[0] == want_host:
+        elif want_host and _key_host(key) == want_host:
             kind = "partial"
         else:
             continue

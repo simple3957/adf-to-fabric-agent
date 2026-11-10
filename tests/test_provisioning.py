@@ -68,6 +68,7 @@ class FakeService:
         self.fail: list[dict] = []  # {"method","pattern","status","times","effect":bool,"body"}
         self.hooks: list = []  # callables(method, path) run before handling (to change the world mid-flight)
         self.ops: dict[str, str] = {}
+        self.shortcuts: dict[str, list[dict]] = {}  # lakehouse id -> its shortcuts
 
     # -- failure injection ------------------------------------------------------------------------------------------------
     def inject(self, method, pattern, status, times=1, effect=False, body=None, headers=None):
@@ -155,6 +156,13 @@ class FakeService:
             r = {"id": str(uuid.uuid4()), "principal": body["principal"], "role": body["role"]}
             self.roles[wid].append(r)
             return Resp(201, r)
+        sc = re.fullmatch(r"([^/]+)/shortcuts", rest or "") if sub == "items" else None
+        if sc:
+            rows = self.shortcuts.setdefault(sc.group(1), [])
+            if method == "GET":
+                return self._page(rows)
+            rows.append(dict(body))
+            return Resp(201, dict(body))
         if sub == "items" and method == "GET":
             t = re.search(r"type=(\w+)", q)
             return self._page([i for i in self.items[wid] if not t or i["type"] == t.group(1)])
@@ -942,3 +950,78 @@ def test_state_discovery_is_get_only():
     fab, arm, _ = _gateways(svc, True)
     read_state(fab, arm, arm_spec(workspace_name="target-ws"), NOW)
     assert svc.writes() == []
+
+
+# ---- the lakehouse and OneLake shortcuts the generated notebooks read through ----------------------------------------------------
+
+STORAGE_CONN = "66666666-6666-6666-6666-666666666666"
+
+
+def _shortcut_inputs(real: rq.Inputs, connections: dict | None = None, lakehouse: str = "LH_Chosen") -> rq.Inputs:
+    from types import SimpleNamespace as N
+
+    wl = N(workloads=[N(source_item="/Shared/NB_A", used_by=["PL_Spark/Run_A"], artifact=N(kind="none", display_name=""),
+                        approval=N(status="pending"),
+                        required_resources=[N(kind="shortcut", name=f"{rq.SHORTCUT_PREFIX}acct1", reason="")])])
+    smap = {"lakehouse": lakehouse, "shortcuts": [
+        {"shortcut": "container1", "account": "acct1", "account_url": "https://acct1.dfs.core.windows.net", "path": "Files",
+         "subpath": "/container1", "linked_services": ["LS_Lake"]},
+        {"shortcut": "unused", "account": "acct9", "account_url": "https://acct9.dfs.core.windows.net", "path": "Files",
+         "subpath": "/c9", "linked_services": ["LS_Other"]}]}
+    return rq.Inputs(real.compute, wl, real.inventory, smap, {"ls_lake": STORAGE_CONN} if connections is None else connections)
+
+
+def test_the_lakehouse_and_the_shortcuts_the_notebooks_need_are_planned_with_the_chosen_name(project):
+    store, pid = project
+    reqs, notes = rq.build_requirements(spec(lakehouse_names=[]), _shortcut_inputs(rq.load_inputs(store, pid)))
+    lh = [r for r in reqs if r.type is T.lakehouse]
+    sc = [r for r in reqs if r.type is T.shortcut]
+    assert [r.name for r in lh] == ["LH_Chosen"]  # the storage map's name, a person's choice; never one made up
+    assert [r.name for r in sc] == ["container1"]  # only the shortcut a notebook reads through
+    assert sc[0].spec["connection_id"] == STORAGE_CONN and sc[0].spec["lakehouse"] == "LH_Chosen" and lh[0].id in sc[0].depends_on
+    reqs, _ = rq.build_requirements(spec(lakehouse_names=[]), _shortcut_inputs(rq.load_inputs(store, pid), lakehouse=""))
+    assert [r.spec.get("unnamed") for r in reqs if r.type is T.lakehouse] == [True]  # no name anywhere: asked for, not invented
+
+
+def test_lakehouse_and_shortcut_are_created_and_an_identical_shortcut_is_reused(prov, monkeypatch):
+    store, pid = prov
+    real = rq.load_inputs(store, pid)
+    monkeypatch.setattr(rq, "load_inputs", lambda s, p: _shortcut_inputs(real))
+    svc = FakeService()
+    _workspace(svc)
+    store, pid, fab, arm, _, p = _planned(prov, svc, lakehouse_names=[])
+    step = _step(p, T.shortcut)
+    assert step.action is Action.create and step.requires_approval and "connectionId" in json.dumps(step.request)
+    service.approve(store, pid, None, "pat")
+    run, report = service.apply(store, pid, fab, arm, do_apply=True)
+    assert report.all_verified, [(r.step_id, r.status, r.detail) for r in run.results]
+    lh = next(i for i in svc.items[WS_ID] if i["displayName"] == "LH_Chosen")
+    made = svc.shortcuts[lh["id"]]
+    assert made == [{"name": "container1", "path": "Files", "target": {"adlsGen2": {"location": "https://acct1.dfs.core.windows.net",
+                                                                                      "subpath": "/container1", "connectionId": STORAGE_CONN}}}]
+    service.plan(store, pid, spec(lakehouse_names=[]), fab, arm, NOW)  # again: nothing is created twice
+    service.approve(store, pid, None, "pat")
+    service.apply(store, pid, fab, arm, do_apply=True)
+    assert len(svc.shortcuts[lh["id"]]) == 1
+
+
+def test_a_shortcut_without_a_bound_connection_is_blocked_and_one_pointing_elsewhere_is_never_replaced(prov, monkeypatch):
+    store, pid = prov
+    real = rq.load_inputs(store, pid)
+    monkeypatch.setattr(rq, "load_inputs", lambda s, p: _shortcut_inputs(real, connections={}))
+    svc = FakeService()
+    _workspace(svc)
+    *_, p = _planned(prov, svc, lakehouse_names=[])
+    assert _step(p, T.shortcut).action is Action.blocked and "Connect step" in _step(p, T.shortcut).blockers[0]
+    monkeypatch.setattr(rq, "load_inputs", lambda s, p: _shortcut_inputs(real))
+    svc = FakeService()
+    _workspace(svc)
+    svc.items[WS_ID].append({"id": "lh-9", "displayName": "LH_Chosen", "type": "Lakehouse"})
+    svc.shortcuts["lh-9"] = [{"name": "container1", "path": "Files", "target": {"adlsGen2": {"location": "https://other.dfs.core.windows.net",
+                                                                                               "subpath": "/x", "connectionId": STORAGE_CONN}}}]
+    store, pid, fab, arm, _, p = _planned(prov, svc, lakehouse_names=[])
+    service.approve(store, pid, None, "pat")
+    run, _ = service.apply(store, pid, fab, arm, do_apply=True)
+    r = next(x for x in run.results if x.step_id == _step(p, T.shortcut).id)
+    assert r.status is StepStatus.failed and "NOT replaced" in r.detail
+    assert svc.shortcuts["lh-9"][0]["target"]["adlsGen2"]["location"] == "https://other.dfs.core.windows.net"

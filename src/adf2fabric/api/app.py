@@ -62,6 +62,8 @@ _ZIP_MAGIC = (b"PK\x03\x04", b"PK\x05\x06")
 _FIELD = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
 _LS = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 _.\-]{0,127}$")
 MAX_PENDING_UPLOADS = 5
+RUNS_NOT_ALLOWED = ("The approved consultation brief does not allow real runs (validation depth, or data restrictions). "
+                    "Change the brief on the Consult step to allow them.")
 
 # the permission each migration stage needs (the stage route re-checks against this, on top of its baseline)
 STAGE_PERMISSION = {"discovery": P.discovery_run, "semantic": P.discovery_run, "dependencies": P.discovery_run, "reconstruct": P.discovery_run,
@@ -675,7 +677,7 @@ def create_app(settings: Optional[Settings] = None, live: Optional[Container] = 
         from adf2fabric.project import bindings as B
 
         slug = ctx.project(pid)
-        items = B.open_items(ctx.c.store, slug)
+        items = B.open_items(ctx.c.store, slug, ctx.session.destination.get("workspace_id"))
         fabric, why = _fabric_or_why(ctx)
         found, read_error = B.candidates(fabric, ctx.session.destination.get("workspace_id"), items) if items else ({}, "")
         return {"items": [{**i, "candidates": found.get(i["key"], [])} for i in items], "fabric_note": why or read_error,
@@ -715,7 +717,7 @@ def create_app(settings: Optional[Settings] = None, live: Optional[Container] = 
                         raise guards.Rejected(f"'{seen.get('displayName')}' is a {actual} connection; Invoke pipeline needs a {want} one.")
                     verified = True
         try:
-            done = B.set_binding(ctx.c.store, slug, body.key, body.value)
+            done = B.set_binding(ctx.c.store, slug, body.key, body.value, ctx.session.destination.get("workspace_id"))
         except B.BindingError as exc:
             raise guards.Rejected(str(exc)) from None
         ctx.audit("binding.set", resource="binding", resource_id=done["key"], changed=done["changed"], verified=verified)
@@ -734,7 +736,9 @@ def create_app(settings: Optional[Settings] = None, live: Optional[Container] = 
             if w.artifact.kind != "fabric_notebook":
                 continue
             used = L.pipeline_item(ctx.c.store, slug, w) or ""
-            bound = (w.artifact.fabric_item_id or "").lower()
+            ws = str(ctx.session.destination.get("workspace_id") or "").lower()
+            bound = (w.artifact.fabric_item_ids.get(ws) if ws and w.artifact.fabric_item_ids else w.artifact.fabric_item_id or "") or ""
+            bound = bound.lower()
             out.append({"name": w.name, "used_by": list(w.used_by), "generated": w.generation.status == "generated",
                         "pipeline_item_id": used, "bound_item_id": bound, "approval": w.approval.status,
                         "state": "bound" if bound and bound == used.lower() and w.approval.status == "approved" else "not bound"})
@@ -760,6 +764,10 @@ def create_app(settings: Optional[Settings] = None, live: Optional[Container] = 
         if not ctx.c.store.has_workload_manifest(slug):
             raise HTTPException(409, "No Spark workloads were generated for this project.")
         client = FabricClient(ctx.c.fabric_token(ctx.session), session=ctx.c.fabric_http)
+        if body.confirm:  # an id is saved for the workspace it belongs to; the ids of the one used before are kept for it
+            from adf2fabric.project import bindings as B
+
+            B.use_workspace(ctx.c.store, slug, ws)
         try:
             if not body.confirm:
                 _w, ok, why = L.check_deployed(ctx.c.store, slug, client, ws, body.workload, item)
@@ -792,6 +800,10 @@ def create_app(settings: Optional[Settings] = None, live: Optional[Container] = 
         if not ctx.c.store.has_workload_manifest(slug):
             raise HTTPException(409, "No Spark workloads were generated for this project.")
         client = FabricClient(ctx.c.fabric_token(ctx.session), session=ctx.c.fabric_http)
+        if body.confirm:  # the new id is this workspace's; the ids of the one used before are kept for it
+            from adf2fabric.project import bindings as B
+
+            B.use_workspace(ctx.c.store, slug, ws)
         try:
             _w, detail, item = L.create_notebook(ctx.c.store, slug, client, ws, body.workload, by=ctx.principal.id, apply=body.confirm,
                                                  resolutions=ctx.c.store.conversion_dir(slug) / "resolutions.json")
@@ -1050,7 +1062,7 @@ def create_app(settings: Optional[Settings] = None, live: Optional[Container] = 
             body = body.model_copy(update={"pipelines": list(unique.values())})
             agreed = brief_record.approved_settings(ctx.c.store, slug, ctx.session.destination)
             if agreed is not None and not agreed.get("allow_real_runs"):
-                raise HTTPException(409, "The approved consultation brief does not allow real runs (validation depth, or data restrictions). Change the brief to allow them.")
+                raise HTTPException(409, RUNS_NOT_ALLOWED)
         key = _idem_key(ctx, request)
         sig = _idem_sig(slug, f"stage.{stage}", body)
         with app.state.idem_lock:  # two requests with one key must not both start a job
@@ -1267,8 +1279,10 @@ def create_app(settings: Optional[Settings] = None, live: Optional[Container] = 
     def _brief_view(ctx: Ctx, slug: str) -> dict:
         # the same check a real deploy and a real run make: say it before the person gets there, not only when they click
         refused = brief_record.workspace_mismatch(ctx.c.store, slug, ctx.session.destination.get("workspace_id"))
+        agreed = brief_record.approved_settings(ctx.c.store, slug, ctx.session.destination)
+        no_runs = RUNS_NOT_ALLOWED if agreed is not None and not agreed.get("allow_real_runs") else ""
         return {**brief_record.view(ctx.c.store, slug, ctx.session.destination), "deploy_refused": refused or "",
-                "workspace_chosen": bool(ctx.session.destination.get("workspace_id"))}
+                "runs_refused": refused or no_runs, "workspace_chosen": bool(ctx.session.destination.get("workspace_id"))}
 
     @app.get("/projects/{pid}/brief")
     def brief_view(pid: str, ctx: Ctx = Depends(), _: Principal = need(P.reports_view)):

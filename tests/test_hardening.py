@@ -155,3 +155,11 @@ def test_saved_jobs_beyond_the_limit_are_deleted_and_a_damaged_file_hides_nothin
     again = jobs_mod.JobRegistry(store=tmp_path)
     assert len([j for j in again.list() if j.state == jobs_mod.SUCCEEDED]) <= 4
     assert len(list(tmp_path.glob("*.json"))) <= 6  # the evicted ones were removed from disk too
+
+
+def test_scrubbing_server_paths_leaves_web_addresses_whole():
+    from adf2fabric.api.security.guards import scrub
+
+    assert scrub("endpoint https://acct1.dfs.core.windows.net/c") == "endpoint https://acct1.dfs.core.windows.net/c"
+    assert scrub(r"failed reading C:\Users\me\projects\p\x.json") == "failed reading <path>"
+    assert scrub("see c:/data/run.log and /home/me/x") == "see <path> and <path>"

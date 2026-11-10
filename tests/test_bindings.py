@@ -103,7 +103,9 @@ def test_the_api_lists_open_items_and_records_a_verified_binding(api):
     assert ok.status_code == 200 and ok.json()["verified"] is True
     again = next(i for i in api.get("/projects/test-proj/bindings").json()["items"] if i["key"] == "notebook:NB_X")
     assert again["value"] == NB and again["bound"] is False  # saved; "bound" turns true when the next convert has used it
-    assert json.loads((api.store.conversion_dir("test-proj") / "resolutions.json").read_text(encoding="utf-8"))[0]["value"] == NB
+    saved = json.loads((api.store.conversion_dir("test-proj") / "resolutions.json").read_text(encoding="utf-8"))
+    assert {"type": "ItemToId", "key": "notebook:NB_X", "value": NB} in saved
+    assert {"type": "WorkspaceId", "key": "*", "value": "33333333-3333-3333-3333-333333333333"} in saved  # saved for the workspace it was chosen in
 
 
 def test_the_api_refuses_a_notebook_id_that_is_not_in_the_workspace(api):
@@ -158,3 +160,24 @@ def test_the_api_and_a_deploy_say_when_the_bindings_belong_to_another_workspace(
     assert "another Fabric workspace" in api.get("/projects/test-proj/bindings").json()["workspace_note"]
     api.put("/session/destination", json={"provider": "azure_cli", "workspace_id": other})
     assert api.get("/projects/test-proj/bindings").json()["workspace_note"] is None
+
+
+def test_ids_are_kept_per_workspace_and_never_carried_to_another(tmp_path):
+    store, pid, _ = _convert(tmp_path, FILES)
+    _with_notebook(store, pid)
+    ws_a, ws_b = "33333333-3333-3333-3333-333333333333", "55555555-5555-5555-5555-555555555555"
+    B.set_binding(store, pid, "notebook:NB_X", NB, ws_a)
+    store.conversion_dir(pid).joinpath("resolutions.json").write_text(json.dumps(
+        json.loads(store.conversion_dir(pid).joinpath("resolutions.json").read_text(encoding="utf-8"))
+        + [{"type": "LinkedServiceToConnectionId", "key": "LS_Lake", "value": "66666666-6666-6666-6666-666666666666"}]), encoding="utf-8")
+    item = next(i for i in B.open_items(store, pid, ws_b) if i["key"] == "notebook:NB_X")
+    assert item["value"] is None and item["bound"] is False  # workspace B never sees A's notebook id
+    assert B.use_workspace(store, pid, ws_b) is True
+    now = json.loads(store.conversion_dir(pid).joinpath("resolutions.json").read_text(encoding="utf-8"))
+    assert not any(e.get("key") == "notebook:NB_X" for e in now)  # A's id is set aside for A
+    assert {"type": "LinkedServiceToConnectionId", "key": "LS_Lake", "value": "66666666-6666-6666-6666-666666666666"} in now  # connections stay
+    assert B.bound_workspace(store, pid) == ws_b
+    B.use_workspace(store, pid, ws_a)  # back to A: its id comes back
+    assert next(i for i in B.open_items(store, pid, ws_a) if i["key"] == "notebook:NB_X")["value"] == NB
+    assert B.use_workspace(store, pid, ws_a) is False  # nothing to change
+

@@ -6,6 +6,10 @@ the item is created in Fabric. This module lists those open items from the conve
 
 * a connection that belongs to an ADF linked service is set on the **Connect** step (``LinkedServiceToConnectionId``);
 * a child pipeline's id and the workspace id are filled in by ``deploy`` itself.
+
+Ids are kept per Fabric workspace. A notebook, Spark job, dataflow, lakehouse or child pipeline exists in one workspace only, so
+``use_workspace`` sets the current workspace's ids aside (``conversion/bindings-by-workspace/<workspace>.json``) before another
+workspace's are used, and brings them back when that workspace is chosen again. Connections are not tied to a workspace and stay.
 """
 from __future__ import annotations
 
@@ -25,6 +29,53 @@ ITEM_KINDS: dict[str, tuple[str, str]] = {
     "lakehouse": ("Fabric lakehouse", "Lakehouse"),  # the Convert step's lakehouse option leaves <item:lakehouse:NAME> until the item's id is known
 }
 FABRIC_PIPELINE_CONNECTION = "FabricDataPipelines"  # the connection type behind an Invoke pipeline activity
+WORKSPACE_KINDS = set(ITEM_KINDS) | {"pipeline"}  # binding kinds whose id belongs to one workspace (a child pipeline's too)
+
+
+def _scoped(e: dict) -> bool:
+    """An entry that belongs to one workspace: its workspace id, or the id of an item in it."""
+    return e.get("type") == "WorkspaceId" or (e.get("type") == "ItemToId" and str(e.get("key", "")).split(":", 1)[0].lower() in WORKSPACE_KINDS)
+
+
+def _kept_path(store: ProjectStore, pid: str, workspace: str):
+    return store.conversion_dir(pid) / "bindings-by-workspace" / f"{workspace}.json"
+
+
+def _kept(store: ProjectStore, pid: str, workspace: str) -> list[dict]:
+    """The ids saved earlier for ``workspace`` while another was in use."""
+    try:
+        data = json.loads(read_text_retry(_kept_path(store, pid, workspace)))
+    except (FileNotFoundError, ValueError):
+        return []
+    return [e for e in data if isinstance(e, dict) and _scoped(e)] if isinstance(data, list) else []
+
+
+def use_workspace(store: ProjectStore, pid: str, workspace: Optional[str]) -> bool:
+    """Make ``workspace``'s ids the ones Convert reads. The ids of the workspace in use are set aside for it, and the ids kept for
+    ``workspace`` (if it was used before) come back; connections stay. True when something changed. Never drops an id."""
+    from adf2fabric.connections.catalog import normalize_guid
+
+    ws = normalize_guid(workspace or "")
+    if not _GUID.match(ws):
+        return False
+    path = store.conversion_dir(pid) / "resolutions.json"
+    if not path.parent.exists():
+        return False
+    with lock_for(path):
+        entries = _resolution_entries(store, pid)
+        bound = next((normalize_guid(str(e.get("value") or "")) for e in entries if e.get("type") == "WorkspaceId"), None)
+        if bound == ws:
+            return False
+        scoped = [e for e in entries if _scoped(e)]
+        if bound and scoped:
+            kept = _kept_path(store, pid, bound)
+            kept.parent.mkdir(parents=True, exist_ok=True)
+            write_atomic(kept, json.dumps(scoped, indent=2) + "\n")
+        back = [e for e in _kept(store, pid, ws) if e.get("type") != "WorkspaceId"]
+        mine = back if bound else [e for e in scoped if e.get("type") != "WorkspaceId"]  # no workspace recorded yet: they become this one's
+        out = [e for e in entries if not _scoped(e)] + mine + [{"type": "WorkspaceId", "key": "*", "value": ws}]
+        write_atomic(path, json.dumps(out, indent=2) + "\n")
+    return True
 
 
 class BindingError(ValueError):
@@ -47,14 +98,23 @@ def _linked_service_names(store: ProjectStore, pid: str) -> set[str]:
         return set()
 
 
-def open_items(store: ProjectStore, pid: str) -> list[dict[str, Any]]:
+def open_items(store: ProjectStore, pid: str, workspace: Optional[str] = None) -> list[dict[str, Any]]:
     """Every id a person has to supply for this conversion, bound or not (so a saved answer stays visible and can be changed).
 
-    ``key`` is the resolutions key (``notebook:NB_X`` or ``connection:invoke-pipeline``); ``item_type`` is what Fabric calls it."""
+    ``key`` is the resolutions key (``notebook:NB_X`` or ``connection:invoke-pipeline``); ``item_type`` is what Fabric calls it.
+    With ``workspace`` other than the one the ids in use were saved for, a workspace's item shows that workspace's own saved id (or
+    none) and is not bound: the last Convert used another workspace's."""
+    from adf2fabric.connections.catalog import normalize_guid
+
     if not store.has_conversion(pid):
         return []
     conv = store.load_conversion(pid)
-    entries = {(str(e.get("type")), str(e.get("key", "")).lower()): str(e.get("value", "")) for e in _resolution_entries(store, pid)}
+    raw = _resolution_entries(store, pid)
+    ws, bound_ws = normalize_guid(workspace or ""), bound_workspace(store, pid)
+    other = bool(ws and bound_ws and ws != bound_ws)
+    if other:
+        raw = [e for e in raw if not _scoped(e)] + _kept(store, pid, ws)
+    entries = {(str(e.get("type")), str(e.get("key", "")).lower()): str(e.get("value", "")) for e in raw}
     ls_names = _linked_service_names(store, pid)
     out: list[dict[str, Any]] = []
     for q in conv.workspace_items:
@@ -63,7 +123,7 @@ def open_items(store: ProjectStore, pid: str) -> list[dict[str, Any]]:
             continue  # a child pipeline and the workspace are filled in at deploy
         label, item_type = ITEM_KINDS[kind]
         out.append({"key": q.name, "kind": kind, "name": name, "label": label, "item_type": item_type, "detail": q.detail,
-                    "needed_by": list(q.needed_by), "bound": q.bound, "value": entries.get(("ItemToId", q.name.lower())) or None})
+                    "needed_by": list(q.needed_by), "bound": q.bound and not other, "value": entries.get(("ItemToId", q.name.lower())) or None})
     for q in conv.connections:
         if q.name.lower() in ls_names:
             continue  # belongs to a linked service: the Connect step
@@ -73,8 +133,9 @@ def open_items(store: ProjectStore, pid: str) -> list[dict[str, Any]]:
     return sorted(out, key=lambda i: (i["bound"], i["kind"], i["name"].lower()))
 
 
-def set_binding(store: ProjectStore, pid: str, key: str, value: str) -> dict[str, Any]:
-    """Record ``key`` -> ``value`` in the resolutions file. Only a key this conversion asks for is accepted, and only a GUID."""
+def set_binding(store: ProjectStore, pid: str, key: str, value: str, workspace: Optional[str] = None) -> dict[str, Any]:
+    """Record ``key`` -> ``value`` in the resolutions file. Only a key this conversion asks for is accepted, and only a GUID. With
+    ``workspace`` the ids in use are that workspace's first (``use_workspace``), so an id is saved for the workspace it was chosen in."""
     from adf2fabric.connections.catalog import normalize_guid
 
     value = normalize_guid(value)
@@ -83,6 +144,8 @@ def set_binding(store: ProjectStore, pid: str, key: str, value: str) -> dict[str
     known = {i["key"].lower(): i["key"] for i in open_items(store, pid)}
     if key.lower() not in known:
         raise BindingError("This conversion does not need that item: it is not in the list of open bindings.")
+    if key.split(":", 1)[0].lower() in WORKSPACE_KINDS:
+        use_workspace(store, pid, workspace)
     key = known[key.lower()]
     path = store.conversion_dir(pid) / "resolutions.json"
     with lock_for(path):
@@ -118,9 +181,9 @@ def mismatch_text(bound: Optional[str], workspace_id: Optional[str]) -> Optional
     ws = normalize_guid(workspace_id or "")
     if not bound or not ws or bound == ws:
         return None
-    return (f"The saved bindings were made for another Fabric workspace (ending ...{bound[-6:]}); the one chosen now ends ...{ws[-6:]}. "
-            "Notebook, child-pipeline and lakehouse ids belong to the workspace they were bound in and will not exist in this one. "
-            "Bind them for this workspace and Convert again, or choose the workspace the bindings were made for.")
+    return (f"The last Convert used the ids saved for another Fabric workspace (ending ...{bound[-6:]}); the one chosen now ends ...{ws[-6:]}. "
+            "Ids are kept per workspace and never carried over: create or bind the notebooks in this workspace, then Convert again "
+            "(the other workspace's ids are kept for it).")
 
 
 def workspace_mismatch(store: ProjectStore, pid: str, workspace_id: Optional[str]) -> Optional[str]:

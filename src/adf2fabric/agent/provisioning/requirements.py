@@ -21,6 +21,7 @@ from adf2fabric.project.workloads import WorkloadManifest
 
 FABRIC_SKU_CU = (2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048)  # F2 .. F2048: the SKU's number is its capacity units
 UNNAMED_LAKEHOUSE = "(name not chosen)"
+SHORTCUT_PREFIX = "OneLake shortcut to "  # how a workload names the shortcut its rewritten paths need (agent/workloads/engine.py)
 
 
 def rid(type_: T, name: str) -> str:
@@ -56,14 +57,31 @@ def load_compute_plan(store: ProjectStore, pid: str) -> Optional[ComputePlan]:
 
 
 class Inputs:
-    def __init__(self, compute: Optional[ComputePlan], workloads: Optional[WorkloadManifest], inventory: Optional[DependencyInventory]):
+    def __init__(self, compute: Optional[ComputePlan], workloads: Optional[WorkloadManifest], inventory: Optional[DependencyInventory],
+                 storage_map: Optional[dict] = None, connections: Optional[dict[str, str]] = None):
         self.compute, self.workloads, self.inventory = compute, workloads, inventory
+        self.storage_map = storage_map or {}  # storage/storage-map.json: the lakehouse name a person chose and the shortcuts it plans
+        self.connections = connections or {}  # linked service (lower case) -> the Fabric connection id bound to it
 
 
 def load_inputs(store: ProjectStore, pid: str) -> Inputs:
+    import json
+
     wl = store.load_workload_manifest(pid) if store.has_workload_manifest(pid) else None
     inv = store.load_dependency_inventory(pid) if store.has_dependency_inventory(pid) else None
-    return Inputs(load_compute_plan(store, pid), wl, inv)
+    storage_map: dict = {}
+    connections: dict[str, str] = {}
+    try:
+        storage_map = json.loads((store.project_dir(pid) / "storage" / "storage-map.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        pass
+    try:
+        for e in json.loads((store.conversion_dir(pid) / "resolutions.json").read_text(encoding="utf-8")):
+            if isinstance(e, dict) and e.get("type") == "LinkedServiceToConnectionId" and e.get("value"):
+                connections[str(e.get("key", "")).lower()] = str(e["value"])
+    except (OSError, ValueError, TypeError):
+        pass
+    return Inputs(load_compute_plan(store, pid), wl, inv, storage_map if isinstance(storage_map, dict) else {}, connections)
 
 
 def estimates(inputs: Inputs) -> dict[str, Any]:
@@ -144,6 +162,7 @@ def build_requirements(spec: TargetSpec, inputs: Inputs) -> tuple[list[Requireme
                 depends=base + ([pool_ids[pool]] if pool in pool_ids else []))
 
     lh_needed_by: list[str] = []
+    shortcut_accounts: dict[str, list[str]] = {}  # storage account (lower case) -> the workloads that read it through a shortcut
     wm = inputs.workloads
     if wm is not None:
         for w in wm.workloads:
@@ -157,15 +176,35 @@ def build_requirements(spec: TargetSpec, inputs: Inputs) -> tuple[list[Requireme
             elif w.artifact.kind == "fabric_spark_job_definition" and w.artifact.display_name:
                 add(T.spark_job_definition, w.artifact.display_name, "A generated Spark job definition for a migrated workload.", [w.source_item],
                     {"approved": w.approval.status == "approved"}, depends=base)
-            if any(r.kind == "shortcut" for r in w.required_resources):
-                notes.append(f"'{w.source_item}' needs OneLake shortcut(s) in place of mounts / DBFS; shortcuts need a lakehouse and a connection (create-shortcut).")
+            for r in w.required_resources:
+                if r.kind == "shortcut" and r.name.startswith(SHORTCUT_PREFIX):
+                    shortcut_accounts.setdefault(r.name[len(SHORTCUT_PREFIX):].strip().lower(), []).append(w.source_item)
+    planned = [s for s in inputs.storage_map.get("shortcuts") or [] if isinstance(s, dict) and str(s.get("account", "")).lower() in shortcut_accounts]
+    for acct in sorted(set(shortcut_accounts) - {str(s.get("account", "")).lower() for s in planned}):
+        notes.append(f"{', '.join(shortcut_accounts[acct])} read storage account '{acct}' through a OneLake shortcut the storage map does not plan; "
+                     "run the storage map (storage-map) so it can be created here.")
     names = list(spec.lakehouse_names)
-    if not names and lh_needed_by:
+    chosen = str(inputs.storage_map.get("lakehouse") or "").strip()
+    if not names and (lh_needed_by or planned) and chosen:  # the name a person chose for the storage map; never one made up here
+        names = [chosen]
+        lh_needed_by = lh_needed_by + [x for s in planned for x in shortcut_accounts[str(s["account"]).lower()]]
+    if not names and (lh_needed_by or planned):
         add(T.lakehouse, UNNAMED_LAKEHOUSE, "Migrated workloads read metastore tables or need a default lakehouse.", lh_needed_by,
             {"unnamed": True}, depends=base)
+    lakehouse_ids: list[str] = []
     for n in names:
-        add(T.lakehouse, n, "Requested lakehouse" + (" (needed by migrated workloads)" if lh_needed_by else "") + ".", lh_needed_by,
-            {"schemas": spec.lakehouse_schemas_enabled}, depends=base)
+        lakehouse_ids.append(add(T.lakehouse, n, "Requested lakehouse" + (" (needed by migrated workloads)" if lh_needed_by else "")
+                                 + (": the name chosen for the storage map" if n == chosen and n not in spec.lakehouse_names else "") + ".",
+                                 sorted(set(lh_needed_by)), {"schemas": spec.lakehouse_schemas_enabled}, depends=base).id)
+    holder = names[0] if names else UNNAMED_LAKEHOUSE
+    for s in planned:
+        ls = [str(x) for x in s.get("linked_services") or []]
+        conn = next((inputs.connections[x.lower()] for x in ls if x.lower() in inputs.connections), "")
+        add(T.shortcut, str(s.get("shortcut")), f"Notebooks read storage account '{s.get('account')}' through this OneLake shortcut.",
+            shortcut_accounts[str(s["account"]).lower()],
+            {"lakehouse": holder, "path": s.get("path") or "Files", "location": s.get("account_url") or "", "subpath": s.get("subpath") or "",
+             "connection_id": conn, "linked_services": ls},
+            depends=base + lakehouse_ids[:1])
     for n in spec.warehouse_names:
         add(T.warehouse, n, "Requested warehouse.", depends=base)
 

@@ -36,6 +36,7 @@ class WorkloadKind(str, Enum):
     databricks_jar = "databricks_jar"
     synapse_notebook = "synapse_notebook"
     synapse_spark_job = "synapse_spark_job"
+    databricks_job = "databricks_job"  # a Databricks job whose tasks cannot all become Fabric notebooks (or that was not read)
 
 
 class Classification(str, Enum):
@@ -167,7 +168,8 @@ class GeneratedArtifact(_Strict):
     definition_file: Optional[str] = None  # the REST definition payload, for items that have one
     sha256: Optional[str] = None
     display_name: Optional[str] = None
-    fabric_item_id: Optional[str] = None  # filled when deployed
+    fabric_item_id: Optional[str] = None  # filled when deployed (the latest one)
+    fabric_item_ids: dict[str, str] = Field(default_factory=dict)  # Fabric workspace -> this item there: a notebook exists per workspace
     configuration: dict[str, str] = Field(default_factory=dict)  # lakehouse, environment, pool ... NAMES / ids, no secrets
 
 

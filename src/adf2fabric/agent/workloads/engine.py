@@ -25,7 +25,7 @@ from adf2fabric.agent.dependencies.access import TokenSource
 from adf2fabric.agent.deployment import sjd_deploy
 from adf2fabric.agent.deployment.fabric_deploy import DeployError
 from adf2fabric.agent.discovery.adf_semantic.pipeline_analysis import walk
-from adf2fabric.agent.workloads import analyzer, notebook_format, transform
+from adf2fabric.agent.workloads import analyzer, databricks_jobs, notebook_format, transform
 from adf2fabric.agent.workloads.source import Code, SourceResolver
 from adf2fabric.project.compute import ComputeUse
 from adf2fabric.project.discovery import AdfActivity, AdfSemanticDiscovery
@@ -86,6 +86,9 @@ class _Spec:
     args: list[str] = field(default_factory=list)  # job arguments (Python / JAR), as literals only
     libraries: list[dict] = field(default_factory=list)
     compute_id: str = ""
+    notebook_path: Optional[str] = None  # a notebook task of a Databricks job: the path the job runs (the activity holds only a job id)
+    job_code: Optional[CodeSource] = None  # a Databricks job entry: how its definition was obtained
+    job_reasons: list[str] = field(default_factory=list)  # a Databricks job entry: why Fabric notebooks cannot run it
 
 
 def _literal_args(raw: Any) -> tuple[list[str], bool]:
@@ -99,7 +102,46 @@ def _literal_args(raw: Any) -> tuple[list[str], bool]:
     return out, dynamic
 
 
-def _specs(d: AdfSemanticDiscovery, plan: Any, selected: Optional[set[str]]) -> list[_Spec]:
+def _workspace_host(d: AdfSemanticDiscovery, ls_name: Optional[str]) -> Optional[str]:
+    """The Databricks workspace host a linked service names (None when it does not, or names it by expression)."""
+    ls = next((x for x in d.linked_services if x.name.lower() == (ls_name or "").lower()), None)
+    raw_ws = ls.compute.workspace if ls is not None and ls.compute is not None else None
+    if not raw_ws or "@" in raw_ws:
+        return None
+    return urlparse(raw_ws if "://" in raw_ws else f"https://{raw_ws}").hostname or None
+
+
+JobReader = Callable[[Optional[str], Optional[str]], "tuple[Optional[dict], CodeSource]"]
+
+
+def _job_specs(p: Any, a: AdfActivity, d: AdfSemanticDiscovery, read_job: Optional[JobReader], cid: str) -> list[_Spec]:
+    """A DatabricksJob activity: one notebook workload per task when Fabric notebooks can run the job, else one job entry with why."""
+    raw = a.raw_properties
+    job_id = databricks_jobs.job_id_of(raw)
+    item = f"job {job_id}" if job_id else f"(dynamic: {p.name}/{a.name})"
+    if read_job is not None:
+        struct, src = read_job(_workspace_host(d, a.linked_service_refs[0] if a.linked_service_refs else None), job_id)
+    else:
+        struct, src = None, CodeSource(status=C.not_requested, location=item)
+    reasons: list[str] = []
+    if struct is not None:
+        shape = databricks_jobs.fabric_shape(struct, bool(raw.get("jobParameters")))
+        if not shape.reasons:
+            out = []
+            for t in shape.tasks:
+                path = t["notebook_path"]
+                runs_in = databricks_jobs.task_activity_name(a.name, t["key"], len(shape.tasks) == 1)
+                out.append(_Spec(f"{W.databricks_notebook.value}:{path.lower()}", W.databricks_notebook,
+                                 path.rstrip("/").rsplit("/", 1)[-1] or t["key"], path, a, p.name, used_by=[f"{p.name}/{runs_in}"],
+                                 libraries=[], compute_id=cid, notebook_path=path))
+            return out
+        reasons = shape.reasons
+    name = (struct or {}).get("name") or item
+    return [_Spec(f"{W.databricks_job.value}:{item.lower()}", W.databricks_job, name, item, a, p.name, used_by=[f"{p.name}/{a.name}"],
+                  compute_id=cid, job_code=src, job_reasons=reasons)]
+
+
+def _specs(d: AdfSemanticDiscovery, plan: Any, selected: Optional[set[str]], read_job: Optional[JobReader] = None) -> list[_Spec]:
     cid_of = {(t.pipeline, t.activity): t.source_compute_id for t in plan.targets}
     specs: dict[str, _Spec] = {}
     for p in sorted(d.pipelines, key=lambda x: x.name.lower()):
@@ -108,6 +150,12 @@ def _specs(d: AdfSemanticDiscovery, plan: Any, selected: Optional[set[str]]) -> 
         for a in walk(p.activities):
             raw = a.raw_properties
             t = a.type
+            if t == "DatabricksJob":
+                for js in _job_specs(p, a, d, read_job, cid_of.get((p.name, a.name), "")):
+                    spec = specs.setdefault(js.id, js)
+                    if spec is not js:
+                        spec.used_by += [u for u in js.used_by if u not in spec.used_by]
+                continue
             if t == "DatabricksNotebook":
                 path = _text(raw.get("notebookPath"))
                 item = path if path is not None else f"(dynamic: {p.name}/{a.name})"
@@ -255,7 +303,6 @@ def _parameters(spec: _Spec, an: Optional[analyzer.Analysis], tr: Optional[trans
 
 
 def _outputs(spec: _Spec, d: AdfSemanticDiscovery) -> list[OutputContract]:
-    pipeline_name, act_name = spec.used_by[0].split("/", 1)
     out: list[OutputContract] = []
     for user in spec.used_by:
         pn, an_ = user.split("/", 1)
@@ -549,7 +596,7 @@ def build_manifest(store: ProjectStore, project_id: str, opts: Optional[Options]
         project_dir = store.project_dir(project_id)
         resolver = SourceResolver(project_dir, opts.tokens, opts.fetch, dict(opts.local_files), opts.client_factory)
         used_names: dict[str, str] = {}
-        for spec in _specs(d, plan, opts.pipelines):
+        for spec in _specs(d, plan, opts.pipelines, resolver.databricks_job):
             entry = _assess(spec, d, plan, resolver, opts, project_dir, used_names, now)
             old = prior.get(entry.id)
             if old is not None and entry.code.status in _NOT_READ_THIS_RUN and old.code.status in _READ and old.artifact.kind != "none":
@@ -603,8 +650,10 @@ def _assess(spec: _Spec, d: AdfSemanticDiscovery, plan: Any, resolver: SourceRes
     job: dict = {}
     jar_uri: Optional[str] = None
     # 1. the code
+    if spec.kind is W.databricks_job:
+        return _assess_job(spec, env, d)
     if spec.kind is W.databricks_notebook:
-        code = resolver.databricks_notebook(env.workspace, _text(raw.get("notebookPath")))
+        code = resolver.databricks_notebook(env.workspace, spec.notebook_path or _text(raw.get("notebookPath")))
     elif spec.kind is W.databricks_python:
         code = resolver.databricks_python(env.workspace, _text(raw.get("pythonFile")))
     elif spec.kind is W.databricks_jar:
@@ -683,6 +732,25 @@ def _assess(spec: _Spec, d: AdfSemanticDiscovery, plan: Any, resolver: SourceRes
             entry.alternatives.append(_KEEP_ON_SOURCE)
     # 3. generation
     _generate(entry, spec, code, tr, an, cells, job, jar_uri, opts, project_dir, used_names, now)
+    entry.unresolved = _unresolved(entry)
+    return entry
+
+
+def _assess_job(spec: _Spec, env: ExecutionEnvironment, d: AdfSemanticDiscovery) -> WorkloadEntry:
+    """A Databricks job that was not read, or whose tasks Fabric notebooks cannot all run: no artifact, the reasons, the alternatives."""
+    code = spec.job_code or CodeSource(status=C.not_requested, location=spec.source_item)
+    findings = [_finding("databricks_job_task", F.contract, S.blocker, f"The job cannot run as Fabric notebooks: {r}.",
+                         "Keep the job on Databricks, or change it in Databricks and assess again.") for r in spec.job_reasons]
+    entry = WorkloadEntry(id=spec.id, kind=spec.kind, name=spec.name, source_item=spec.source_item, used_by=sorted(spec.used_by),
+                          environment=env, code=code, classification=K.blocked, findings=findings, outputs=_outputs(spec, d))
+    if findings:
+        entry.classification, entry.classification_reasons = K.unsupported, [f.message for f in findings[:3]]
+    else:
+        entry.classification_reasons = [f"The job's definition is not available ({code.status.value})" + (f": {code.detail}" if code.detail else ".")]
+    entry.alternatives.append(_KEEP_ON_SOURCE)
+    entry.generation.status = "not_generated"
+    entry.generation.reason = ("Classified unsupported: no Fabric artifact is generated; see the alternatives." if findings
+                               else "Blocked: " + entry.classification_reasons[0])
     entry.unresolved = _unresolved(entry)
     return entry
 

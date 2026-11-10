@@ -13,8 +13,9 @@ Operations used, by API (none assumed to exist on another):
     POST /workspaces/{id}/provisionIdentity (200 or 202)                      POST /workspaces/{id}/roleAssignments    (201)
     POST /workspaces/{id}/lakehouses | /warehouses (201 or 202)               POST /workspaces/{id}/spark/pools        (201)
     POST /workspaces/{id}/environments (201 or 202; definition parts)
+    GET/POST /workspaces/{id}/items/{lakehouse}/shortcuts (201)                ADLS Gen2 shortcut through an existing connection
   Delegated (not written here): connections (credentials) -> connections apply; notebooks / Spark job definitions ->
-  workloads-deploy (approved workloads only); shortcuts -> create-shortcut.
+  workloads-deploy (approved workloads only).
 """
 
 from __future__ import annotations
@@ -638,6 +639,94 @@ class EnvironmentHandler(_ItemHandler):
 
 
 # =====================================================================================================================
+# OneLake shortcut (ADLS Gen2, through a Fabric connection that already exists)
+# =====================================================================================================================
+
+
+class ShortcutHandler(Handler):
+    """The shortcut the generated notebooks read storage through. The same calls as ``create-shortcut`` (agent/deployment/shortcut_deploy,
+    checked live 2026-10-16): an identical shortcut is reused; one with the same name and path that points elsewhere is reported, never
+    replaced. The storage key is never handled: the shortcut reads through the Fabric connection bound to the storage's linked service."""
+
+    type = T.shortcut
+
+    @staticmethod
+    def _spec(step_or_req) -> Any:
+        from adf2fabric.agent.deployment.shortcut_deploy import ShortcutSpec
+
+        s = step_or_req.spec  # a requirement's and a step's spec are the same dict
+        return ShortcutSpec(step_or_req.name, str(s.get("path") or "Files"), str(s.get("location") or ""), str(s.get("subpath") or ""),
+                            str(s.get("connection_id") or ""))
+
+    def plan(self, ctx, req):
+        from adf2fabric.agent.deployment.fabric_deploy import DeployError
+        from adf2fabric.agent.deployment.shortcut_deploy import validate_spec
+
+        ep = "POST /v1/workspaces/{id}/items/{lakehouse}/shortcuts"
+        sp = self._spec(req)
+        body = {"name": sp.name, "path": sp.path, "target": {"adlsGen2": {"location": sp.location, "subpath": sp.subpath,
+                                                                          "connectionId": sp.connection_id or "(no connection bound)"}}}
+        if req.spec.get("lakehouse") in (None, "", rq.UNNAMED_LAKEHOUSE):
+            return _step(req, Action.blocked, Api.fabric, endpoint=ep, request=body, blockers=["Name the lakehouse that holds the shortcut first."])
+        if not sp.connection_id:
+            names = ", ".join(req.spec.get("linked_services") or []) or "its storage account"
+            return _step(req, Action.blocked, Api.fabric, endpoint=ep, request=body,
+                         blockers=[f"No Fabric connection is bound for {names}: set it on the Connect step. The shortcut reads the storage through it."])
+        try:
+            validate_spec(sp)
+        except DeployError as exc:
+            return _step(req, Action.blocked, Api.fabric, endpoint=ep, request=body, blockers=[str(exc)])
+        return _step(req, Action.create, Api.fabric, endpoint=ep, request=body,
+                     notes=[f"In lakehouse '{req.spec.get('lakehouse')}'. Checked against its shortcuts when applied: an identical one is "
+                            "reused, one that points elsewhere is reported and never replaced."])
+
+    def _lakehouse(self, ctx, step) -> Optional[str]:
+        name = str(step.spec.get("lakehouse") or "")
+        made = ctx.created.get(rq.rid(T.lakehouse, name))
+        if made:
+            return made
+        for i in ctx.fab.paged(f"workspaces/{_need_ws(ctx)}/items?type=Lakehouse", "listing lakehouses"):
+            if str(i.get("displayName", "")).lower() == name.lower():
+                return str(i["id"])
+        return None
+
+    def _existing(self, ctx, step, lh: str) -> Optional[dict]:
+        sp = self._spec(step)
+        for s in ctx.fab.paged(f"workspaces/{_need_ws(ctx)}/items/{lh}/shortcuts", "listing shortcuts"):
+            if str(s.get("name", "")).lower() == sp.name.lower() and str(s.get("path", "")).strip("/").lower() == sp.path.strip("/").lower():
+                return s
+        return None
+
+    def find(self, ctx, step):
+        from adf2fabric.agent.deployment.shortcut_deploy import _same_target
+
+        lh = self._lakehouse(ctx, step)
+        if not lh:
+            return None
+        ex = self._existing(ctx, step, lh)
+        return f"{lh}/{step.name}" if ex is not None and _same_target(ex, self._spec(step)) else None
+
+    def apply(self, ctx, step):
+        from adf2fabric.agent.deployment.shortcut_deploy import _same_target
+
+        wid = _need_ws(ctx)
+        lh = self._lakehouse(ctx, step)
+        if not lh:
+            raise ProvisionError(f"The lakehouse '{step.spec.get('lakehouse')}' does not exist yet, so the shortcut cannot be made.")
+        sp = self._spec(step)
+        ex = self._existing(ctx, step, lh)
+        if ex is not None:
+            if _same_target(ex, sp):
+                return Outcome(f"{lh}/{step.name}", "an identical shortcut already exists; left unchanged", created=False)
+            raise ProvisionError(f"A shortcut named '{step.name}' in '{sp.path}' points somewhere else; it was NOT replaced.")
+        body = {"name": sp.name, "path": sp.path, "target": {"adlsGen2": {"location": sp.location, "subpath": sp.subpath, "connectionId": sp.connection_id}}}
+        r = _write(ctx, "POST", f"workspaces/{wid}/items/{lh}/shortcuts", body, "Creating the shortcut")
+        if r.status not in (200, 201):
+            raise ctx.fab.error(r, "Creating the shortcut")
+        return Outcome(f"{lh}/{step.name}", "created")
+
+
+# =====================================================================================================================
 # Delegated: the write belongs to another approval-gated command
 # =====================================================================================================================
 
@@ -689,4 +778,4 @@ class SparkJobHandler(_DelegatedHandler):
 
 HANDLERS: dict[T, Handler] = {h.type: h for h in (AzureCapacityHandler(), WorkspaceHandler(), CapacityAssignmentHandler(), IdentityHandler(),
                                                    RoleAssignmentHandler(), LakehouseHandler(), WarehouseHandler(), PoolHandler(),
-                                                   EnvironmentHandler(), ConnectionHandler(), NotebookHandler(), SparkJobHandler())}
+                                                   EnvironmentHandler(), ShortcutHandler(), ConnectionHandler(), NotebookHandler(), SparkJobHandler())}

@@ -746,8 +746,21 @@ def test_deploy_and_real_runs_are_refused_for_another_workspace_than_the_brief_w
             assert any("will be refused" in w for w in job["result"]["warnings"])
     world.call("oscar", "PUT", "/session/destination", json_body={"provider": "azure_cli", "workspace_id": other})
     assert "different Fabric workspace" in world.call("oscar", "GET", B).json()["deploy_refused"]  # the Deploy step shows it up front
+    assert "different Fabric workspace" in world.call("oscar", "GET", B).json()["runs_refused"]  # and the Run step
     v = world.call("oscar", "GET", B).json()
     assert v["state"] == "approved" and not PATH_RE.search(json.dumps(v)) and DEMO_WS not in json.dumps(v)
+
+
+def test_a_brief_that_does_not_allow_real_runs_says_so_before_the_run_is_asked_for(world):
+    name = _deployed(world)
+    _fill_brief(world, "ann")
+    world.call("ann", "PUT", f"{B}/answers", json_body={"answers": {"validation.depth": "evidence"}})
+    fp = world.call("ann", "POST", f"{B}/submit").json()["fingerprint"]
+    world.call("abe", "POST", f"{B}/approve", json_body={"fingerprint": fp})
+    shown = world.call("ann", "GET", B).json()
+    assert shown["state"] == "approved" and "does not allow real runs" in shown["runs_refused"] and not shown["deploy_refused"]
+    r = stage(world, "oscar", "verify", {"run": True, "confirm": True, "pipelines": [name]})
+    assert r.status_code == 409 and r.json()["error"] == shown["runs_refused"]  # the words shown up front are the refusal's own
 
 
 def test_confirmed_steps_are_kept_on_the_server_per_project_and_only_known_steps(world):
@@ -869,3 +882,18 @@ def test_a_pipeline_deployed_to_another_workspace_is_not_deployed_in_this_one(wo
     assert views.pipeline_states(store, "demo-estate")[name]["state"] == "deployed"  # no workspace asked about: the record as it is
     other = views.pipeline_states(store, "demo-estate", "00000000-0000-0000-0000-00000000abcd")[name]
     assert other["state"] == "converted" and any("another Fabric workspace" in r for r in other["reasons"])
+
+
+def test_a_deploy_never_uses_another_workspaces_ids_and_convert_switches_to_this_ones(world):
+    prepare(world)
+    res = world.demo.store.conversion_dir("demo-estate") / "resolutions.json"
+    res.write_text(json.dumps([{"type": "WorkspaceId", "key": "*", "value": FOREIGN_WS},
+                               {"type": "ItemToId", "key": "notebook:NB_Elsewhere", "value": "77777777-7777-7777-7777-777777777777"}]), encoding="utf-8")
+    job = run(world, "oscar", "deploy_dry_run", {"workspace_id": DEMO_WS, "allow_unbound": True})
+    assert job["state"] == "failed" and "another Fabric workspace" in json.dumps(job)  # refused, not a warning
+    assert run(world, "oscar", "convert")["state"] == "succeeded"  # Convert with this workspace chosen uses this workspace's ids
+    saved = json.loads(res.read_text(encoding="utf-8"))
+    assert {"type": "WorkspaceId", "key": "*", "value": DEMO_WS} in saved and not any(e.get("key") == "notebook:NB_Elsewhere" for e in saved)
+    kept = json.loads((res.parent / "bindings-by-workspace" / f"{FOREIGN_WS}.json").read_text(encoding="utf-8"))
+    assert any(e.get("key") == "notebook:NB_Elsewhere" for e in kept)  # kept for the workspace it belongs to
+    assert run(world, "oscar", "deploy_dry_run", {"workspace_id": DEMO_WS, "allow_unbound": True})["state"] == "succeeded"

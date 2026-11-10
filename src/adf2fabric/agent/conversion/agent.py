@@ -134,6 +134,9 @@ class ConversionAgent:
                                  if w.approval.status == 'approved' and w.artifact.fabric_item_id}
             except Exception:  # noqa: BLE001 - a damaged manifest must not stop conversion; the default path is unaffected
                 ctx.workloads = {}
+        from adf2fabric.agent.workloads import databricks_jobs
+
+        ctx.databricks_jobs = databricks_jobs.load_all(self.store.project_dir(pid))
         if request.lakehouse:
             smap = self.store.project_dir(pid) / "storage" / "storage-map.json"
             if not smap.exists():

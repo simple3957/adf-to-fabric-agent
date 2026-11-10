@@ -212,6 +212,29 @@ class DatabricksClient:
         return raw, language
 
 
+    def get_job(self, job_id: str) -> dict:
+        """The Jobs API ``get`` response of one job, with every page of its tasks. Read-only."""
+        if not str(job_id).isdigit():
+            raise DatabricksError("bad_job_id", f"'{job_id}' is not a Databricks job id.")
+        params = {"job_id": str(job_id)}
+        body: dict = {}
+        tasks: list = []
+        for _ in range(50):  # the API pages tasks 100 at a time
+            resp = self._get("/api/2.2/jobs/get", params)
+            if resp.status_code == 404 or (resp.status_code == 400 and "does not exist" in resp.text.lower()):
+                raise DatabricksError("not_found", f"No job with id {job_id}.", ["Check the jobId in the ADF activity."])
+            if resp.status_code != 200:
+                raise self._fail(resp, f"job {job_id}")
+            page = resp.json()
+            body = body or page
+            tasks += (page.get("settings") or {}).get("tasks") or []
+            token = page.get("next_page_token")
+            if not token:
+                break
+            params = {"job_id": str(job_id), "page_token": token}
+        body.setdefault("settings", {})["tasks"] = tasks
+        return body
+
     def read_dbfs(self, path: str, max_bytes: int = 5 * 1024 * 1024) -> bytes:
         """The bytes of one DBFS file (``dbfs:/...``), read in the API's 1 MB pieces. Read-only; refused above ``max_bytes``."""
         dbfs = path[len("dbfs:"):] if path.startswith("dbfs:") else path

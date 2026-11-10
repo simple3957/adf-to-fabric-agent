@@ -746,7 +746,8 @@ def compute(inp: Inputs, c: Collector) -> None:
             c.add("compute.fabric_compute", K.compute, R.BLOCKED, f"'{a.name}' points at a Fabric item that does not exist yet ({item}).", component=comp,
                   remediation="Generate and deploy the notebook / Spark job (workloads-generate, workloads-approve, workloads-deploy), then convert with --resolutions.")
             continue
-        entry = next((w for w in (wm.workloads if wm else []) if w.artifact.fabric_item_id and w.artifact.fabric_item_id.lower() == str(item).lower()), None)
+        entry = next((w for w in (wm.workloads if wm else []) if str(item).lower() in
+                      {x.lower() for x in [w.artifact.fabric_item_id or "", *w.artifact.fabric_item_ids.values()] if x}), None)  # bound in any workspace
         generated = next((w for w in (wm.workloads if wm else []) if f"{pname}/{a.name}".lower() in {u.lower() for u in w.used_by}
                           and w.artifact.kind != "none"), None)
         if entry is None and generated is not None:  # converted for Fabric, but the item the pipeline runs was never tied to it

@@ -27,8 +27,15 @@ discovery command create nothing.
 
 Only what the migration needs: a Spark pool and Environment per compute-plan proposal (none when the project has no Spark
 compute); a notebook / Spark job definition per generated workload; a Fabric connection per linked service the dependency
-inventory marks `needs_connection`; a lakehouse when workloads need one (never invented: you name it, otherwise the step is
-blocked); and whatever you ask for explicitly (capacity, workspace, identity, role assignments, warehouses).
+inventory marks `needs_connection`; a lakehouse when workloads need one, with the OneLake shortcuts the generated notebooks read
+storage through; and whatever you ask for explicitly (capacity, workspace, identity, role assignments, warehouses).
+
+The lakehouse is named by a person, never invented: the name you give (`--lakehouse`, Plan target), or else the name chosen for the
+storage map (`storage/storage-map.json` `lakehouse`); with neither, the step is blocked and asks for one. Each storage-map shortcut
+whose storage account a generated notebook reads (`OneLake shortcut to <account>` on the workload) is a **shortcut** step in that
+lakehouse. It uses the Fabric connection bound to the storage's linked service (`LinkedServiceToConnectionId` in the resolutions; no
+key is handled); without one the step is blocked and points to the Connect step. A storage account a notebook reads that the storage
+map does not plan is a note. A warehouse is planned only when you name one.
 
 Where Spark runs decides the pool and Environment. When Spark stays on Databricks / Synapse (`--spark-compute keep`, or an
 approved consultation brief that keeps the source compute), none is planned and the plan says why, and no capacity is sized for
@@ -45,6 +52,7 @@ planned, as before. The API's plan follows an approved, current brief automatica
 | Workspace identity | Fabric REST | `POST /v1/workspaces/{id}/provisionIdentity` (200 or 202 LRO) |
 | Role assignment | Fabric REST | `POST /v1/workspaces/{id}/roleAssignments` (201) |
 | Lakehouse / warehouse | Fabric REST | `POST /v1/workspaces/{id}/lakehouses` / `warehouses` (201 or 202) |
+| OneLake shortcut (ADLS Gen2) | Fabric REST | `GET`/`POST /v1/workspaces/{id}/items/{lakehouse}/shortcuts` (201); an identical one is reused, one with the same name and path that points elsewhere fails the step and is never replaced (the calls `create-shortcut` makes, live-verified 2026-10-16) |
 | Spark pool | Fabric REST | `POST /v1/workspaces/{id}/spark/pools` |
 | Environment | Fabric REST | `POST /v1/workspaces/{id}/environments` (created, **not published**: publishing runs a Spark job and is a separate step) |
 | Connections | **delegated** to `connections apply` (credentials) | |

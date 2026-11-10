@@ -12,7 +12,7 @@ adf2fabric workloads-deploy   --project P --workspace-id GUID [--resolutions fil
 adf2fabric workloads-record-run --project P --workspace-id GUID --pipeline NAME --workload <id>            # evidence from a real run
 ```
 
-Code: `src/adf2fabric/agent/workloads/` (`source.py` retrieval, `notebook_format.py`, `analyzer.py`, `transform.py`, `engine.py`,
+Code: `src/adf2fabric/agent/workloads/` (`source.py` retrieval, `databricks_jobs.py` Databricks job structure, `notebook_format.py`, `analyzer.py`, `transform.py`, `engine.py`,
 `lifecycle.py`, `report.py`), `agent/deployment/sjd_deploy.py`, persisted contract `project/workloads.py`
 (`projects/<name>/workloads/manifest.yaml` + `report.md` + `artifacts/<name>/`).
 
@@ -67,6 +67,15 @@ the file changed since generation), records the person as accepting the generate
 `ItemToId notebook:<name>` in `conversion/resolutions.json`; the next Convert points the pipeline's notebook activity at it. A notebook
 whose content was replaced keeps no earlier run as evidence. Same Fabric calls as `workloads-deploy --apply`.
 
+## One notebook per workspace
+
+A generated notebook's storage paths name a workspace and a lakehouse by id (`abfss://<workspace>@onelake.dfs.fabric.microsoft.com/<lakehouse>/Files/<shortcut>/...`).
+Creating or checking it in another workspace uses a copy whose OneLake paths point at that workspace's lakehouse of the same name (the
+storage map's), written to `workloads/artifacts/<name>/workspaces/<workspace>.ipynb`; everything below the lakehouse stays the same,
+because the plan makes the shortcuts with the same names. When that workspace has no such lakehouse yet, Create says so and points to
+Plan target. The id of each workspace's notebook is kept per workspace (`artifact.fabric_item_ids`), so binding or creating it in one
+workspace does not unbind it in another; the generated file itself is never changed.
+
 ## Binding a notebook that is already deployed
 
 A notebook that reached the workspace another way (`deploy-notebook`, by hand, an earlier `workloads-deploy`) can be recorded as the
@@ -115,6 +124,37 @@ With `baseParameters` it additionally requires an approved, deployed workload wh
 passed-but-unread parameters are dropped visibly. Downstream expressions that read `runOutput` get a manual-step warning with
 the Fabric location of the exit value. Libraries still keep the activity on Databricks.
 
+## Databricks Job activities
+
+An ADF `DatabricksJob` activity holds only a `jobId`: what the job runs is defined in Databricks. Fabric's Azure Databricks
+activity has a Job type, but Microsoft documents only its portal settings, not its JSON, so without migration the activity stays a
+Fail placeholder (`databricks_job`). With migration:
+
+1. **Read the job, only when allowed.** `workloads-assess` / `workloads-generate` with a Databricks credential
+   (`--databricks-token-env NAME` or `--allow-az-tokens`) call `GET /api/2.2/jobs/get` for each literal `jobId` (every page of
+   tasks) and keep only the job's structure in `projects/<p>/databricks/jobs/<id>.json` (`agent/workloads/databricks_jobs.py`):
+   task keys and types, notebook paths, dependencies, `run_if`, and the NAMES of parameters and libraries. No parameter values, no
+   cluster or compute settings, no secrets. A job read once is reused from that file; without a credential nothing is called and the
+   job is `not_requested` / `missing_credential` with the permission it needs (*CAN VIEW on job &lt;id&gt;*). A `jobId` that is an
+   expression is `dynamic`, never guessed. `/Workspace/Shared/x` and `/Shared/x` are one notebook.
+2. **Notebook tasks become workloads.** When Fabric notebooks can run the whole job (below), each notebook task becomes an ordinary
+   `databricks_notebook` workload (code export, analysis, generation, approval, deploy, run evidence are unchanged), `used_by` the
+   Fabric activity that will run it. Its compute is `job_defined` in the compute plan: the job, not the linked service, sizes it,
+   so the size is reported as not available. Otherwise the job is ONE `databricks_job` entry with no artifact: `blocked` when it was
+   not read, `unsupported` with each reason when it was. Its notebooks are not half-migrated.
+3. **Conversion.** `convert` replaces the activity only when the job's definition is in the project and every task's notebook is
+   deployed and bound (`notebook:<name>`, as for a notebook activity). One task: a Fabric Notebook activity with the activity's own
+   name. Several tasks: one Notebook activity per task named `<activity>_<task key>`, wired as the job wires them
+   (`ALL_SUCCESS` -> `Succeeded`, `ALL_DONE` -> `Completed` on each upstream task); the activity's dependencies attach to the tasks
+   that start the job, and what depended on the activity waits for the tasks that end it. If one of those names is already used in
+   the pipeline, the job stays blocked (it is never renamed, because run evidence is matched by that name). Policy and state are
+   copied to every task activity. A downstream expression that reads the job activity's output becomes a manual step.
+
+**Fabric cannot run the job as notebooks** (each is a stated reason, and the placeholder stays) when it has: a non-notebook task
+(SQL, Python file, JAR, wheel, dbt, pipeline, run-job, condition, for-each ...), a notebook from Git, task `base_parameters`, job
+parameters, `jobParameters` on the activity, task libraries, a `run_if` other than `ALL_SUCCESS` / `ALL_DONE`, a dependency on a
+condition outcome or on a missing task, or a dependency cycle.
+
 ## What Microsoft documents, and what is still unverified
 
 Verified against Microsoft Learn (2026-10-22): notebookutils `fs`, `notebook.run/exit`, `credentials.getSecret(<vault URL>, name)`,
@@ -149,3 +189,6 @@ Probe items left in the workspace for you to delete in the portal: notebook `zz_
 * Spark job code in storage is read only if you pass it with `--source` (the exact storage role is reported otherwise).
 * DBFS retrieval (`dbfs/read`) and the Databricks export call are exercised with fakes in tests; the export call matches the
   one proven live for notebooks, the DBFS call has not run against a real workspace.
+* Databricks Job activities: job and task parameters are not mapped, and only notebook tasks migrate (see
+  [Databricks Job activities](#databricks-job-activities)). The `jobs/get` call is tested with fakes; its first live use is noted
+  in [status-briefing.md](status-briefing.md) once it has run.

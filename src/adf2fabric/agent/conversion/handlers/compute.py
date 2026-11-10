@@ -15,11 +15,14 @@ a placeholder id and listed as prerequisites; this tool never invents an item id
 
 from __future__ import annotations
 
+import json
+import re
 from typing import Any, Optional
 
 from adf2fabric.agent.conversion.context import ActivityBuilder
 from adf2fabric.agent.conversion.handlers._common import block, carry
 from adf2fabric.agent.conversion.registry import ConversionRule, register
+from adf2fabric.agent.workloads import databricks_jobs
 from adf2fabric.project.conversion import ConversionStrategy
 from adf2fabric.project.discovery import AdfOperationKind as Op
 
@@ -39,13 +42,16 @@ def _ls(cx: ActivityBuilder) -> Optional[str]:
 # --- Databricks ----------------------------------------------------------------------------------------------------
 
 
-def _bound_fabric_notebook(cx: ActivityBuilder) -> Optional[str]:
+def _bound_notebook_name(cx: ActivityBuilder, path: Any) -> Optional[str]:
     """The notebook's name when it was deployed to Fabric and bound in the resolutions file (``notebook:<name>``), where
-    ``<name>`` is the last part of the Databricks ``notebookPath``. None when it was not, so nothing is registered."""
-    path = cx.act.raw_properties.get("notebookPath")
+    ``<name>`` is the last part of the Databricks notebook path. None when it was not, so nothing is registered."""
     name = path.rstrip("/").rsplit("/", 1)[-1] if isinstance(path, str) else ""
     resolutions = cx.pc.project.resolutions
     return name if name and f"notebook:{name}".lower() in resolutions.items else None
+
+
+def _bound_fabric_notebook(cx: ActivityBuilder) -> Optional[str]:
+    return _bound_notebook_name(cx, cx.act.raw_properties.get("notebookPath"))
 
 
 # Confirmed by a live Fabric run on 2026-10-22 (docs/workload-migration.md): the `parameters` cell tag, the {value, type} shape and
@@ -209,23 +215,116 @@ register(ConversionRule(
     manual_configuration=("Fabric Databricks connection", "a cluster the linked service does not fully describe"),
     validation_rules=("notebookPath present", "connection present"),
 ))
+_JOB_NOT_GENERATED = ("Fabric's Azure Databricks activity has a Job type, but only its portal settings are documented (a job "
+                      "picked from a list, plus job parameters), not the JSON property names, so a faithful configuration "
+                      "cannot be generated")
+
+
+def _reads_output_of(cx: ActivityBuilder, name: str) -> list[str]:
+    """The other activities of this pipeline whose properties read ``activity('<name>')``."""
+    from adf2fabric.agent.discovery.adf_semantic.pipeline_analysis import walk
+
+    pattern = re.compile(r"activity\(\s*'" + re.escape(name) + r"'\s*\)", re.IGNORECASE)
+    return sorted({a.name for a in walk(cx.pc.pipeline.activities)
+                   if a.name != name and pattern.search(json.dumps(a.raw_properties, default=str))})
+
+
+def _databricks_job_as_fabric_notebooks(cx: ActivityBuilder, shape: Any, struct: dict) -> None:
+    """Run the job's notebook tasks as Fabric Notebook activities, in the job's task order, instead of calling Databricks.
+
+    One task keeps the activity's name. Several tasks become ``<activity>_<task key>``, wired as the job wires them
+    (``ALL_SUCCESS`` -> Succeeded, ``ALL_DONE`` -> Completed); the activity's own dependencies attach to the tasks that
+    start the job, and what depended on the activity waits for the tasks that end it.
+    """
+    a = cx.act
+    single = len(shape.tasks) == 1
+    comp_of: dict[str, str] = {}
+    first: Optional[dict] = None
+    for t in shape.tasks:
+        comp_of[t["key"]] = databricks_jobs.task_activity_name(a.name, t["key"], single)
+        if not single:
+            cx.pc.reserve(comp_of[t["key"]])
+    for t in shape.tasks:
+        nb = _bound_notebook_name(cx, t["notebook_path"])
+        tp = {"notebookId": cx.item("notebook", nb, f"The Fabric notebook that runs task '{t['key']}' (Databricks notebook "
+                                                    f"'{t['notebook_path']}') of Databricks job {struct.get('job_id')}."),
+              "workspaceId": cx.workspace()}
+        cfg = cx.envelope(comp_of[t["key"]], "TridentNotebook", tp, primary=first is None)
+        if first is None:
+            first = cfg
+        else:
+            for k in ("policy", "state", "onInactiveMarkAs"):
+                if k in first:
+                    cfg[k] = json.loads(json.dumps(first[k]))
+        cond = databricks_jobs.RUN_IF_CONDITION[t["run_if"]]
+        cfg["dependsOn"] = [{"activity": comp_of[d["task_key"]], "dependencyConditions": [cond]} for d in t.get("depends_on") or []]
+        cx.add(cfg)
+    cx.entry = [comp_of[t["key"]] for t in shape.tasks if not t.get("depends_on")]
+    cx.exit = [comp_of[k] for k in databricks_jobs.terminal_tasks(shape)]
+    cx.mapping("typeProperties.jobId", "typeProperties.notebookId", "job_notebook_tasks_bound",
+               f"job {struct.get('job_id')}: {len(shape.tasks)} notebook task(s), read from the job's definition")
+    cx.cover(Op.external_execution, *comp_of.values())
+    readers = _reads_output_of(cx, a.name)
+    if readers:
+        cx.manual("databricks_job_output",
+                  f"{', '.join(readers)} read the output of '{a.name}' (a Databricks job run); "
+                  + ("a Fabric notebook activity's output has a different shape." if single
+                     else f"'{a.name}' is now {len(shape.tasks)} notebook activities, so that reference no longer resolves."),
+                  "Point those expressions at the notebook activity whose output they need "
+                  "(its exit value is activity('<name>').output.result.exitValue).")
+    cx.strategy = ConversionStrategy.alternative if single else ConversionStrategy.composite
+    cx.disposition = "replace"
+    cx.summary = (f"DatabricksJob '{a.name}' (job {struct.get('job_id')}) -> "
+                  + (f"Fabric Notebook activity '{a.name}'" if single else
+                     f"{len(shape.tasks)} Fabric Notebook activities ({', '.join(comp_of.values())}) wired as the job's tasks")
+                  + " bound to the deployed notebooks; check their storage access, lakehouse and environment.")
+
+
 def convert_databricks_job(cx: ActivityBuilder) -> None:
-    _block(cx, "databricks_job",
-           "Fabric's Azure Databricks activity has a Job type, but only its portal settings are documented (a job picked "
-           "from a list, plus job parameters), not the JSON property names, so a faithful configuration cannot be "
-           "generated.",
+    raw = cx.act.raw_properties
+    job_id = databricks_jobs.job_id_of(raw)
+    struct = cx.pc.project.databricks_jobs.get(job_id) if job_id else None
+    if struct is None:
+        why = ("its jobId is an expression or missing, so the job it runs is not known" if not job_id else
+               f"the definition of job {job_id} has not been read (workloads-assess with a Databricks credential reads it)")
+    else:
+        shape = databricks_jobs.fabric_shape(struct, bool(raw.get("jobParameters")))
+        unbound = [t["key"] for t in shape.tasks if t.get("kind") == "notebook" and not _bound_notebook_name(cx, t.get("notebook_path"))]
+        single = len(shape.tasks) == 1
+        clash = [n for n in (databricks_jobs.task_activity_name(cx.act.name, t["key"], single) for t in shape.tasks)
+                 if not single and n.lower() in cx.pc.names]
+        if shape.reasons:
+            why = f"Fabric notebooks cannot run job {job_id}: " + "; ".join(shape.reasons)
+        elif clash:
+            why = (f"the activity name(s) {', '.join(clash)} its tasks would get are already used in the pipeline, and the "
+                   "notebooks' run evidence is matched by that name")
+        elif unbound:
+            why = (f"the Fabric notebook of task(s) {', '.join(unbound)} of job {job_id} is not deployed and bound yet "
+                   "(workloads-generate, -approve, -deploy, then notebook:<name> in the resolutions)")
+        else:
+            return _databricks_job_as_fabric_notebooks(cx, shape, struct)
+    _block(cx, "databricks_job", f"{_JOB_NOT_GENERATED}, and {why}.",
            "Create the Job task on the Fabric Azure Databricks activity (Settings > Job) with the original job and "
-           "job parameters.", disposition="reuse_externally")
+           "job parameters.",
+           "Migrate the job's notebook tasks to Fabric notebooks (workloads-assess / -generate / -approve / -deploy) "
+           "and convert again.", disposition="reuse_externally")
 
 
 register(ConversionRule(
-    name="databricks_job", adf_types=("DatabricksJob",), fabric_types=(), variants=("job id", "job parameters"),
+    name="databricks_job", adf_types=("DatabricksJob",), fabric_types=("TridentNotebook",),
+    variants=("job id", "job parameters", "job of notebook tasks migrated to Fabric notebooks"),
     strategy=ConversionStrategy.manual, handler=convert_databricks_job, runtime_disposition="reuse_externally",
-    property_rules=("not converted: the Fabric Job task's JSON structure is undocumented",), io_rules=("none",),
-    expression_rules=("none",), dependency_rules=("a fail-fast placeholder keeps the dependency graph intact",),
-    parameter_variable_rules=("none",), unsupported=("Job task settings (jobId, jobParameters)",),
-    manual_configuration=("recreate the Job task on the Fabric Azure Databricks activity",),
-    validation_rules=("placeholder Fail activity present",),
+    property_rules=("not converted as a Databricks Job task: the Fabric Job task's JSON structure is undocumented",
+                    "jobId -> one Fabric Notebook activity per notebook task, only when the job's definition was read and "
+                    "each task's notebook was deployed and bound"),
+    io_rules=("none",), expression_rules=("none",),
+    dependency_rules=("a fail-fast placeholder keeps the dependency graph intact",
+                      "notebook tasks keep the job's dependencies (ALL_SUCCESS -> Succeeded, ALL_DONE -> Completed)"),
+    parameter_variable_rules=("job and task parameters are not mapped (the job is not migrated when it has any)",),
+    unsupported=("Job task settings (jobId, jobParameters)", "non-notebook tasks, Git-sourced notebooks, task libraries, "
+                 "condition tasks and other run_if values"),
+    manual_configuration=("recreate the Job task on the Fabric Azure Databricks activity, or migrate the job's notebooks",),
+    validation_rules=("placeholder Fail activity present", "notebookId bound per task"),
 ))
 register(ConversionRule(
     name="databricks_jar_python", adf_types=("DatabricksSparkJar", "DatabricksSparkPython"),

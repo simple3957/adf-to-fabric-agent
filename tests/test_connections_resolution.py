@@ -768,6 +768,22 @@ def test_a_linked_service_can_be_skipped_and_nothing_is_created_or_bound_for_it(
     assert not items["LS_SQL"].bound and not fab.created
 
 
+def test_skipping_a_linked_service_removes_its_earlier_binding(project):
+    # found live (2026-11-10): the card said "no connection will be bound" while convert still bound the earlier connection
+    import json
+
+    s, pid = svc(project)
+    res = s.store.conversion_dir(pid) / "resolutions.json"
+    res.parent.mkdir(parents=True, exist_ok=True)
+    res.write_text(json.dumps([{"type": "LinkedServiceToConnectionId", "key": "LS_SQL", "value": "old"},
+                               {"type": "LinkedServiceToConnectionId", "key": "LS_SQL?db=x", "value": "old2"},
+                               {"type": "LinkedServiceToConnectionId", "key": "LS_SQL2", "value": "keep"},
+                               {"type": "WorkspaceId", "key": "*", "value": "ws"}]), encoding="utf-8")
+    s.set_choice(pid, ConnectionChoice(linked_service="LS_SQL", method="skip"))
+    assert json.loads(res.read_text(encoding="utf-8")) == [{"type": "LinkedServiceToConnectionId", "key": "LS_SQL2", "value": "keep"},
+                                                           {"type": "WorkspaceId", "key": "*", "value": "ws"}]
+
+
 def test_skipping_can_be_undone_by_choosing_a_method(project):
     s, pid = svc(project)
     s.set_choice(pid, ConnectionChoice(linked_service="LS_SQL", method="skip"))
@@ -838,3 +854,17 @@ def test_a_damaged_resolutions_file_is_kept_aside_not_overwritten_with_nothing(p
     kept = list(path.parent.glob("resolutions.json.damaged-*"))
     assert len(kept) == 1 and "ItemToId" in kept[0].read_text(encoding="utf-8")  # evidence for a person
     assert [e["key"] for e in json.loads(path.read_text(encoding="utf-8"))] == ["LS_SQL"]
+
+
+def test_a_url_connection_on_another_host_is_not_offered_as_a_partial_match():
+    # found live (2026-11-10): every Databricks connection was offered for any Databricks linked service, because only "https:"
+    # (the text before the first "/") was compared as the server
+    from adf2fabric.connections import catalog
+    from adf2fabric.connections.resolution import EndpointField, match_existing
+
+    spec = next(s for s in catalog.CONNECTORS if s.id == "databricks")
+    fields = [EndpointField(name="url", label="Workspace URL", value="https://adb-7405617008097962.2.azuredatabricks.net")]
+    conns = [{"id": "old", "displayName": "old", "connectionDetails": {"type": "AzureDatabricksWorkspace", "path": "https://adb-7405618998257241.1.azuredatabricks.net"}},
+             {"id": "same", "displayName": "same", "connectionDetails": {"type": "AzureDatabricksWorkspace", "path": "https://adb-7405617008097962.2.azuredatabricks.net/"}},
+             {"id": "sub", "displayName": "sub", "connectionDetails": {"type": "AzureDatabricksWorkspace", "path": "https://adb-7405617008097962.2.azuredatabricks.net/x"}}]
+    assert [(m.id, m.match) for m in match_existing(spec, fields, conns, None)] == [("same", "exact"), ("sub", "partial")]

@@ -61,7 +61,10 @@ class SourceResolver:
         return None
 
     def _client(self, host: str, token: str) -> Any:
-        return self.client_factory(host, token) if self.client_factory else DatabricksClient(host, token)
+        """A client for the workspace ``host`` (a bare host name, as the linked service resolves to). The real client takes a URL."""
+        if self.client_factory:
+            return self.client_factory(host, token)
+        return DatabricksClient(host if "://" in host else f"https://{host}", token)
 
     @staticmethod
     def _failure(exc: DatabricksError, permission: str, location: str) -> Code:
@@ -103,6 +106,40 @@ class SourceResolver:
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(raw)
         return Code(self._describe(C.retrieved, path, text, language=language.lower() or None), text, target.name)
+
+    # -- Databricks job (the structure behind a DatabricksJob activity) ----------------------------------------------------
+    def databricks_job(self, host: Optional[str], job_id: Optional[str]) -> tuple[Optional[dict], CodeSource]:
+        """(the job's structure, how it was obtained). Structure only: see ``databricks_jobs``. Kept in the project once read."""
+        from adf2fabric.agent.workloads import databricks_jobs
+
+        location = f"job {job_id}" if job_id else ""
+        perm = f"Databricks workspace: CAN VIEW on job {job_id} (jobs/get)"
+        if not job_id:
+            return None, CodeSource(status=C.dynamic, location=location, detail="The job id is computed at run time or missing.",
+                                    action="Set a literal jobId on the activity, or migrate each job it can run by hand.")
+        cached = databricks_jobs.load(self.project_dir, job_id)
+        if cached is not None:
+            return cached, CodeSource(status=C.cached, location=location)
+        if not self.fetch:
+            return None, CodeSource(status=C.not_requested, location=location, permission=perm,
+                                    detail="The job's definition was not read (it needs a Databricks credential).",
+                                    action="Run again with a Databricks token (--databricks-token-env NAME or --allow-az-tokens).")
+        if not host:
+            return None, CodeSource(status=C.error, location=location, detail="The workspace host is not known from the linked service.",
+                                    action="Add the Databricks linked service (domain) to the source.")
+        token = self.tokens("databricks")
+        if not token:
+            return None, CodeSource(status=C.missing_credential, location=location, permission=perm,
+                                    detail="No Databricks token is available. An az login does not grant Databricks access.",
+                                    action="Set the environment variable that holds a Databricks token and pass its NAME.")
+        try:
+            validate_host(f"https://{host}")
+            job = self._client(host, token).get_job(job_id)
+        except DatabricksError as exc:
+            return None, self._failure(exc, perm, location).source
+        struct = databricks_jobs.structure(job)
+        databricks_jobs.save(self.project_dir, job_id, struct)
+        return struct, CodeSource(status=C.retrieved, location=location)
 
     def _cached(self, path: str) -> Optional[tuple[str, str]]:
         base = self.project_dir / "databricks" / "notebooks"

@@ -242,6 +242,11 @@ def _run_stage(c: Container, session: Session, pid: str, stage: str, log: Log, o
         r = ReconstructionAgent(c.store).run(ReconstructionRequest(project_name=pid))
         return _ok(r)
     if stage == "convert":
+        from adf2fabric.project import bindings as bindings_mod
+
+        target = options.get("workspace_id") or session.destination.get("workspace_id")
+        if bindings_mod.use_workspace(c.store, pid, target):  # never another workspace's notebook, child-pipeline or lakehouse ids
+            log("using the ids saved for the chosen workspace; the other workspace's ids are kept for it")
         res = c.store.conversion_dir(pid) / "resolutions.json"
         brief = _approved_brief(c, session, pid, log)
         pipelines = options.get("pipelines") or (brief or {}).get("pipelines") or []
@@ -300,6 +305,11 @@ def _run_stage(c: Container, session: Session, pid: str, stage: str, log: Log, o
     workspace = options.get("workspace_id") or dest.get("workspace_id")
     if not workspace:
         raise StageError("No destination workspace is selected.", ["Choose a workspace on the Connections screen."])
+    from adf2fabric.project import bindings as bindings_mod
+
+    other = bindings_mod.workspace_mismatch(c.store, pid, workspace)
+    if other:  # the converted pipelines name items of another workspace: deploying them here would run that workspace's notebooks
+        raise StageError(other, ["Choose this workspace, create or bind its notebooks on Convert, and Convert again."])
     items = assemble_items(c.store, pid, options.get("pipelines"), bool(options.get("with_children")))
     if not items:
         raise StageError("Nothing to deploy.", ["Run the convert stage first."])
@@ -318,7 +328,7 @@ def _run_stage(c: Container, session: Session, pid: str, stage: str, log: Log, o
 
     from adf2fabric.agent.consultation import brief_record
 
-    note = bindings_mod.workspace_mismatch(c.store, pid, workspace)  # bound for one workspace, deployed to another: warn, do not refuse (the person may know)
+    note = None  # another workspace's ids are refused before deploying
     refused = brief_record.workspace_mismatch(c.store, pid, workspace) if stage == "deploy_dry_run" else None
     warnings = ([f"The real deploy to this workspace will be refused: {refused}"] if refused else []) + ([note] if note else [])
     return {"applied": stage == "deploy_apply",

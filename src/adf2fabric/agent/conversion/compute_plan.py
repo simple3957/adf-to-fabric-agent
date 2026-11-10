@@ -33,7 +33,7 @@ from adf2fabric.project.compute import (
 )
 from adf2fabric.project.discovery import AdfActivity, AdfSemanticDiscovery, AdfSparkCompute
 
-DATABRICKS_TYPES = ("DatabricksNotebook", "DatabricksSparkJar", "DatabricksSparkPython")
+DATABRICKS_TYPES = ("DatabricksNotebook", "DatabricksSparkJar", "DatabricksSparkPython", "DatabricksJob")
 SYNAPSE_TYPES = ("SynapseNotebook", "SparkJob")
 
 # Microsoft Learn, "Apache Spark compute for Data Engineering and Data Science" (node sizes): vCores per node.
@@ -325,6 +325,15 @@ class _Inventory:
                      "the cluster is unknown.", "Add the linked service to the source, or supply the cluster in the "
                      "compute sources file.")
             return
+        if a.type == "DatabricksJob":  # the job, not the linked service, defines the compute its tasks run on
+            u = self._use(_slug("databricks", ls.name, "job"), platform="databricks", source_ref=ls.name, mode="job_defined",
+                          sizing_known=False, sizing_source="not_available")
+            first = not u.activities
+            self._attach(u, pipeline, a, libs)
+            if first:
+                self.gap("job_defined_compute", u.id, "A Databricks job defines its own compute (job clusters or serverless); "
+                         "ADF does not hold its size.", "Size the Fabric Spark pool from the job's compute settings in Databricks.")
+            return
         c: AdfSparkCompute = ls.compute
         sizing, sizing_source = _Sizing(), "adf_linked_service"
         if c.mode == "new_cluster":
@@ -564,7 +573,8 @@ def _environments(inv: _Inventory, pool_of: dict[str, str]) -> list[FabricEnviro
 
 
 _CONVERSION_TODAY = {"DatabricksNotebook": "reuse_externally", "DatabricksSparkJar": "reuse_externally",
-                     "DatabricksSparkPython": "reuse_externally", "SynapseNotebook": "replace", "SparkJob": "replace"}
+                     "DatabricksSparkPython": "reuse_externally", "DatabricksJob": "reuse_externally",
+                     "SynapseNotebook": "replace", "SparkJob": "replace"}
 _JOB_TYPES = ("DatabricksSparkJar", "DatabricksSparkPython", "SparkJob")
 _POOL_STATUS = {"proposed": "pending_approval", "needs_input": "needs_input", "not_possible": "not_possible"}
 
@@ -574,6 +584,8 @@ def _source_item(a: AdfActivity) -> Optional[str]:
     for key in ("notebookPath", "mainClassName", "pythonFile"):
         if isinstance(raw.get(key), str):
             return raw[key]
+    if a.type == "DatabricksJob" and isinstance(raw.get("jobId"), (str, int)) and not isinstance(raw.get("jobId"), bool):
+        return f"job {raw['jobId']}"
     return _ref_name(raw.get("notebook")) or _ref_name(raw.get("sparkJob"))
 
 
@@ -607,6 +619,9 @@ def _targets(inv: _Inventory, pools: list[FabricPoolProposal],
         if is_job:
             reasons.append("The jar / Python file must be uploaded and a Spark Job Definition created; the tool does not "
                            "have the file.")
+        elif a.type == "DatabricksJob":
+            reasons.append("The job's definition must be read (workloads-assess with a Databricks credential); each of its notebook "
+                           "tasks then becomes a Fabric notebook.")
         else:
             reasons.append("The notebook source must be retrieved and imported as a Fabric notebook.")
         if u.libraries:

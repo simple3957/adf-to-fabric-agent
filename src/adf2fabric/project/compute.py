@@ -21,7 +21,7 @@ class ComputeUse(_Strict):
     id: str  # stable slug, e.g. databricks:LS_DBX:new:Standard_DS3_v2:2-8
     platform: str  # databricks | synapse
     source_ref: str  # linked service name, or Synapse Spark pool name
-    mode: str  # new_cluster | existing_cluster | instance_pool | spark_pool | session_override | unspecified
+    mode: str  # new_cluster | existing_cluster | instance_pool | spark_pool | session_override | job_defined | unspecified
     sizing_known: bool
     sizing_source: str  # adf_linked_service | activity_override | compute_sources_file | not_available
     node_type: Optional[str] = None
