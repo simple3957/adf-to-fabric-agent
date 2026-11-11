@@ -116,7 +116,7 @@ allocation, Spark properties) and, for PyPI libraries, `Libraries/PublicLibrarie
 written **off**. Endpoints: List/Create Workspace Custom Pool, List/Create Environment, Publish Environment (`beta=false`).
 
 Verified against Microsoft's reference on 2026-10-14. Verified by a read-only dry run against the test workspace (it
-listed pools and environments successfully). `compute-deploy`'s own creation has only been tested against a fake REST session. The same
+listed pools and environments successfully). `compute-deploy`'s own creation was only tested against a fake REST session, and that test was removed on 2026-11-11, so nothing tests it now. The same
 Fabric endpoints did create a pool and an environment live through provisioning (`provision-apply`, workspace `Practise`, 2026-11-03).
 
 ## Not built yet

@@ -6,7 +6,7 @@ import json
 
 from adf2fabric.project.reconstruction import Completeness, IncompletenessClass as C, Severity
 from tests.reconstruction_support import (
-    DS_LAKE, DS_SQL, ESTATE, SQL_LS, act, blockers, copy_activity, dataset, dep, expr, findings, linked_service,
+    act, blockers, copy_activity, dataset, dep, expr, findings, linked_service,
     pipeline_of, pl, proposals, reconstruct, ref, trigger, with_estate,
 )
 

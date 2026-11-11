@@ -22,8 +22,7 @@ mechanical work deterministically and **reports honestly what it could not do**.
 It is a Python package (`adf2fabric`) with three ways to drive it:
 
 * a **CLI** (`adf2fabric ...`) for each stage;
-* a **FastAPI backend** (`python -m adf2fabric.api`) that a UI calls; a Streamlit front end is built separately;
-* a **Demo mode** in that backend, running the same routes on a bundled sample with no network.
+* a **FastAPI backend** (`python -m adf2fabric.api`) that a UI calls; a Streamlit front end is built separately.
 
 ### End-to-end flow
 
@@ -72,10 +71,10 @@ It is a Python package (`adf2fabric`) with three ways to drive it:
 |---|---|
 | `src/adf2fabric/agent/` | the stages: intake, consultation, discovery, reconstruction, conversion, deployment |
 | `src/adf2fabric/connections/` | connector catalog, cards, runtime analysis, testing, providers, redaction, secret vault |
-| `src/adf2fabric/api/` | FastAPI backend, jobs, stages, Demo mode |
+| `src/adf2fabric/api/` | FastAPI backend, jobs, stages |
 | `projects/<id>/` | everything produced for one engagement (source, discovery, conversion, connections) |
 | `skills/`, `docs/` | operating instructions per agent and per-stage references |
-| `tests/` | offline tests (local git repos, fixtures, fake connectors and REST) |
+| `tests/` | tests with no stand-ins; `test_live.py` reads real Azure and Fabric with `az login` ([docs/testing.md](docs/testing.md)) |
 
 Start with [Setup](#setup) and [Usage](#usage); the status table below says exactly what is built and what is not.
 
@@ -179,7 +178,7 @@ Built stages (each reads the previous stage's saved output under `projects/<id>/
 | Conversion | `convert` | Registry-driven conversion of every activity into Fabric components, with validation, a graph check against the source dependencies, and a report that separates *converted* from *runnable*. | [`docs/conversion.md`](docs/conversion.md), [`docs/conversion-failure-modes.md`](docs/conversion-failure-modes.md), [`skills/conversion/`](skills/conversion/SKILL.md) |
 | Spark compute plan | `convert` (`--compute-sources`), `compute-deploy` | Inventories the external Spark compute the pipelines run on (Databricks clusters, Synapse pools), sizes it, and proposes equivalent Fabric custom pools and Environments with the exact pool request body. The plan is read-only; `compute-deploy` creates only the pools and environments you approve (dry run first). Sizes that ADF does not hold are asked for, never guessed. | [`docs/compute-plan.md`](docs/compute-plan.md) |
 | Connections | API (`/projects/{id}/connections`) | One credential card per linked service: SQL, ADLS Gen2, Blob, REST and Databricks connectors; auth methods incl. Key Vault variants, service principal, workspace identity and existing-connection reuse; integration-runtime analysis (Azure / managed VNet / self-hosted / SSIS -> Fabric path); real connection tests; creates or reuses Fabric connections and merges `conversion/resolutions.json`; writes `connections-report.{md,json}`. | [`docs/connections.md`](docs/connections.md), [`skills/connections/`](skills/connections/SKILL.md) |
-| API | `python -m adf2fabric.api` | FastAPI backend for the UI: sign-in status, source/destination selection and tests, projects, connections, migration stages as jobs, Demo mode. | [`docs/connections.md`](docs/connections.md) |
+| API | `python -m adf2fabric.api` | FastAPI backend for the UI: sign-in status, source/destination selection and tests, projects, connections, migration stages as jobs. | [`docs/connections.md`](docs/connections.md) |
 | Deployment | `deploy` | Pushes converted pipelines to a Fabric workspace through the REST API. **Dry run unless `--apply`**; refuses pipelines with unbound placeholders; never deletes. | [`docs/conversion.md`](docs/conversion.md) |
 
 ### Important limits
@@ -407,7 +406,7 @@ Architecture, rules, status and limits: [ARCHITECTURE_AND_MIGRATION.md](ARCHITEC
 
 ---
 
-## API and Demo mode
+## API
 
 ```bash
 python -m adf2fabric.api            # http://127.0.0.1:8765 (loopback; set ADF2FABRIC_API_TOKEN to require a bearer token)
@@ -415,8 +414,8 @@ python -m adf2fabric.api            # http://127.0.0.1:8765 (loopback; set ADF2F
 
 The UI talks to this backend. Sign-in is `az login` / `fab auth login` on the machine running it, so no password or CLI
 token ever reaches the browser; secrets typed into a card are held in memory only, expire, and are never returned,
-logged or written to a project or report. Send `X-Session-Id` to scope selections and secrets; `POST /mode {"mode":"demo"}`
-switches that session to Demo mode (canned providers, real parsing on a bundled sample, no network).
+logged or written to a project or report. Send `X-Session-Id` to scope selections and secrets. Every call goes to the real Azure, Fabric and Git services
+(demo mode was removed on 2026-11-11).
 `ADF2FABRIC_ALLOWED_ORIGINS` sets the CORS origins (default the local Streamlit ports). Route list and the
 implemented / not-implemented matrix: [`docs/connections.md`](docs/connections.md).
 
@@ -433,8 +432,7 @@ It follows the same process as the Synapse → Fabric Migration Accelerator, wit
 (choose the route, connect the ADF source and the Fabric workspace, start) and a **Migration** page with a vertical
 stepper (Discover → Connect → Convert → Deploy). A step opens once the one before it is confirmed. There is also an
 **Activity** page with job history.
-Turn on **Demo** in the top bar, or open `http://localhost:8501/?demo=1&project=demo-estate`, to walk the whole flow
-on the bundled sample without Azure.
+Every page shows real data; `http://localhost:8501/?project=<id>` opens a project directly.
 Set `ADF2FABRIC_API_URL` if the API is not on the default address. Plan and screen-to-endpoint map: [`docs/ui-plan.md`](docs/ui-plan.md).
 
 ---
@@ -452,20 +450,20 @@ src/adf2fabric/
 ├── agent/conversion/            # registry, handlers, expressions, validation, pipeline_semantics.py
 ├── agent/deployment/            # Fabric REST deployment (dry run by default)
 ├── connections/                 # connector catalog, cards, runtime analysis, testing, providers (az, fab, git, zip), redaction, secret vault
-├── api/                         # FastAPI backend: routes, jobs, stages, Demo mode
+├── api/                         # FastAPI backend: routes, jobs, stages
 ├── connectivity/                # connector registry + real connectors
 ├── repository/                  # providers, git wrappers, auth
 └── project/                     # persisted models + on-disk store
 config/config.yaml
 skills/                      # operating instructions per agent
 docs/                        # per-stage references
-tests/                       # offline tests (local git repos, fixtures, fake connectors/REST)
+tests/                       # no stand-ins; test_live.py reads real Azure/Fabric
 ```
 
 ## Connections and the API
 
 A FastAPI backend (`pip install -e ".[api]"`, then `python -m adf2fabric.api`, loopback `127.0.0.1:8765`) serves the UI:
-Azure CLI / Git / ZIP sources, Azure CLI / Fabric CLI destinations, per-linked-service credential cards and a Demo mode.
+Azure CLI / Git / ZIP sources, Azure CLI / Fabric CLI destinations, per-linked-service credential cards.
 See [docs/connections.md](docs/connections.md) for what is implemented, tested and deliberately not supported.
 
 ## Providers

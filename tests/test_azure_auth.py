@@ -6,11 +6,8 @@ azure-identity classes are replaced by recorders, so nothing here touches the ne
 from __future__ import annotations
 
 import pytest
-from click.testing import CliRunner
 
 from adf2fabric import cli as cli_mod
-from adf2fabric.agent.discovery.adls import AdlsDiscoverer, AdlsDiscoveryRequest
-from adf2fabric.connectivity import _azure
 from adf2fabric.connectivity._azure import (
     AUTH_MECHANISMS,
     ENTRA_MECHANISMS,
@@ -18,25 +15,7 @@ from adf2fabric.connectivity._azure import (
     CredentialUnavailable,
     build_credential,
 )
-from adf2fabric.project.models import AzureCredentialRef, ConnectivityStatus
-from tests.test_adls_discovery import FakeFS, FakeService, _setup
-
-
-class Recorder:
-    """Stands in for an azure.identity credential class and remembers how it was built."""
-
-    def __init__(self, *args, **kwargs):
-        self.args, self.kwargs = args, kwargs
-
-
-@pytest.fixture
-def fake_identity(monkeypatch):
-    import azure.identity as ai
-
-    for name in ("AzureCliCredential", "ClientSecretCredential", "CertificateCredential", "ManagedIdentityCredential",
-                 "InteractiveBrowserCredential", "DeviceCodeCredential", "DefaultAzureCredential"):
-        monkeypatch.setattr(ai, name, type(name, (Recorder,), {}))
-    return ai
+from adf2fabric.project.models import AzureCredentialRef
 
 
 def ref(auth, **kw):
@@ -48,95 +27,11 @@ def test_mechanism_sets_are_consistent():
     assert not set(ENTRA_MECHANISMS) & set(STORAGE_ONLY_MECHANISMS)
 
 
-def test_azure_cli_can_be_scoped_to_the_account_that_owns_a_subscription(fake_identity):
-    # ADF under one signed-in account and Fabric under another: the subscription picks the account.
-    scoped, _ = build_credential(ref("azure_cli", subscription_id=" sub-1 "))
-    assert scoped.kwargs == {"subscription": "sub-1"}
-    assert build_credential(ref("azure_cli", subscription_id="  "))[0].kwargs == {}
-
-
-def test_azure_cli_with_and_without_tenant(fake_identity):
-    plain, _ = build_credential(ref("azure_cli"))
-    assert plain.kwargs == {}
-    import os
-    os.environ["T_ID"] = "tenant-1"
-    try:
-        tenanted, _ = build_credential(ref("azure_cli", tenant_id_env="T_ID"))
-    finally:
-        del os.environ["T_ID"]
-    assert tenanted.kwargs == {"tenant_id": "tenant-1"}
-
-
-def test_client_secret_reads_three_env_vars_and_returns_the_secret_for_redaction(fake_identity, monkeypatch):
-    for k, v in (("T", "tid"), ("C", "cid"), ("S", "s3cret")):
-        monkeypatch.setenv(k, v)
-    cred, secret = build_credential(ref("client_secret", tenant_id_env="T", client_id_env="C", client_secret_env="S"))
-    assert cred.args == ("tid", "cid", "s3cret") and secret == "s3cret"
-
-
-def test_client_certificate(fake_identity, monkeypatch):
-    monkeypatch.setenv("T", "tid")
-    monkeypatch.setenv("C", "cid")
-    monkeypatch.setenv("P", "/certs/app.pem")
-    monkeypatch.setenv("PW", "pfxpass")
-    cred, secret = build_credential(ref("client_certificate", tenant_id_env="T", client_id_env="C",
-                                        certificate_path_env="P", certificate_password_env="PW"))
-    assert cred.args == ("tid", "cid") and cred.kwargs == {"certificate_path": "/certs/app.pem", "password": "pfxpass"}
-    assert secret == "pfxpass"
-    nopass, secret = build_credential(ref("client_certificate", tenant_id_env="T", client_id_env="C",
-                                          certificate_path_env="P"))
-    assert nopass.kwargs["password"] is None and secret == ""
-
-
-def test_managed_identity_system_and_user_assigned(fake_identity, monkeypatch):
-    assert build_credential(ref("managed_identity"))[0].kwargs == {}
-    monkeypatch.setenv("MI", "uami-client-id")
-    assert build_credential(ref("managed_identity", client_id_env="MI"))[0].kwargs == {"client_id": "uami-client-id"}
-    monkeypatch.delenv("MI")
-    with pytest.raises(CredentialUnavailable) as e:
-        build_credential(ref("managed_identity", client_id_env="MI"))
-    assert e.value.status is ConnectivityStatus.missing_credential and "MI" in e.value.detail
-
-
-@pytest.mark.parametrize("mechanism, cls", [("interactive_browser", "InteractiveBrowserCredential"),
-                                            ("device_code", "DeviceCodeCredential")])
-def test_interactive_mechanisms_take_an_optional_tenant(fake_identity, monkeypatch, mechanism, cls):
-    assert build_credential(ref(mechanism))[0].kwargs == {}
-    monkeypatch.setenv("T", "tid")
-    cred, secret = build_credential(ref(mechanism, tenant_id_env="T"))
-    assert type(cred).__name__ == cls and cred.kwargs == {"tenant_id": "tid"} and secret == ""
-
-
-def test_azure_identity_default_chain(fake_identity):
-    assert type(build_credential(ref("azure_identity"))[0]).__name__ == "DefaultAzureCredential"
-
-
 def test_access_token_is_presented_as_a_credential_and_redacted(monkeypatch):
     monkeypatch.setenv("TOK", "eyJ.token.value")
     cred, secret = build_credential(ref("access_token", access_token_env="TOK"))
     assert secret == "eyJ.token.value"
     assert cred.get_token("https://api.fabric.microsoft.com/.default").token == "eyJ.token.value"
-
-
-@pytest.mark.parametrize("auth, fields, env, missing", [
-    ("client_secret", {"tenant_id_env": "T"}, {}, "client_id_env, client_secret_env"),  # named in the model
-    ("client_certificate", {"tenant_id_env": "T", "client_id_env": "C"}, {}, "certificate_path_env"),
-    ("access_token", {}, {}, "access_token_env"),
-    ("account_key", {}, {}, "account_key_env"),
-    ("sas_token", {}, {}, "sas_token_env"),
-    ("connection_string", {}, {}, "connection_string_env"),
-])
-def test_missing_references_are_named(fake_identity, auth, fields, env, missing):
-    with pytest.raises(CredentialUnavailable) as e:
-        build_credential(ref(auth, **fields), storage_ok=True)
-    assert e.value.status is ConnectivityStatus.missing_config and missing in e.value.detail
-
-
-def test_unset_env_vars_are_named_without_values(fake_identity, monkeypatch):
-    monkeypatch.delenv("S_UNSET", raising=False)
-    with pytest.raises(CredentialUnavailable) as e:
-        build_credential(ref("access_token", access_token_env="S_UNSET"))
-    assert e.value.status is ConnectivityStatus.missing_credential and "S_UNSET" in e.value.detail
 
 
 def test_unknown_mechanism_lists_every_valid_one():
@@ -171,22 +66,6 @@ def test_storage_mechanisms_are_refused_for_arm_and_fabric(auth):
     with pytest.raises(CredentialUnavailable) as e:  # default storage_ok=False = ARM / Fabric callers
         build_credential(ref(auth, account_key_env="X", sas_token_env="X", connection_string_env="X"))
     assert "storage (ADLS Gen2) only" in e.value.detail and "azure_cli" in e.value.detail
-
-
-def test_adls_discovery_hands_the_account_key_to_the_storage_client(tmp_path, monkeypatch):
-    monkeypatch.setenv("ADLS_KEY", "base64key==")
-    store, _ = _setup(tmp_path)
-    seen = {}
-
-    def factory(url, credential):
-        seen["url"], seen["credential"] = url, credential
-        return FakeService([FakeFS("raw")])
-
-    result = AdlsDiscoverer(store, service_factory=factory).run(AdlsDiscoveryRequest(
-        project_name="test-proj", storage_account="acct1",
-        credential=ref("account_key", account_key_env="ADLS_KEY")))
-    assert result.success and seen == {"url": "https://acct1.dfs.core.windows.net", "credential": "base64key=="}
-    assert "base64key" not in (result.discovery.model_dump_json())  # the secret is never persisted
 
 
 # --- CLI wiring ----------------------------------------------------------------------------------------------

@@ -91,7 +91,7 @@ the code in Fabric is the same as the converted code. The link records that a pe
    should keep the good result and report the missing code.
 3. **Output check in the web UI.** Checking the data a pipeline wrote (used when there is no reference run) works only from the command
    line today. Add it to the Report step.
-4. **Walk through the web UI as a user.** Go through all 9 steps on the demo project and on the sample. Note where a user gets stuck,
+4. **Walk through the web UI as a user.** Go through all 9 steps on a real project (demo mode was removed on 2026-11-11). Note where a user gets stuck,
    where a button is disabled with no reason, and where a step is slow, and fix them.
 5. **Bring command-line features into the web UI.** Notebook conversion and deployment, OneLake shortcuts, Spark pool set-up, and the
    problem diagnosis.
@@ -232,7 +232,7 @@ Fabric workspace.
 - **Review screens.** Migration waves and order, compute, compatibility, and option cards pre-filled from the agreed plan.
 - **Speed.** A click went from 4.6 seconds to 0.4 seconds. A loading indicator shows while work runs.
 - **Accessibility.** Text and colour contrast meet the common accessibility standard.
-- **Demo.** A built-in sample project for demonstrations.
+- **Demo.** Removed on 2026-11-11: every page shows real data.
 
 #### Testing
 
@@ -416,7 +416,7 @@ The plan runs in four phases. The timings come from the estimates in 1.2, for on
 ### 3.2 Make the web UI complete (next 3 to 4 weeks)
 
 - Add the output check to the Report step, so a pipeline with no reference run can be proven from the web UI.
-- Walk through all 9 steps as a user, on the demo and on the sample, and fix where a user gets stuck.
+- Walk through all 9 steps as a user on a real project, and fix where a user gets stuck.
 - Bring the command-line features into the web UI: notebook conversion and deployment, OneLake shortcuts, Spark pool set-up and the
   problem finder.
 

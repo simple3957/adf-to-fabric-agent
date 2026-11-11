@@ -1,15 +1,13 @@
 """Independent migration validation: static, API, deployment and runtime stages, with mutation tests on the generated files.
 
 The engine must catch defects the converter does not report. The mutation tests prove it: each one edits a GENERATED file (or the
-source) after a clean conversion and asserts the right check turns FAIL / BLOCKED. The API stage runs against a small fake that
-records every request; live runs are opt-in (ADF2FABRIC_LIVE_VALIDATION=1) and read-only.
+source) after a clean conversion and asserts the right check turns FAIL / BLOCKED. The real API, deployment and runtime stages are
+checked against the real workspace in ``tests/test_live.py``.
 """
 
 from __future__ import annotations
 
-import base64
 import json
-import os
 import shutil
 from datetime import datetime, timezone
 from pathlib import Path
@@ -18,7 +16,6 @@ import pytest
 
 from adf2fabric.agent.conversion import ConversionAgent, ConversionRequest
 from adf2fabric.agent.discovery.adf_semantic import AdfSemanticDiscoverer, AdfSemanticDiscoveryRequest
-from adf2fabric.agent.provisioning.transport import FabricGateway
 from adf2fabric.agent.validation import diffing, engine, views
 from adf2fabric.agent.validation.report import render
 from adf2fabric.project.validation import ComponentStatus as S, Result as R, Stage
@@ -298,20 +295,6 @@ def test_an_unbound_connection_blocks_instead_of_passing(baseline, tmp_path):
     assert any(c.remediation for c in r.checks if c.result is R.BLOCKED)
 
 
-def test_a_placeholder_for_an_unconverted_activity_is_blocked_not_matched(project):
-    store, pid = project
-
-    def stub(d):
-        a = d["properties"]["activities"][0]
-        d["properties"]["activities"][0] = {"name": a["name"], "type": "Fail", "dependsOn": a["dependsOn"],
-                                            "typeProperties": {"message": "was not converted", "errorCode": "ADF2FABRIC_X"}}
-
-    edit_target(store, pid, "PL_Child", stub)
-    r = run(store, pid)
-    assert results(r, "activity_graph.conversion_complete", "pipeline:PL_Child") == {R.BLOCKED}
-    assert {x.id: x for x in r.components}["pipeline:PL_Child/activity:Pause"].status is S.missing
-
-
 def test_a_trigger_without_a_schedule_or_enabled_schedule_fails(project):
     store, pid = project
     f = next((store.conversion_dir(pid) / "schedules").glob("*.json"))
@@ -432,143 +415,11 @@ def test_an_adf_encrypted_credential_is_not_a_plaintext_secret_but_stays_redacte
     assert blob not in diffing.redact_value("encryptedCredential", blob)  # never shown in a diff or report
 
 
-# =====================================================================================================================
-# API and deployment stages (a fake service that records every request)
-# =====================================================================================================================
-
-
-class Resp:
-    def __init__(self, status, body=None, headers=None):
-        self.status_code, self._b, self.headers = status, body, headers or {}
-        self.content = b"x" if body is not None else b""
-
-    def json(self):
-        return self._b
-
-
-class FakeFabric:
-    """Workspace WS with the generated pipelines 'deployed'; tests alter it."""
-
-    def __init__(self, store, pid):
-        self.calls = []
-        self.pipes: dict[str, dict] = {}
-        self.ids: dict[str, str] = {}
-        base = store.conversion_dir(pid) / "pipelines"
-        for i, d in enumerate(sorted(base.glob("*.DataPipeline"))):
-            name = d.name[: -len(".DataPipeline")]
-            self.ids[name] = CHILD if name == "PL_Child" else f"00000000-0000-0000-0000-{i:012d}"
-            self.pipes[name] = json.loads((d / "pipeline-content.json").read_text(encoding="utf-8"))
-        self.capacity = "cap-1"
-        self.status = 200
-        self.schedules: dict[str, list] = {}
-        self.connections = {CONN: {"id": CONN, "displayName": "c"}}
-        self.extra_items: list[dict] = []  # non-pipeline workspace items (a lakehouse, ...)
-
-    def _resolved(self, name):
-        text = json.dumps(self.pipes[name]).replace("<workspace-id>", WS).replace("<item:pipeline:PL_Child>", self.ids.get("PL_Child", ""))
-        return json.loads(text)
-
-    def request(self, method, url, headers=None, json=None, timeout=None):
-        path = url.split("/v1/", 1)[1]
-        self.calls.append((method, path.split("?")[0]))
-        if path == f"workspaces/{WS}":
-            return Resp(self.status, {"id": WS, "displayName": "target", "capacityId": self.capacity} if self.status == 200 else {"errorCode": "x"})
-        if path.endswith("/dataPipelines"):
-            return Resp(200, {"value": [{"id": self.ids[n], "displayName": n} for n in self.pipes]})
-        if path.endswith("/items") and method == "GET":
-            return Resp(200, {"value": [{"id": v, "displayName": k, "type": "DataPipeline"} for k, v in self.ids.items()] + self.extra_items})
-        if path.startswith("connections") and method == "GET" and path == "connections":
-            return Resp(200, {"value": list(self.connections.values())})
-        if path.startswith("connections/"):
-            return Resp(200, {"id": CONN, "credentialDetails": {"credentialType": "Basic"}})
-        if path.endswith("/getDefinition"):
-            item = path.split("/")[3]
-            name = next(n for n, i in self.ids.items() if i == item)
-            payload = base64.b64encode(__import__("json").dumps(self._resolved(name)).encode()).decode()
-            return Resp(200, {"definition": {"parts": [{"path": "pipeline-content.json", "payload": payload, "payloadType": "InlineBase64"}]}})
-        if "/jobs/Pipeline/schedules" in path:
-            item = path.split("/")[3]
-            name = next(n for n, i in self.ids.items() if i == item)
-            return Resp(200, {"value": self.schedules.get(name, [{"id": "s", "enabled": False}])})
-        return Resp(404, {"errorCode": "UnknownRoute"})
-
-
-def gateway(fake):
-    return FabricGateway(lambda: "tok-SECRET", session=fake, sleep=lambda s: None)
-
-
-def api(store, pid, fake, stages=("static", "api", "deployment")):
-    return engine.validate(store, pid, stages=set(stages), fab=gateway(fake), workspace=WS, now=NOW)
-
-
 def test_api_and_deployment_are_not_run_without_an_authorised_workspace(project):
     store, pid = project
     r = run(store, pid, stages=("api", "deployment"))
     assert {c.result for c in r.checks if c.stage in (Stage.api, Stage.deployment)} == {R.NOT_RUN}
     assert r.overall == "NOT_VALIDATED"
-
-
-def test_a_matching_deployment_passes_api_and_deployment_but_is_not_success(project):
-    store, pid = project
-    fake = FakeFabric(store, pid)
-    r = api(store, pid, fake)
-    assert {s.stage: s.status for s in r.stages}[Stage.api] is R.PASS and {s.stage: s.status for s in r.stages}[Stage.deployment] is R.PASS
-    assert results(r, "deployment.definition_matches", "pipeline:PL_Main") == {R.PASS}
-    assert results(r, "deployment.connections_exist") == {R.PASS} and results(r, "deployment.items_exist") in ({R.PASS}, {R.NOT_RUN})
-    assert r.overall == "NOT_VALIDATED" and not r.full_success_claimed  # nothing ran
-    assert all(m == "GET" or p.endswith(("getDefinition",)) for m, p in fake.calls)  # reads only (getDefinition is a POST that changes nothing)
-
-
-def test_a_definition_that_differs_from_the_generated_file_fails_with_a_redacted_diff(project):
-    store, pid = project
-    fake = FakeFabric(store, pid)
-    fake.pipes["PL_Child"]["properties"]["activities"][0]["typeProperties"]["waitTimeInSeconds"] = 999
-    r = api(store, pid, fake)
-    c = check(r, "deployment.definition_matches", "pipeline:PL_Child")[0]
-    assert c.result is R.FAIL and any("waitTimeInSeconds: 3 -> 999" in e for e in c.evidence)
-    assert {x.id: x for x in r.components}["pipeline:PL_Child"].status is S.altered
-
-
-def test_an_undeployed_pipeline_fails(project):
-    store, pid = project
-    fake = FakeFabric(store, pid)
-    del fake.pipes["PL_Child"]
-    r = api(store, pid, fake)
-    assert results(r, "deployment.pipeline_deployed", "pipeline:PL_Child") == {R.FAIL} and r.overall == "FAILED"
-
-
-def test_a_bound_connection_that_does_not_exist_fails(project):
-    store, pid = project
-    fake = FakeFabric(store, pid)
-    fake.connections.clear()
-    assert results(api(store, pid, fake), "deployment.connections_exist") == {R.FAIL}
-
-
-def test_a_workspace_without_capacity_fails_and_no_access_is_reported(project):
-    store, pid = project
-    fake = FakeFabric(store, pid)
-    fake.capacity = None
-    assert results(api(store, pid, fake), "deployment.capacity") == {R.FAIL}
-    fake2 = FakeFabric(store, pid)
-    fake2.status = 403
-    r = api(store, pid, fake2)
-    assert results(r, "deployment.api_access") == {R.FAIL} and "cannot read" in check(r, "deployment.api_access")[0].summary
-
-
-def test_deployed_schedule_count_and_state_are_checked(project):
-    store, pid = project
-    fake = FakeFabric(store, pid)
-    fake.schedules["PL_Main"] = []  # the schedule was never created
-    assert results(api(store, pid, fake), "deployment.schedules") == {R.FAIL}
-    fake2 = FakeFabric(store, pid)
-    fake2.schedules["PL_Main"] = [{"id": "s", "enabled": True}]  # the source trigger was Started: enabled is legitimate when someone passed --enable
-    assert results(api(store, pid, fake2), "deployment.schedules") == {R.PASS}
-
-
-def test_no_token_reaches_the_report(project):
-    store, pid = project
-    r = api(store, pid, FakeFabric(store, pid))
-    assert "tok-SECRET" not in r.model_dump_json() + render(r)
 
 
 # =====================================================================================================================
@@ -605,17 +456,6 @@ def test_a_matching_recorded_run_passes_that_pipeline_only(project):
     assert results(r, "runtime.execution", "pipeline:PL_Main") == {R.PASS}
     assert results(r, "runtime.execution", "pipeline:PL_Child") == {R.NOT_RUN}
     assert r.overall == "NOT_VALIDATED"  # the others never ran
-
-
-def test_every_pipeline_run_and_matching_gives_migration_verified_only_when_everything_else_passes(project):
-    store, pid = project
-    for p in ("PL_Main", "PL_Child", "PL_Nested"):
-        record(store, pid, p)
-    r = engine.validate(store, pid, stages={"static", "api", "deployment", "runtime"}, fab=gateway(FakeFabric(store, pid)), workspace=WS, now=NOW)
-    assert r.overall == "MIGRATION_VERIFIED" and r.full_success_claimed is True, (r.overall, r.overall_reasons)
-    # the same run evidence without the earlier stages is not enough
-    r2 = rt(store, pid)
-    assert r2.overall == "NOT_VALIDATED" and not r2.full_success_claimed
 
 
 def test_a_run_in_another_workspace_says_nothing_about_the_one_validated(project):
@@ -708,38 +548,6 @@ def test_the_report_is_honest_and_complete(project):
     assert "MIGRATION VERIFIED" not in text
 
 
-def test_cli_validate_writes_the_report_and_a_failure_exits_nonzero(project, monkeypatch):
-    from click.testing import CliRunner
-
-    from adf2fabric import cli as cli_mod
-
-    store, pid = project
-    monkeypatch.setattr(cli_mod, "projects_root", lambda config: store.projects_root)
-    out = CliRunner().invoke(cli_mod.cli, ["validate", "--project", pid])
-    assert out.exit_code == 0 and "MIGRATION VALIDATION: NOT_VALIDATED" in out.output
-    assert (store.project_dir(pid) / "validation" / "report.md").is_file() and store.load_validation_report(pid).overall == "NOT_VALIDATED"
-    edit_target(store, pid, "PL_Child", lambda d: d["properties"]["activities"].pop(0))
-    bad = CliRunner().invoke(cli_mod.cli, ["validate", "--project", pid])
-    assert bad.exit_code == 2 and "FAILED" in bad.output
-
-
-@pytest.mark.skipif(os.environ.get("ADF2FABRIC_LIVE_VALIDATION") != "1", reason="opt-in live, read-only test (set ADF2FABRIC_LIVE_VALIDATION=1)")
-def test_live_read_only_validation_of_a_real_workspace():
-    """Needs: az login, a project with generated pipelines, ADF2FABRIC_LIVE_PROJECT and ADF2FABRIC_LIVE_WORKSPACE. Only GETs (and getDefinition)."""
-    import subprocess
-
-    from adf2fabric.project.store import ProjectStore
-
-    pid, ws = os.environ["ADF2FABRIC_LIVE_PROJECT"], os.environ["ADF2FABRIC_LIVE_WORKSPACE"]
-    token = subprocess.run(["az", "account", "get-access-token", "--resource", "https://api.fabric.microsoft.com", "--query", "accessToken", "-o", "tsv"],
-                           capture_output=True, text=True, shell=True).stdout.strip()
-    assert token
-    fab = FabricGateway(lambda: token)
-    r = engine.validate(ProjectStore(Path("projects")), pid, stages={"static", "api", "deployment"}, fab=fab, workspace=ws)
-    assert not r.full_success_claimed  # no runtime evidence was supplied
-    assert {s.stage: s.status for s in r.stages}[Stage.api] in (R.PASS, R.FAIL, R.BLOCKED)
-
-
 # =====================================================================================================================
 # a dataset repointed to the lakehouse (convert --lakehouse) carries the lakehouse as its connection, not an externalReferences.connection
 # =====================================================================================================================
@@ -769,22 +577,6 @@ def test_a_dataset_repointed_to_an_unbound_lakehouse_blocks_rather_than_fails(pr
     r = run(store, pid)
     assert results(r, "connections_secrets.linked_service", "linked_service:LS_LAKE") == {R.BLOCKED}
     assert results(r, "reference_integrity.target_unbound") == {R.BLOCKED}
-
-
-def test_a_repointed_dataset_s_lakehouse_is_checked_as_a_workspace_item_not_a_connection(project):
-    store, pid = project
-    lake = "33333333-3333-3333-3333-333333333333"
-    edit_target(store, pid, "PL_Main", _repoint_sink(lake))
-    fake = FakeFabric(store, pid)
-    fake.extra_items = [{"id": lake, "displayName": "lh_main", "type": "Lakehouse"}]
-    r = api(store, pid, fake, stages=("static", "api"))
-    assert results(r, "deployment.connections_exist") == {R.PASS}  # it used to FAIL: the lakehouse is not in the connection list
-    assert results(r, "deployment.items_exist") == {R.PASS}
-    fake.extra_items = []  # the lakehouse is gone: an item is missing, not a connection
-    r = api(store, pid, fake, stages=("static", "api"))
-    assert results(r, "deployment.connections_exist") == {R.PASS}
-    missing = check(r, "deployment.items_exist")[0]
-    assert missing.result is R.FAIL and any(lake in e for e in missing.evidence)
 
 
 def test_an_activity_whose_every_dataset_is_repointed_says_it_reads_through_the_lakehouse(project):
@@ -842,23 +634,6 @@ def test_a_lakehouse_folder_with_the_shortcut_in_front_is_a_transformation_not_a
     assert results(r, "expression_preservation.expressions", "pipeline:PL_Dyn") == {R.PASS}
 
 
-def test_missing_item_ids_name_bindings_made_for_another_workspace_as_the_likely_cause(project):
-    """Found in a real project: ids bound in one workspace, validated against another, so every id 'did not exist' with no hint why."""
-    store, pid = project
-    lake = "33333333-3333-3333-3333-333333333333"
-    edit_target(store, pid, "PL_Main", _repoint_sink(lake))
-    fake = FakeFabric(store, pid)  # the lakehouse is not in this workspace
-    r = api(store, pid, fake, stages=("static", "api"))
-    plain = check(r, "deployment.items_exist")[0]
-    assert plain.result is R.FAIL and "Likely cause" not in plain.summary  # no saved workspace: nothing to blame
-    (store.conversion_dir(pid) / "resolutions.json").write_text(
-        json.dumps([{"type": "WorkspaceId", "key": "*", "value": "123acb8e-0000-4000-8000-000000000001"}]), encoding="utf-8")
-    r = api(store, pid, fake, stages=("static", "api"))
-    blamed = check(r, "deployment.items_exist")[0]
-    assert blamed.result is R.FAIL and "Likely cause" in blamed.summary and "another Fabric workspace" in blamed.summary
-    assert "choose the workspace" in blamed.remediation
-
-
 def test_a_run_with_no_baseline_passes_only_when_its_output_matched_the_source(project):
     from adf2fabric.agent.deployment import output_check as oc
     from adf2fabric.agent.deployment import verify as v
@@ -899,3 +674,47 @@ def test_a_child_pipeline_that_was_not_generated_still_blocks(project):
     store, pid = project
     edit_target(store, pid, "PL_Main", _child_id("<item:pipeline:PL_Elsewhere>"))
     assert results(run(store, pid), "reference_integrity.target_unbound") == {R.BLOCKED}
+
+
+def test_the_validation_view_shows_only_the_stages_chosen_with_every_check_they_ran(project):
+    # each stage's checks (passing ones too) are listed; the overall verdict is unchanged
+    from adf2fabric.api.views import validation_summary
+
+    store, pid = project
+    store.save_validation_report(pid, run(store, pid, stages=("static",)))
+    v = validation_summary(store, pid)
+    assert v["stages_selected"] == ["static"] and list(v["checks_by_stage"]) == ["static"]
+    rows = v["checks_by_stage"]["static"]
+    assert any(c["result"] == "PASS" for c in rows) and all("stage" not in c for c in rows)
+    assert [c["result"] for c in rows] == sorted((c["result"] for c in rows), key=["FAIL", "BLOCKED", "NOT_RUN", "PASS"].index)
+    assert v["overall"] == "NOT_VALIDATED"  # api, deployment and runtime were not chosen: the engine's verdict stays honest
+
+
+def test_the_validate_step_records_static_and_runtime_and_says_where_the_deployment_check_is(project):
+    # 2026-11-11: Validate no longer reads Fabric. Without a read-back from the Deploy step the record says so in plain words (not
+    # "stages not requested", not a red "not deployed"), and leaves the api and deployment stages out instead of failing them
+    from adf2fabric.api.views import validation_summary
+
+    store, pid = project
+    rep = engine.record(store, pid, workspace=WS, now=NOW)
+    assert rep.scope["stages_requested"] == "runtime,static"
+    assert not [c for c in rep.checks if c.stage.value in ("api", "deployment")]
+    assert any("read back on the Deploy step" in r for r in rep.overall_reasons)
+    assert not any(r.startswith("Stages not requested") for r in rep.overall_reasons)
+    assert rep.overall != "MIGRATION_VERIFIED"
+    v = validation_summary(store, pid, workspace=WS)
+    assert v["stages_selected"] == ["static", "runtime"] and v["readback"]["current"] is False and v["readback"]["items"] == []
+
+
+def test_a_read_back_counts_only_while_it_still_describes_the_workspace(project):
+    from adf2fabric.agent.deployment import record as deploy_record
+
+    store, pid = project
+    at = datetime(2030, 1, 1, tzinfo=timezone.utc)
+    scope = {"readback_at": at.isoformat(), "readback_workspace": WS, "readback_conversion": engine.conversion_fingerprint(store, pid)}
+    assert engine.readback_current(store, pid, scope, WS) is None
+    assert "another workspace" in engine.readback_current(store, pid, scope, "99999999-9999-9999-9999-999999999999")
+    deploy_record.note_apply(store.project_dir(pid), WS, [], now=at.timestamp() + 60)  # a deploy after the read-back
+    assert "deploy ran after" in engine.readback_current(store, pid, scope, WS)
+    edit_target(store, pid, "PL_Child", lambda d: d.setdefault("properties", {}).setdefault("description", "changed"))
+    assert "converted again" in engine.readback_current(store, pid, scope, WS)

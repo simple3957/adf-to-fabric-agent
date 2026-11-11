@@ -76,58 +76,6 @@ def test_verify_keeps_the_baselines_own_figures():
     assert v.verdict == "matches" and v.to_dict()["baseline_activities"] == {"Copy1": _copy(10)}
 
 
-class _Client:
-    def list_pipelines(self, workspace):
-        return {}
-
-
-class _Adf:
-    def prefetch(self):
-        pass
-
-    def clone(self):
-        return self
-
-
-def _reread(monkeypatch, previous, baseline=""):
-    """verify_all with a fake verify_pipeline: re-reading the same Fabric run, comparing it with ADF only when it is given ADF."""
-    seen = {}
-
-    def fake(client, workspace, name, *, start, adf, previous, **_kw):
-        seen[name] = adf is not None
-        if adf is not None:
-            return verify.Verification(name, "differs", fabric_status="Completed", job_id="run-1", baseline="adf", matched=1,
-                                       differences=[{"activity": "Copy1", "fact": "rowsCopied", "baseline": 19, "fabric": 6019}])
-        return verify.Verification(name, "no_baseline", fabric_status="Completed", job_id="run-1")
-
-    monkeypatch.setattr(verify, "verify_pipeline", fake)
-    out = verify.verify_all(lambda: _Client(), WS, ["PL_Rig"], start=False, adf=_Adf(), previous=previous, baseline=baseline)
-    return out[0], seen["PL_Rig"]
-
-
-def test_a_chosen_fabric_baseline_survives_reading_the_runs_again(monkeypatch):
-    prev = {"PL_Rig": {"pipeline": "PL_Rig", "verdict": "matches", "fabric_status": "Completed", "job_id": "run-1", "baseline": "fabric",
-                       "matched": 14, "baseline_choice": "fabric"}}
-    v, used_adf = _reread(monkeypatch, prev)
-    assert not used_adf  # the newer ADF run, known not to be comparable, is not read
-    assert (v.verdict, v.baseline, v.matched, v.baseline_choice) == ("matches", "fabric", 14, "fabric")  # the recorded comparison stands
-
-
-def test_without_a_choice_the_adf_run_is_used_and_use_adf_undoes_a_choice(monkeypatch):
-    prev = {"PL_Rig": {"pipeline": "PL_Rig", "verdict": "matches", "job_id": "run-1", "baseline": "fabric", "matched": 14}}
-    v, used_adf = _reread(monkeypatch, prev)
-    assert used_adf and v.verdict == "differs"
-    v, used_adf = _reread(monkeypatch, {"PL_Rig": {**prev["PL_Rig"], "baseline_choice": "fabric"}}, baseline="adf")
-    assert used_adf and v.baseline_choice == ""
-
-
-def test_choosing_fabric_is_remembered_in_the_record(tmp_path, monkeypatch):
-    v, used_adf = _reread(monkeypatch, {}, baseline="fabric")
-    assert not used_adf and v.baseline_choice == "fabric"
-    rec = verify.save_record(tmp_path / "verification" / "verification.json", [v])
-    assert rec["PL_Rig"]["baseline_choice"] == "fabric"
-
-
 def test_a_run_in_another_workspace_is_not_counted_and_an_old_run_belongs_where_the_pipeline_was_deployed(tmp_path):
     other = "99999999-0000-0000-0000-000000000000"
     runs = {"PL_A": {"verdict": "matches", "fabric_status": "Completed", "ran_at": "2026-11-04T06:18:06Z", "baseline": "adf", "matched": 6,
@@ -139,8 +87,4 @@ def test_a_run_in_another_workspace_is_not_counted_and_an_old_run_belongs_where_
     d = run_report.build(project, ["PL_A"], other)
     assert (d["summary"]["deployed"], d["summary"]["ran"], d["summary"]["matches"]) == (0, 0, 0)
 
-
-def test_verify_records_the_workspace_each_run_was_in(monkeypatch):
-    v, _ = _reread(monkeypatch, {})
-    assert v.workspace == WS.lower()
 

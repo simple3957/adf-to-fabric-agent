@@ -155,3 +155,89 @@ def validate(store: ProjectStore, pid: str, *, stages: set[str], fab: Optional[F
         stages=[_stage_summary(s, checks) for s in Stage], checks=checks, components=comps,
         inventory=InventoryCounts(source_components=sum(1 for x in comps if x.status is not S.extra), target_components=tgt_count, by_status=dict(sorted(by_status.items()))),
         overall=status, overall_reasons=reasons, full_success_claimed=status == "MIGRATION_VERIFIED")
+
+
+# =====================================================================================================================
+# one record, each part filled in where it happens (2026-11-11): the Deploy step reads the workspace back (api + deployment), real runs
+# record the runtime stage, the Validate step the static stage. The verdict is decided over all of them, and a read-back counts only
+# while it is current: same workspace, the generated files unchanged, no deploy after it.
+# =====================================================================================================================
+
+READBACK = ("api", "deployment")
+
+
+def conversion_fingerprint(store: ProjectStore, pid: str) -> str:
+    """A hash of every generated pipeline file: a read-back of an earlier conversion says nothing about the current one."""
+    import hashlib
+
+    h = hashlib.sha256()
+    base = store.conversion_dir(pid) / "pipelines"
+    for f in sorted(base.glob("*/pipeline-content.json")) if base.is_dir() else []:
+        h.update(f.parent.name.encode("utf-8"))
+        h.update(f.read_bytes())
+    return h.hexdigest()[:16]
+
+
+def readback_current(store: ProjectStore, pid: str, scope: dict[str, str], workspace: Optional[str]) -> Optional[str]:
+    """None when the saved read-back still describes the workspace; otherwise why it does not (shown as a neutral note, never as a failure)."""
+    from adf2fabric.agent.deployment import record as deploy_record
+
+    at = scope.get("readback_at")
+    if not at:
+        return "Nothing has been read back from Fabric yet: it is read back on the Deploy step, right after a deploy."
+    if workspace and scope.get("readback_workspace") and scope["readback_workspace"].lower() != workspace.lower():
+        return "The last read-back was of another workspace. Deploy to this workspace to read it back."
+    if scope.get("readback_conversion") != conversion_fingerprint(store, pid):
+        return "The pipelines were converted again after the last read-back. Deploy them to read the workspace back."
+    last = (deploy_record.load(store.project_dir(pid)).get("last_apply") or {}).get("at")
+    try:
+        if last and float(last) > datetime.fromisoformat(at).timestamp() + 1:
+            return "A deploy ran after the last read-back. Deploy again to read the workspace back."
+    except ValueError:
+        return "The read-back time is unreadable. Deploy again to read the workspace back."
+    return None
+
+
+def record(store: ProjectStore, pid: str, *, readback: bool = False, fab: Optional[FabricGateway] = None, workspace: Optional[str] = None,
+           now: Optional[datetime] = None) -> ValidationReport:
+    """Validate and save. Static and runtime are always worked out again from the project's own files and run records (nothing is read from
+    Fabric for them). With ``readback`` the api and deployment stages read the workspace now; without it the last read-back is kept only
+    while ``readback_current`` says it still describes the workspace, and otherwise those stages are left out of the record."""
+    now = now or datetime.now(timezone.utc)
+    stages = {"static", "runtime"} | (set(READBACK) if readback else set())
+    rep = validate(store, pid, stages=stages, fab=fab, workspace=workspace, now=now)
+    scope = dict(rep.scope)
+    checks = [c for c in rep.checks if not (not readback and c.stage.value in READBACK)]
+    comps = {c.id: c for c in rep.components}
+    if readback:
+        scope.update(readback_at=now.isoformat(), readback_workspace=workspace or "", readback_conversion=conversion_fingerprint(store, pid))
+    else:
+        prev = _optional(lambda: store.load_validation_report(pid)) if store.validation_path(pid).exists() else None
+        for k in ("readback_at", "readback_workspace", "readback_conversion"):  # kept even when out of date, so the note can say why
+            if prev is not None and prev.scope.get(k):
+                scope[k] = prev.scope[k]
+        if prev is not None and readback_current(store, pid, prev.scope, workspace) is None:
+            checks += [c for c in prev.checks if c.stage.value in READBACK]
+            for c in prev.components:  # what only the read-back can say about a pipeline: not deployed, or deployed differently
+                if c.note in ("not deployed", "deployed definition differs from the generated file"):
+                    comps[c.id] = c
+            stages |= set(READBACK)
+    components = sorted(comps.values(), key=lambda x: x.id)
+    by_status: dict[str, int] = {}
+    for x in components:
+        by_status[x.status.value] = by_status.get(x.status.value, 0) + 1
+    status, reasons = overall(checks, components, stages)
+    if not set(READBACK) <= stages:  # say what to do, not that a stage "was not requested"
+        why = readback_current(store, pid, scope, workspace) or "Nothing has been read back from Fabric yet."
+        reasons = [r for r in reasons if not r.startswith("Stages not requested")] + [why]
+    scope["stages_requested"] = ",".join(sorted(stages))
+    out = rep.model_copy(update=dict(
+        scope=scope, checks=checks, components=components, stages=[_stage_summary(s, checks) for s in Stage],
+        inventory=InventoryCounts(source_components=sum(1 for x in components if x.status is not S.extra),
+                                  target_components=sum(1 for x in components if x.status is not S.missing), by_status=dict(sorted(by_status.items()))),
+        overall=status, overall_reasons=reasons, full_success_claimed=status == "MIGRATION_VERIFIED"))
+    store.save_validation_report(pid, out)
+    from adf2fabric.agent.validation.report import render
+
+    (store.project_dir(pid) / "validation" / "report.md").write_text(render(out), encoding="utf-8")
+    return out

@@ -113,6 +113,19 @@ def _api_references(inp: Inputs, c: Collector, items: dict, conns: dict, fab: Fa
                 pass
         c.add("connections_secrets.credential_types", K.connections_secrets, R.PASS, "Credential TYPES of the bound connections were read (no secret is ever returned).",
               stage=Stage.api, evidence=kinds, required=False)
+    # one line per item and connection, as read from Fabric (informational: the required verdict is the two checks around these), so the
+    # Deploy step can list what is actually in the workspace and nothing it did not read
+    for i, users in sorted(ids_item.items()):
+        it = items.get(i)
+        c.add("deployment.item_present", K.deployment, R.PASS if it else R.FAIL,
+              f"{it.get('type', 'Item')} '{it.get('displayName', i)}' is in the workspace." if it else f"Item {i} is not in the workspace.",
+              stage=Stage.api, component=f"{(it or {}).get('type', 'item')}:{(it or {}).get('displayName', i)}", evidence=[f"used by {', '.join(users[:3])}"],
+              required=False)
+    for i, users in sorted(ids_conn.items()):
+        cn = conns.get(i)
+        c.add("deployment.connection_present", K.deployment, R.PASS if cn else R.FAIL,
+              f"Connection '{cn.get('displayName', i)}' exists." if cn else f"Connection {i} does not exist (or this account cannot see it).",
+              stage=Stage.api, component=f"Connection:{(cn or {}).get('displayName', i)}", evidence=[f"used by {', '.join(users[:3])}"], required=False)
     missing_items = [f"item {i} used by {', '.join(u[:3])}" for i, u in ids_item.items() if i not in items]
     other_ws = bindings_mod.mismatch_text(inp.bound_workspace, workspace) if (missing_items or miss) else None  # the usual cause of ids that "do not exist"
     c.add("deployment.items_exist", K.deployment, R.FAIL if missing_items else (R.PASS if ids_item else R.NOT_RUN),

@@ -25,8 +25,8 @@ STEPS: tuple[Step, ...] = (
     Step("connect", "Connect", "🔌", "Decide how each linked service becomes a Fabric connection, and test it."),
     Step("plan", "Plan target", "🏗️", "See what the target needs, what exists, and approve what may be created."),
     Step("convert", "Convert", "🔁", "Turn the ADF pipelines into Fabric pipelines."),
-    Step("deploy", "Deploy", "🚀", "Publish the converted pipelines to the Fabric workspace."),
-    Step("validate", "Validate", "🧪", "Re-read the source and the generated files and compare them with what is deployed, independently of the converter."),
+    Step("deploy", "Deploy", "🚀", "Publish the converted pipelines to the Fabric workspace, then read back what is actually there."),
+    Step("validate", "Validate", "🧪", "Re-read the source and the generated files and compare them, independently of the converter."),
     Step("report", "Report", "📋", "The honest account: what is confirmed, what is not, and what is left."),
 )
 KEYS = tuple(s.key for s in STEPS)
@@ -227,7 +227,7 @@ def report_facts(rep: Optional[dict]) -> StepFacts:
         return StepFacts(waiting="Validate the migration to get the report.", metric="Not validated")
     stages = {s["stage"]: s["status"] for s in rep["validation"]["stages"]}
     if stages.get("deployment") in (None, "NOT_RUN"):
-        return StepFacts(waiting="Press \"Validate the migration now\" above: it also checks what is deployed in Fabric (needs a connected workspace).", metric=rep["overall"].replace("_", " ").title())
+        return StepFacts(waiting="Deploy first: the Deploy step reads back what is in Fabric, and the verdict needs it.", metric=rep["overall"].replace("_", " ").title())
     attention = None if rep["full_success"] else rep["headline"]
     return StepFacts(complete=True, metric=rep["overall"].replace("_", " ").title(), attention=attention, outcome=rep["headline"])
 

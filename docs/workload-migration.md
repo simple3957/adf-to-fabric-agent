@@ -194,8 +194,8 @@ Probe items left in the workspace for you to delete in the portal: notebook `zz_
   JAR/wheel files need uploading, Maven coordinates need review, `dlt`/`dbruntime` do not exist).
 * A JAR is binary: its code is not scanned, and its Scala version must match the runtime.
 * Spark job code in storage is read only if you pass it with `--source` (the exact storage role is reported otherwise).
-* DBFS retrieval (`dbfs/read`) and the Databricks export call are exercised with fakes in tests; the export call matches the
+* DBFS retrieval (`dbfs/read`) and the Databricks export call were exercised with fakes in tests until 2026-11-11, when those tests were removed; the export call matches the
   one proven live for notebooks, the DBFS call has not run against a real workspace.
 * Databricks Job activities: job and task parameters are not mapped, and only notebook tasks migrate (see
-  [Databricks Job activities](#databricks-job-activities)). The `jobs/get` call is tested with fakes; its first live use is noted
+  [Databricks Job activities](#databricks-job-activities)). The `jobs/get` call was tested with fakes until 2026-11-11 (those tests were removed); its first live use is noted
   in [status-briefing.md](status-briefing.md) once it has run.

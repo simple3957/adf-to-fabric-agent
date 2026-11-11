@@ -17,6 +17,7 @@ from adf2fabric.agent.discovery.adf_semantic import AdfSemanticDiscoveryRequest
 from adf2fabric.agent.reconstruction.agent import ReconstructionAgent
 from adf2fabric.agent.reconstruction.models import ReconstructionRequest
 from adf2fabric.api.container import Container, Session
+from adf2fabric.connections.redaction import redact
 from adf2fabric.project.store import ProjectStore
 
 STAGES = ("discovery", "semantic", "dependencies", "workloads", "reconstruct", "convert", "compute", "validate", "deploy_dry_run", "deploy_apply", "verify")
@@ -153,12 +154,15 @@ def _verify(c: Container, session: Session, pid: str, options: dict, log: Log) -
         if start:
             log(f"Starting real runs of {len(names)} pipeline(s) in Fabric")
         # a fresh token for every pipeline: started runs are waited for one after another and can outlast a single token
-        results = verify_all(lambda: FabricClient(c.fabric_token(session), session=c.fabric_http), workspace, names, start=start, adf=adf, previous=previous,
+        results = verify_all(lambda: FabricClient(c.fabric_token(session)), workspace, names, start=start, adf=adf, previous=previous,
                              called=called, timeout_seconds=int(options.get("run_timeout") or 1800), log=log)
     except DeployError as exc:
         raise StageError(str(exc)) from None
     record = save_record(path, results)
     path.with_name("verification-report.md").write_text(render_report(record), encoding="utf-8")
+    from adf2fabric.agent.validation import engine
+
+    engine.record(c.store, pid, workspace=workspace)  # the runs are recorded: the runtime stage is worked out again from them, now
     keep = ("pipeline", "verdict", "fabric_status", "ran_at", "baseline", "baseline_at", "matched", "differences",
             "baseline_only", "fabric_only", "detail")
     return {"results": [{k: v.to_dict()[k] for k in keep} for v in results]}
@@ -178,25 +182,38 @@ def _workloads(c: Container, pid: str, log: Log) -> dict[str, Any]:
 
 
 def _validate(c: Container, session: Session, pid: str, options: dict, log: Log) -> dict[str, Any]:
-    """Independent validation. Static always; api / deployment need an authorised workspace; runtime reads recorded real runs only."""
+    """Validation: the static stage, worked out again from the source and the generated files. The runtime stage is worked out again from the
+    recorded runs, and what Deploy read back from the workspace is kept while it is current (``engine.record``). Asking for the api or
+    deployment stage reads the workspace now, as the Deploy step does after a deploy."""
     from adf2fabric.agent.validation import engine
-    from adf2fabric.agent.validation.report import render
 
     wanted = set(options.get("validate_stages") or ["static"]) & set(engine.ALL_STAGES) or {"static"}
     workspace = options.get("workspace_id") or session.destination.get("workspace_id")
     fab = None
-    if wanted & {"api", "deployment"}:
+    readback = bool(wanted & set(engine.READBACK))
+    if readback:
         if not workspace:
-            raise StageError("Choose a Fabric workspace before validating the API and deployment stages.", ["Connect a workspace on the Connections page."])
+            raise StageError("Choose a Fabric workspace before reading it back.", ["Connect a workspace on the Connections page."])
         fab, _ = c.gateways(session)
-    log("validating: " + ", ".join(sorted(wanted)))
-    report = engine.validate(c.store, pid, stages=wanted, fab=fab, workspace=workspace)
-    c.store.save_validation_report(pid, report)
-    d = c.store.project_dir(pid) / "validation"
-    d.mkdir(parents=True, exist_ok=True)
-    (d / "report.md").write_text(render(report), encoding="utf-8")
+    log("validating: static" + (" and reading the workspace back" if readback else ""))
+    report = engine.record(c.store, pid, readback=readback, fab=fab, workspace=workspace)
     return {"message": "Validation finished.", "overall": report.overall, "stages": {s.stage.value: s.status.value for s in report.stages},
             "checks": len(report.checks)}
+
+
+def _read_back(c: Container, session: Session, pid: str, workspace: str, log: Log) -> dict[str, Any]:
+    """Right after a real deploy: read the workspace back (api + deployment stages, read-only) and record it. A read that fails is said as
+    such; nothing is assumed to be in Fabric that was not read."""
+    from adf2fabric.agent.validation import engine
+
+    log("Reading the workspace back from Fabric")
+    try:
+        fab, _ = c.gateways(session)
+        rep = engine.record(c.store, pid, readback=True, fab=fab, workspace=workspace)
+    except Exception as exc:  # noqa: BLE001  the deploy happened; the read-back is reported, never raised over it
+        return {"ok": False, "error": redact(str(exc))[:300]}
+    status = {s.stage.value: s.status.value for s in rep.stages}
+    return {"ok": True, "api": status.get("api"), "deployment": status.get("deployment")}
 
 
 AFTER = ("convert", "deploy_apply", "verify", "validate")  # the stages after which each pipeline's "why and what to do" is written again
@@ -223,7 +240,7 @@ def _notebooks_for_deploy(c: Container, session: Session, pid: str, workspace: s
     need = wl.notebooks_to_create(c.store, pid, workspace, options.get("pipelines"))
     if not need:
         return {}, {}
-    client = FabricClient(c.fabric_token(session), session=c.fabric_http)
+    client = FabricClient(c.fabric_token(session))
     bindings_mod.use_workspace(c.store, pid, workspace)  # the ids saved for this workspace; the other workspace's are kept for it
     res = c.store.conversion_dir(pid) / "resolutions.json"
     names = {p.source_pipeline.lower(): p.fabric_pipeline_name for p in c.store.load_conversion(pid).pipelines} if c.store.has_conversion(pid) else {}
@@ -360,7 +377,7 @@ def _run_stage(c: Container, session: Session, pid: str, stage: str, log: Log, o
     held = {**waiting, **blocked}  # fabric pipeline name -> why it is not pushed in this call
     try:
         token = c.fabric_token(session)
-        results = deploy(FabricClient(token, session=c.fabric_http), workspace, [i for i in items if i.name not in held],
+        results = deploy(FabricClient(token), workspace, [i for i in items if i.name not in held],
                          apply=stage == "deploy_apply", allow_unbound=bool(options.get("allow_unbound")))
     except DeployError as exc:
         raise StageError(str(exc)) from None
@@ -368,8 +385,10 @@ def _run_stage(c: Container, session: Session, pid: str, stage: str, log: Log, o
 
     results += [DeployResult(n, "pending", detail=why) for n, why in sorted(waiting.items()) if any(i.name == n for i in items)]
     results += [DeployResult(n, "refused", detail=why) for n, why in sorted(blocked.items()) if any(i.name == n for i in items)]
+    readback = None
     if stage == "deploy_apply":
         deploy_record.note_apply(c.store.project_dir(pid), workspace, results)
+        readback = _read_back(c, session, pid, workspace, log)
     else:
         deploy_record.note_dry_run(c.store.project_dir(pid), workspace, [i.name for i in items], sum(1 for r in results if r.action in ("failed", "refused")),
                                    allow_unbound=bool(options.get("allow_unbound")))
@@ -383,4 +402,4 @@ def _run_stage(c: Container, session: Session, pid: str, stage: str, log: Log, o
     return {"applied": stage == "deploy_apply",
             "results": [{"name": r.name, "action": r.action, "detail": r.detail, "children": r.children}
                         for r in results],
-            "warnings": warnings}
+            "warnings": warnings, "readback": readback}

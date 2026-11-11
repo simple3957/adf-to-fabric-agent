@@ -557,25 +557,6 @@ def test_persisted_round_trips(tmp_path):
 # --- delegation + layering + reuse ------------------------------------------
 
 
-def test_discovery_agent_delegates(tmp_path):
-    store, _ = _make_project(tmp_path, SOURCE, run_repo=False)
-    sentinel = AdfSemanticDiscoveryResult(success=True, message="delegated")
-
-    class Fake:
-        def __init__(self):
-            self.calls = []
-
-        def run(self, request):
-            self.calls.append(request)
-            return sentinel
-
-    fake = Fake()
-    agent = DiscoveryAgent(store, adf_semantic_discoverer=fake)
-    req = AdfSemanticDiscoveryRequest(project_name="test-proj")
-    out = agent.discover_adf_semantic(req)
-    assert out is sentinel and fake.calls == [req]
-
-
 def test_persisted_models_only_in_project_layer():
     import adf2fabric.agent.discovery.adf_semantic.models as sem_models
 

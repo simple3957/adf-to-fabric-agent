@@ -73,12 +73,11 @@ _IDEM = re.compile(r"^[A-Za-z0-9_-]{8,64}$")
 IDEMPOTENCY_TTL = 900.0
 
 
-def create_app(settings: Optional[Settings] = None, live: Optional[Container] = None, demo: Optional[Container] = None,
+def create_app(settings: Optional[Settings] = None, live: Optional[Container] = None,
                security: Optional[SecuritySettings] = None) -> FastAPI:
     settings = settings or Settings()
     app = FastAPI(title="ADF to Fabric Migration Accelerator API", version="0.1.0", docs_url=None, redoc_url=None, openapi_url=None)
-    app.state.containers = {"live": live or Container(settings), "demo": demo}
-    app.state.modes = {}  # scoped session key -> "live" | "demo"
+    app.state.containers = {"live": live or Container(settings)}  # one container: every call goes to the real services
     app.state.idem_lock = threading.RLock()  # route handlers run on worker threads: check, submit and remember a key as one step
     app.state.idem = {}  # (scoped session key, Idempotency-Key) -> (time, response body): a repeated submission returns the first result
     root = app.state.containers["live"].store.projects_root
@@ -232,16 +231,9 @@ def create_app(settings: Optional[Settings] = None, live: Optional[Container] = 
                 raise HTTPException(400, "X-Session-Id must be 1-64 letters, digits, '-' or '_'.")
             self.sid = sid  # what the client sent (shown back to it)
             self.key = f"{self.principal.org}|{self.principal.id}|{sid}"  # what the server stores under: sessions never cross principals
-            mode = "live" if sec.is_production else app.state.modes.get(self.key, "live")
-            c = app.state.containers.get(mode)
-            if c is None:
-                from adf2fabric.api.demo import build_demo_container
-
-                c = app.state.containers[mode] = build_demo_container(settings)
-            self.c: Container = c
-            self.mode = mode
-            self.session: Session = c.session(self.key)
-            self.access = ProjectAccess(c.store, sec.legacy_org)
+            self.c: Container = app.state.containers["live"]
+            self.session: Session = self.c.session(self.key)
+            self.access = ProjectAccess(self.c.store, sec.legacy_org)
 
         def project(self, pid: str) -> str:
             """The project's id if it exists AND the caller's organisation owns it. Otherwise 404, identical either way."""
@@ -270,7 +262,7 @@ def create_app(settings: Optional[Settings] = None, live: Optional[Container] = 
             audit.event(action, outcome, actor=self.principal.id, org=self.principal.org, resource=resource, resource_id=resource_id,
                         request_id=_rid(self.request), **detail)
 
-    # ---- health + identity + mode ---------------------------------------------------------------------------------------
+    # ---- health + identity --------------------------------------------------------------------------------------------
     @app.get("/health")
     def health():
         return {"status": "ok", "version": app.version}
@@ -278,22 +270,7 @@ def create_app(settings: Optional[Settings] = None, live: Optional[Container] = 
     @app.get("/me")
     def me(request: Request):
         p = _principal(request)
-        return {**p.public(), "auth_mode": _mode(), "production": sec.is_production, "demo_available": not sec.is_production}
-
-    @app.get("/mode")
-    def get_mode(ctx: Ctx = Depends(), _: Principal = need(P.projects_view)):
-        return {"mode": ctx.mode, "modes": ["live", "demo"]}
-
-    @app.post("/mode")
-    def set_mode(body: S.ModeBody, request: Request, _: Principal = need(P.projects_view)):
-        if body.mode not in ("live", "demo"):
-            raise HTTPException(422, "mode must be 'live' or 'demo'.")
-        if body.mode == "demo" and sec.is_production:
-            audit.event("mode.demo_refused", "denied", actor=_.id, org=_.org, request_id=_rid(request))
-            raise HTTPException(403, "Demo data is not available in production mode.")
-        ctx = Ctx(request)
-        app.state.modes[ctx.key] = body.mode
-        return {"mode": body.mode}
+        return {**p.public(), "auth_mode": _mode(), "production": sec.is_production}
 
     # ---- sign-in to the server's Azure / Fabric CLI (machine-wide state) ------------------------------------------------
     def _provider_for(ctx: Ctx, which: str):
@@ -371,7 +348,7 @@ def create_app(settings: Optional[Settings] = None, live: Optional[Container] = 
 
     @app.get("/session")
     def session(ctx: Ctx = Depends(), _: Principal = need(P.projects_view)):
-        return {"id": ctx.sid, "mode": ctx.mode, "source": ctx.session.source, "destination": ctx.session.destination, "tested": ctx.session.tested}
+        return {"id": ctx.sid, "source": ctx.session.source, "destination": ctx.session.destination, "tested": ctx.session.tested}
 
     # ---- source --------------------------------------------------------------------------------------------------------
     @app.get("/azure/subscriptions")
@@ -763,7 +740,7 @@ def create_app(settings: Optional[Settings] = None, live: Optional[Container] = 
         guards.valid_guid(item, "notebook id")
         if not ctx.c.store.has_workload_manifest(slug):
             raise HTTPException(409, "No Spark workloads were generated for this project.")
-        client = FabricClient(ctx.c.fabric_token(ctx.session), session=ctx.c.fabric_http)
+        client = FabricClient(ctx.c.fabric_token(ctx.session))
         if body.confirm:  # an id is saved for the workspace it belongs to; the ids of the one used before are kept for it
             from adf2fabric.project import bindings as B
 
@@ -799,7 +776,7 @@ def create_app(settings: Optional[Settings] = None, live: Optional[Container] = 
         ctx.grant("workspaces", ws, "workspace")
         if not ctx.c.store.has_workload_manifest(slug):
             raise HTTPException(409, "No Spark workloads were generated for this project.")
-        client = FabricClient(ctx.c.fabric_token(ctx.session), session=ctx.c.fabric_http)
+        client = FabricClient(ctx.c.fabric_token(ctx.session))
         if body.confirm:  # the new id is this workspace's; the ids of the one used before are kept for it
             from adf2fabric.project import bindings as B
 
@@ -853,8 +830,6 @@ def create_app(settings: Optional[Settings] = None, live: Optional[Container] = 
         from adf2fabric.agent.deployment import output_check as oc
 
         slug = ctx.project(pid)
-        if ctx.c.fabric_http is not None:
-            raise HTTPException(409, "Output checks read real storage, so they are not available in demo mode.")
         if not ctx.c.store.has_conversion(slug):
             raise HTTPException(409, "Nothing is converted yet.")
         if body.pipeline.lower() not in {p.source_pipeline.lower() for p in ctx.c.store.load_conversion(slug).pipelines}:
@@ -1132,7 +1107,7 @@ def create_app(settings: Optional[Settings] = None, live: Optional[Container] = 
             if ws:
                 log("reading the workspace: what is deployed and the latest runs")
                 try:
-                    report = structure_report.collect(ctx.c.store, slug, ws, lambda: FabricClient(ctx.c.fabric_token(session), session=ctx.c.fabric_http), log=log)
+                    report = structure_report.collect(ctx.c.store, slug, ws, lambda: FabricClient(ctx.c.fabric_token(session)), log=log)
                 except Exception as exc:  # noqa: BLE001  a workspace that cannot be read narrows the diagnosis, it does not stop it
                     log(f"the workspace could not be read ({type(exc).__name__}); conversion and binding only")
             d = engine.diagnose(ctx.c.store, slug, report, workspace=ws or "")
@@ -1169,7 +1144,7 @@ def create_app(settings: Optional[Settings] = None, live: Optional[Container] = 
     @app.get("/projects/{pid}/validation")
     def validation_view(pid: str, ctx: Ctx = Depends(), _: Principal = need(P.reports_view)):
         slug = ctx.project(pid)
-        return views.validation_summary(ctx.c.store, slug, _roots())
+        return views.validation_summary(ctx.c.store, slug, _roots(), workspace=ctx.session.destination.get("workspace_id") or "")
 
     @app.get("/projects/{pid}/report")
     def report_view(pid: str, ctx: Ctx = Depends(), _: Principal = need(P.reports_view)):

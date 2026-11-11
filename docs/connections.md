@@ -17,17 +17,16 @@ ADF linked service. The UI is a thin client of the FastAPI backend (`python -m a
 | Area | Behaviour | Verified |
 |---|---|---|
 | Source: Azure CLI | list subscriptions/factories (ARM), validate factory, import | live, read-only |
-| Source: Git | HTTPS only, token via env header (never in URL/config), commit SHA verified | unit + fake git |
+| Source: Git | HTTPS only, token via env header (never in URL/config), commit SHA verified | unit (fake-git tests removed 2026-11-11) |
 | Source: ZIP | safe extraction (zip-slip, symlinks, bombs, encrypted, size caps), JSON only, nothing executed | unit |
 | Destination: Azure CLI | workspaces, capacities, connections, gateways, validate workspace | live, read-only |
 | Destination: Fabric CLI | same service over `fab api`; sign-in states | unauthenticated state live; **authenticated output not yet verified** |
 | Cards | SQL, ADLS Gen2, Blob, REST, Databricks; parameterized LS; Key Vault refs; existing-connection matching | unit + real projects |
-| Auth methods | SQL login / service principal / workspace identity / existing connection (each with Key Vault variant); storage key / SAS / SP / workspace identity | unit with fakes |
-| Test | config -> Key Vault read -> TCP reach -> SQL login / storage call | fakes |
-| Apply | create or reuse Fabric connections, merge `conversion/resolutions.json`, dry-run; never creates a name twice (below) | fakes |
+| Auth methods | SQL login / service principal / workspace identity / existing connection (each with Key Vault variant); storage key / SAS / SP / workspace identity | unit (tests with stand-ins removed 2026-11-11) |
+| Test | config -> Key Vault read -> TCP reach -> SQL login / storage call | not tested: its stand-in tests were removed 2026-11-11 |
+| Apply | create or reuse Fabric connections, merge `conversion/resolutions.json`, dry-run; never creates a name twice (below) | not tested: its stand-in tests were removed 2026-11-11 |
 | Integration runtimes | azure / managed VNet / self-hosted / SSIS -> Fabric path | unit + parser |
 | Report | `conversion/connections-report.{md,json}` | unit |
-| Demo mode | same routes, canned providers, real parsing on a bundled sample | tests |
 
 ## Applying again
 

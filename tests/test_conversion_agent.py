@@ -8,16 +8,14 @@ from pathlib import Path
 
 import pytest
 import yaml
-from click.testing import CliRunner
 
-from adf2fabric import cli as cli_mod
 from adf2fabric.agent.conversion import ConversionAgent, ConversionRequest
 from adf2fabric.agent.conversion.context import Resolutions
 from adf2fabric.agent.conversion.validation import validate_content
 from adf2fabric.agent.discovery import DiscoveryAgent, DiscoveryRequest
 from adf2fabric.agent.discovery.adf_semantic import AdfSemanticDiscoverer, AdfSemanticDiscoveryRequest
 from adf2fabric.project.conversion import ConversionOutcome, ConversionStatus, ProjectConversion
-from tests.conversion_support import DS_LAKE, DS_SQL, LAKE_LS, SQL_LS, act, copy_activity, dep, expr, pipe, ref
+from tests.conversion_support import DS_LAKE, DS_SQL, LAKE_LS, SQL_LS, act, copy_activity, dep, pipe, ref
 from tests.test_adf_semantic_discovery import _make_project
 
 GUID = "11111111-1111-1111-1111-111111111111"
@@ -304,23 +302,6 @@ def test_agent_survives_a_partially_blocked_estate(tmp_path):
 # =============================================================================
 
 
-def test_cli_convert_end_to_end(project, monkeypatch):
-    store, pid = project
-    monkeypatch.setattr(cli_mod, "projects_root", lambda config: store.projects_root)
-    out = CliRunner().invoke(cli_mod.cli, ["convert", "--project", "test-proj"])
-    assert out.exit_code == 0, out.output
-    assert "ADF -> FABRIC CONVERSION" in out.output and "PL_Main: converted (valid; runtime ready: no)" in out.output
-    assert "binding(s) still to supply" in out.output and "resolutions template" in out.output
-    assert store.has_conversion(pid)
-
-
-def test_cli_convert_fails_cleanly_without_discovery(tmp_path, monkeypatch):
-    store, _ = _make_project(tmp_path, FILES)
-    monkeypatch.setattr(cli_mod, "projects_root", lambda config: store.projects_root)
-    out = CliRunner().invoke(cli_mod.cli, ["convert", "--project", "test-proj"])
-    assert out.exit_code == 1 and "Semantic Discovery has not run" in out.output
-
-
 def test_existing_stages_are_untouched_by_the_new_stage(project):
     store, pid = project
     sem_before = store.adf_semantic_discovery_path(pid).read_bytes()
@@ -329,20 +310,6 @@ def test_existing_stages_are_untouched_by_the_new_stage(project):
     assert store.adf_semantic_discovery_path(pid).read_bytes() == sem_before
     assert store.repository_discovery_path(pid).read_bytes() == repo_before
     assert DiscoveryAgent(store).discover_repository(DiscoveryRequest(project_name="test-proj")).success
-
-
-def test_connector_coverage_says_which_linked_services_the_tool_can_create():
-    from types import SimpleNamespace as NS
-
-    from adf2fabric.agent.conversion.connectors import coverage
-
-    got = {c.linked_service: (c.level, c.adf_type) for c in coverage([
-        NS(name="Lake", type="AzureBlobFS"), NS(name="Sql", type="AzureSqlDW"), NS(name="Dbx", type="AzureDatabricks"),
-        NS(name="Pg", type="PostgreSql"), NS(name="Gen1", type="AzureDataLakeStore"), NS(name="Odd", type="SomethingNew"),
-        NS(name="None", type=None)])}
-    assert got == {"Lake": ("created", "AzureBlobFS"), "Sql": ("created", "AzureSqlDW"), "Dbx": ("created", "AzureDatabricks"),
-                   "Pg": ("manual", "PostgreSql"), "Gen1": ("unsupported", "AzureDataLakeStore"),
-                   "Odd": ("unlisted", "SomethingNew"), "None": ("unlisted", None)}
 
 
 def test_the_report_has_a_connector_coverage_section_with_counts(tmp_path):
@@ -356,25 +323,6 @@ def test_the_report_has_a_connector_coverage_section_with_counts(tmp_path):
     assert "## Connector coverage" in text and "can be created in Fabric by this tool" in text
     assert text.index("## Connector coverage") < text.index("## Prerequisites (all pipelines)")
     assert all(x.level in ("created", "manual", "unsupported", "unlisted") for x in r.conversion.connector_coverage)
-
-
-def test_a_path_too_long_for_windows_is_explained_not_a_raw_file_error(tmp_path, monkeypatch):
-    from adf2fabric.project.store import ProjectPathError, ProjectStore
-
-    store = ProjectStore(tmp_path / ("d" * 120) / ("e" * 120))
-    real = type(tmp_path).write_text
-
-    def boom(self, *a, **k):
-        err = OSError(2, "No such file or directory")
-        err.winerror = 3
-        raise err
-
-    monkeypatch.setattr(type(tmp_path), "write_text", boom)
-    monkeypatch.setattr(type(tmp_path), "mkdir", lambda self, *a, **k: None)
-    with pytest.raises(ProjectPathError) as exc:
-        store.write_conversion_file("p", "pipelines/PL_X.DataPipeline/pipeline-content.json", "{}")
-    assert "260" in str(exc.value) and "projects_root" in str(exc.value) and str(tmp_path) not in str(exc.value)
-    monkeypatch.setattr(type(tmp_path), "write_text", real)
 
 
 def test_an_unchanged_generated_file_is_not_rewritten_so_its_timestamp_still_means_something(tmp_path):

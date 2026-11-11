@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 
 import pytest
-from click.testing import CliRunner
 
 from adf2fabric.agent.storage.routes import RouteError, Routes, Target
 from adf2fabric.agent.workloads import analyzer, engine, notebook_format, transform
@@ -81,22 +80,6 @@ def test_nothing_changes_without_routes():
     before = json.dumps(tr.cells)
     engine._route_storage(tr, findings, Routes([], Target(WS, LH)))
     assert json.dumps(tr.cells) == before and not any(f.rewritten for f in findings if f.code == "adls_direct_path")
-
-
-def test_the_cli_needs_a_storage_map_and_both_onelake_options(tmp_path, monkeypatch):
-    from adf2fabric import cli as cli_mod
-    from adf2fabric.project.store import ProjectStore
-
-    store = ProjectStore(tmp_path / "projects")
-    monkeypatch.setattr(cli_mod, "ProjectStore", lambda root: store)
-    one = CliRunner().invoke(cli_mod.cli, ["workloads-assess", "--project", "p", "--onelake-workspace", WS])
-    assert one.exit_code != 0 and "both" in one.output
-    none = CliRunner().invoke(cli_mod.cli, ["workloads-assess", "--project", "p", "--onelake-workspace", WS, "--onelake-lakehouse", LH])
-    assert none.exit_code != 0 and "storage-map" in none.output
-    (store.project_dir("p") / "storage").mkdir(parents=True)
-    (store.project_dir("p") / "storage" / "storage-map.json").write_text(json.dumps(MAP), encoding="utf-8")
-    mixed = CliRunner().invoke(cli_mod.cli, ["workloads-assess", "--project", "p", "--onelake-workspace", WS, "--onelake-lakehouse", "lh"])
-    assert mixed.exit_code != 0 and "GUIDs" in mixed.output
 
 
 @pytest.mark.parametrize("code", ['x = "abfss://raw@acctone.dfs.core.windows.net:443/x"', 'x = "abfss://raw@acctone.dfs.core.windows.net#f"'])

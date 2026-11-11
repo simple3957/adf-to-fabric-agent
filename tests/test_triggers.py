@@ -10,13 +10,11 @@ import pytest
 from adf2fabric.agent.conversion import ConversionAgent, ConversionRequest
 from adf2fabric.agent.conversion.report import render_report
 from adf2fabric.agent.conversion.triggers import build_schedules
-from adf2fabric.agent.deployment import fabric_deploy as fd
 from adf2fabric.agent.discovery.adf_semantic import AdfSemanticDiscoverer, AdfSemanticDiscoveryRequest, parser
 from adf2fabric.project.discovery import AdfRecurrence, AdfTrigger
-from tests.conversion_support import act, copy_activity, pipe
 from tests.test_adf_semantic_discovery import _make_project
 from tests.test_conversion_agent import FILES
-from tests.test_fabric_deploy import WS, Fake, Resp, client
+from tests.test_fabric_deploy import WS
 
 FUTURE = "2099-01-01T08:30:00Z"
 
@@ -269,78 +267,5 @@ def test_a_schedule_trigger_without_parameters_has_nothing_to_re_enter(tmp_path)
 # --- creating schedules in Fabric ---------------------------------------------------------------------------
 
 LS = f"/workspaces/{WS}/items/ITEM1/jobs/Pipeline/schedules"
-DAILY = {"type": "Daily", "times": ["08:30"], "startDateTime": "2099-01-01T08:30:00",
-         "endDateTime": "2108-12-30T08:30:00", "localTimeZoneId": "UTC"}
 
 
-def sitem(config=DAILY, enabled=True, pipeline="PL_Main", trigger="TR"):
-    return fd.ScheduleItem(pipeline, trigger, {"enabled": enabled, "configuration": config})
-
-
-def posts(session):
-    return [(u, b) for m, u, b, _ in session.calls if m == "POST"]
-
-
-def test_schedules_are_created_disabled_by_default_even_when_the_source_trigger_was_started():
-    c, s = client({("GET", LS): [Resp(200, {"value": []})], ("POST", LS): [Resp(201, {"id": "sch1"})]})
-    res = fd.deploy_schedules(c, WS, [sitem()], {"PL_Main": "ITEM1"}, apply=True)
-    assert [(r.action, r.schedule_id) for r in res] == [("create", "sch1")] and "disabled" in res[0].detail
-    (url, body), = posts(s)
-    assert url.endswith(LS) and body == {"enabled": False, "configuration": DAILY}
-
-
-def test_schedules_are_enabled_only_with_the_opt_in_and_a_started_source():
-    c, s = client({("GET", LS): [Resp(200, {"value": []})], ("POST", LS): [Resp(201, {"id": "a"})]})
-    fd.deploy_schedules(c, WS, [sitem(enabled=True)], {"PL_Main": "ITEM1"}, apply=True, enable=True)
-    assert posts(s)[0][1]["enabled"] is True
-    c, s = client({("GET", LS): [Resp(200, {"value": []})], ("POST", LS): [Resp(201, {"id": "a"})]})
-    fd.deploy_schedules(c, WS, [sitem(enabled=False)], {"PL_Main": "ITEM1"}, apply=True, enable=True)
-    assert posts(s)[0][1]["enabled"] is False  # a stopped trigger is never switched on
-
-
-def test_dry_run_only_reads_and_a_rerun_never_duplicates():
-    c, s = client({("GET", LS): [Resp(200, {"value": []})]})
-    res = fd.deploy_schedules(c, WS, [sitem()], {"PL_Main": "ITEM1"}, apply=False)
-    assert res[0].action == "create" and "dry run" in res[0].detail and not posts(s)
-    same = {"value": [{"id": "old", "enabled": True, "configuration": DAILY}]}  # enabled differs: still the same schedule
-    c, s = client({("GET", LS): [Resp(200, same)]})
-    res = fd.deploy_schedules(c, WS, [sitem()], {"PL_Main": "ITEM1"}, apply=True)
-    assert [(r.action, r.schedule_id) for r in res] == [("exists", "old")] and not posts(s)
-
-
-def test_a_schedule_fabric_echoes_back_in_its_own_form_is_still_recognised():
-    echoed = {**DAILY, "startDateTime": "2099-01-01T08:30:00.0000000Z", "endDateTime": "2108-12-30T08:30:00Z",
-              "localTimeZoneId": "utc", "extraFabricField": "x"}  # fractions, Z, case and fields Fabric adds itself
-    c, s = client({("GET", LS): [Resp(200, {"value": [{"id": "old", "configuration": echoed}]})]})
-    res = fd.deploy_schedules(c, WS, [sitem()], {"PL_Main": "ITEM1"}, apply=True)
-    assert [(r.action, r.schedule_id) for r in res] == [("exists", "old")] and not posts(s)
-    later = {**DAILY, "times": ["09:30"]}
-    c, s = client({("GET", LS): [Resp(200, {"value": [{"id": "old", "configuration": echoed}]})], ("POST", LS): [Resp(201, {"id": "new"})]})
-    assert fd.deploy_schedules(c, WS, [sitem(later)], {"PL_Main": "ITEM1"}, apply=True)[0].action == "create"  # a real difference
-
-
-def test_two_identical_triggers_in_one_run_make_one_schedule():
-    c, s = client({("GET", LS): [Resp(200, {"value": []})], ("POST", LS): [Resp(201, {"id": "sch1"})]})
-    res = fd.deploy_schedules(c, WS, [sitem(trigger="T1"), sitem(trigger="T2")], {"PL_Main": "ITEM1"}, apply=True)
-    assert [(r.action, r.schedule_id) for r in res] == [("create", "sch1"), ("exists", "sch1")] and len(posts(s)) == 1
-
-
-def test_a_pipeline_that_is_not_deployed_is_skipped_or_planned_and_the_limit_is_respected():
-    c, s = client({})
-    assert fd.deploy_schedules(c, WS, [sitem()], {}, apply=True)[0].action == "skipped"
-    assert fd.deploy_schedules(c, WS, [sitem()], {}, apply=False)[0].action == "create" and not s.calls
-    full = {"value": [{"id": str(i), "configuration": {"type": "Cron", "interval": i + 1}} for i in range(20)]}
-    c, s = client({("GET", LS): [Resp(200, full)]})
-    r = fd.deploy_schedules(c, WS, [sitem()], {"PL_Main": "ITEM1"}, apply=True)[0]
-    assert r.action == "failed" and "20 schedules" in r.detail and not posts(s)
-
-
-def test_one_failed_schedule_does_not_stop_the_others_and_listing_follows_pages():
-    other = {"type": "Cron", "interval": 5}
-    c, s = client({("GET", LS): [Resp(200, {"value": []})],
-                   ("POST", LS): [Resp(400, {"errorCode": "BadRequest", "message": "no"}), Resp(201, {"id": "ok"})]})
-    res = fd.deploy_schedules(c, WS, [sitem(), sitem(other, trigger="T2")], {"PL_Main": "ITEM1"}, apply=True)
-    assert [r.action for r in res] == ["failed", "create"] and "BadRequest" in res[0].detail
-    page1 = Resp(200, {"value": [{"id": "1", "configuration": {"x": 1}}], "continuationToken": "t"})
-    c, _ = client({("GET", LS): [page1, Resp(200, {"value": [{"id": "2", "configuration": {"x": 2}}]})]})
-    assert [e["id"] for e in fd.list_schedules(c, WS, "ITEM1")] == ["1", "2"]

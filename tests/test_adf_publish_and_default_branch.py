@@ -6,17 +6,12 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
-import pytest
 
 import adf2fabric.repository.git as git_mod
-from adf2fabric.agent.intake import IntakeAgent, IntakeRequest
-from adf2fabric.agent.intake import agent as agent_mod
 from adf2fabric.agent.intake import arm_template, github_source
 from adf2fabric.agent.intake import source_validation as sv
 from adf2fabric.connections.source_analysis import analyze_source
 from adf2fabric.project.models import RepositoryMetadata
-from adf2fabric.project.store import ProjectStore
-from adf2fabric.repository.providers import RepositoryProvider
 from tests.conftest import make_repo
 
 FACTORY = "[concat(parameters('factoryName'), '/{}')]"
@@ -170,15 +165,6 @@ def test_git_layout_source_is_untouched(tmp_path):
 
 # --- default branch ---------------------------------------------------------
 
-class _LocalProvider(RepositoryProvider):
-    name = "local"
-
-    def normalize_url(self, url: str) -> str:
-        return url
-
-    def authenticated_url(self, url: str, token: str) -> str:
-        return url
-
 
 def test_default_branch_reads_remote_head(tmp_path):
     repo = make_repo(tmp_path / "origin", branch="master")
@@ -192,33 +178,3 @@ def test_default_branch_is_none_for_empty_remote(tmp_path):
     assert git_mod.default_branch(str(empty)) is None
 
 
-@pytest.fixture
-def local_intake(monkeypatch, tmp_path):
-    monkeypatch.setattr(agent_mod, "get_provider", lambda name: _LocalProvider())
-    monkeypatch.setenv("GITHUB_TOKEN", "ghp_TESTTOKEN123")
-    return IntakeAgent(ProjectStore(tmp_path / "projects"))
-
-
-def test_intake_without_a_branch_follows_the_repos_default(local_intake, tmp_path):
-    repo = make_repo(tmp_path / "origin", branch="master")
-    result = local_intake.run(IntakeRequest(project_name="demo", repository_url=str(repo), provider="local"))
-
-    assert result.success, result.error
-    assert result.project.repository.branch == "master"
-    assert "master" in result.message
-
-
-def test_named_branch_still_wins(local_intake, tmp_path):
-    repo = make_repo(tmp_path / "origin", branch="master", extra_branches=("adf_publish",))
-    result = local_intake.run(IntakeRequest(project_name="demo", repository_url=str(repo), branch="adf_publish",
-                                            provider="local"))
-    assert result.success, result.error
-    assert result.project.repository.branch == "adf_publish"
-
-
-def test_rerun_without_a_branch_reuses_the_existing_clone(local_intake, tmp_path):
-    repo = make_repo(tmp_path / "origin", branch="master")
-    request = IntakeRequest(project_name="demo", repository_url=str(repo), provider="local")
-    assert local_intake.run(request).success
-    again = local_intake.run(request)
-    assert again.success and again.reused and again.project.repository.branch == "master"

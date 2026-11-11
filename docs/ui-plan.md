@@ -1,5 +1,7 @@
 # UI Plan: Streamlit front end for the Migration Accelerator API
 
+> **Note (2026-11-11):** demo mode, the Live/Demo toggle, `GET/POST /mode` and the `demo-estate` sample were removed. The demo steps below are history; walk the UI on a real project.
+
 **Status:** v1 built on branch `feature/bhavana-ui` (`ui/`, tests in `tests/test_ui.py`) · **Based on:** `simple3957/adf-to-fabric-agent` `main` at commit `617fd7f` (13 Oct 2026).
 The API is still changing. Anything marked with an endpoint name must be re-checked against the latest `main` before building.
 

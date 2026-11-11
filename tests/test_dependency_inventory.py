@@ -2,14 +2,13 @@
 
 from __future__ import annotations
 
-import json
 from datetime import datetime, timezone
 
 import pytest
 
 from adf2fabric.agent.dependencies import DependencyDiscoveryError, build_inventory, discover_dependencies
 from adf2fabric.agent.dependencies import access
-from adf2fabric.agent.dependencies.builder import access_key, classify_authentication
+from adf2fabric.agent.dependencies.builder import classify_authentication
 from adf2fabric.project.dependencies import AccessStatus, DependencyInventory, DependencyType as T, Resolution as R
 from adf2fabric.project.discovery import AdfLinkedService
 from adf2fabric.project.source import RetrievalFailure, SourceFinding, SourceManifest, SourceType
@@ -209,95 +208,6 @@ def ext(tmp_path):
     return build_inventory(d, _manifest(), now=NOW), d
 
 
-class Recorder:
-    def __init__(self, status=200, body=None, fail=None):
-        self.calls, self.status, self.body, self.fail = [], status, body, fail
-
-    def __call__(self, method, url, headers):
-        self.calls.append((method, url, dict(headers)))
-        if self.fail:
-            raise self.fail
-        return self.status, self.body
-
-
-def _tokens(**kw):
-    return access.TokenSource(env_names={k: v for k, v in kw.items()}, allow_az=False)
-
-
-def test_default_run_contacts_nothing_and_says_so(ext):
-    inv, _ = ext
-    checks = access.run_checks(inv.dependencies, [], _tokens(), Recorder(fail=AssertionError("no network")),
-                               lambda h, p: (_ for _ in ()).throw(AssertionError("no network")), NOW)
-    assert checks == {}
-    assert {x.access.status for x in inv.dependencies if x.access} == {AccessStatus.not_checked}
-
-
-def test_missing_token_is_reported_per_provider_and_az_login_is_not_assumed(ext, monkeypatch):
-    inv, d = ext
-    monkeypatch.delenv("ADF2FABRIC_DATABRICKS_TOKEN", raising=False)
-    rec = Recorder()
-    checks = access.run_checks(inv.dependencies, ["databricks", "key_vault"], access.TokenSource(), rec, None, NOW)
-    assert rec.calls == []  # no token, so no request is sent
-    out = build_inventory(d, _manifest(), checks, ["databricks", "key_vault"], NOW)
-    nb = next(x for x in out.dependencies if x.type is T.databricks_notebook)
-    assert nb.access.status is AccessStatus.missing_credential and "ADF2FABRIC_DATABRICKS_TOKEN" in nb.access.detail
-    assert nb.migration.category.value == "needs_access"
-    assert any(f.code == "inaccessible_external" for f in out.findings)
-
-
-def test_databricks_probe_reads_metadata_only_and_names_the_permission(ext, monkeypatch):
-    inv, d = ext
-    monkeypatch.setenv("DBX_T", "tok-123")
-    rec = Recorder(status=403)
-    checks = access.run_checks(inv.dependencies, ["databricks"], _tokens(databricks="DBX_T"), rec, None, NOW)
-    assert [(m, u.split("?")[0]) for m, u, _ in rec.calls] == [("GET", "https://adb-1.azuredatabricks.net/api/2.0/workspace/get-status")]
-    assert "export" not in rec.calls[0][1]
-    out = build_inventory(d, _manifest(), checks, ["databricks"], NOW)
-    nb = next(x for x in out.dependencies if x.type is T.databricks_notebook)
-    assert nb.access.status is AccessStatus.denied and "CAN READ" in nb.access.missing and "/Shared/etl/clean" in nb.access.missing
-    assert "tok-123" not in out.model_dump_json()
-
-
-def test_key_vault_probe_lists_versions_and_never_requests_the_value(ext, monkeypatch):
-    inv, d = ext
-    monkeypatch.setenv("KV_T", "kv-tok")
-    rec = Recorder(status=200)
-    checks = access.run_checks(inv.dependencies, ["key_vault"], _tokens(key_vault="KV_T"), rec, None, NOW)
-    url = rec.calls[0][1]
-    assert url.startswith("https://myvault.vault.azure.net/secrets/sqlcs/versions") and "/versions" in url
-    assert not url.split("?")[0].endswith("sqlcs")  # never the bare secret URL, which returns the value
-    out = build_inventory(d, _manifest(), checks, ["key_vault"], NOW)
-    s = next(x for x in out.dependencies if x.type is T.key_vault_secret)
-    assert s.access.status is AccessStatus.accessible and s.access.permission
-
-
-@pytest.mark.parametrize("status,expected", [(401, AccessStatus.unauthenticated), (403, AccessStatus.denied),
-                                             (404, AccessStatus.not_found), (500, AccessStatus.error)])
-def test_http_statuses_map_to_distinct_outcomes(ext, monkeypatch, status, expected):
-    inv, _ = ext
-    monkeypatch.setenv("KV_T", "kv-tok")
-    checks = access.run_checks(inv.dependencies, ["key_vault"], _tokens(key_vault="KV_T"), Recorder(status=status), None, NOW)
-    assert [c.status for c in checks.values()] == [expected]
-
-
-def test_unreachable_and_missing_package_are_distinguished(ext, monkeypatch):
-    inv, _ = ext
-    monkeypatch.setenv("KV_T", "kv-tok")
-    c1 = access.run_checks(inv.dependencies, ["key_vault"], _tokens(key_vault="KV_T"), Recorder(fail=OSError("x")), None, NOW)
-    c2 = access.run_checks(inv.dependencies, ["key_vault"], _tokens(key_vault="KV_T"), Recorder(fail=ModuleNotFoundError("requests")), None, NOW)
-    assert [c.status for c in c1.values()] == [AccessStatus.unreachable]
-    assert [c.status for c in c2.values()] == [AccessStatus.missing_dependency]
-
-
-def test_one_provider_failing_does_not_hide_or_imply_another(ext, monkeypatch):
-    inv, d = ext
-    monkeypatch.setenv("KV_T", "kv-tok")
-    monkeypatch.delenv("ADF2FABRIC_DATABRICKS_TOKEN", raising=False)
-    checks = access.run_checks(inv.dependencies, ["key_vault", "databricks"], _tokens(key_vault="KV_T"), Recorder(status=200), None, NOW)
-    by = {c.provider: c.status for c in checks.values()}
-    assert by == {"key_vault": AccessStatus.accessible, "databricks": AccessStatus.missing_credential}
-
-
 def test_network_probe_sends_nothing_and_classifies_dns_vs_refused():
     import socket
 
@@ -309,16 +219,6 @@ def test_network_probe_sends_nothing_and_classifies_dns_vs_refused():
     assert dns.status is AccessStatus.unreachable and "DNS" in dns.missing and "private DNS" in dns.detail
     assert refused.status is AccessStatus.unreachable and "port" in refused.missing
     assert bad.status is AccessStatus.not_configured
-
-
-def test_probes_are_deduplicated_per_target(ext, monkeypatch):
-    inv, _ = ext
-    monkeypatch.setenv("DBX_T", "t")
-    rec = Recorder()
-    access.run_checks(inv.dependencies, ["databricks", "key_vault", "network"], _tokens(databricks="DBX_T", key_vault="DBX_T"), rec,
-                      lambda h, p: None, NOW)
-    urls = [u for _, u, _ in rec.calls]
-    assert len(urls) == len(set(urls))
 
 
 # --- no secrets, no data ---------------------------------------------------------------------------------------------------------

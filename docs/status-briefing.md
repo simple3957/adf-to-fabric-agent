@@ -24,8 +24,8 @@ Lakehouse repointing of CSV/Parquet datasets.
 | Connections | Partial | Auto-create for SQL/Synapse, ADLS Gen2, Blob, REST, Databricks; about 50 other types get a verdict only; OAuth and gateway are manual |
 | Storage | Partial | ADLS Gen2 shortcuts and CSV/Parquet repointing; other stores, `wasbs://` and computed paths stay as written |
 | Spark workloads | Built, CLI only | Generate, approve, deploy, record-run for Databricks notebooks, and for the notebook tasks of a Databricks Job activity (job read with `jobs/get`; parameters not mapped, non-notebook tasks stay blocked; not yet run live); no custom jar/wheel libraries |
-| Compute (pools, environments) | Built | `compute-deploy` creation tested on a fake only (provisioning created the same items live) |
-| Provisioning | Partial live | Pool and environment live; workspace, capacity, roles, lakehouse, ARM capacity on fakes only |
+| Compute (pools, environments) | Built | `compute-deploy` creation not tested (its fake-only test was removed 2026-11-11; provisioning created the same items live) |
+| Provisioning | Partial live | Pool and environment live; workspace, capacity, roles, lakehouse, ARM capacity never run live, and their fake-only tests were removed 2026-11-11 |
 | Run and compare (`verify`) | Done, live | Compares by activity facts; needs a baseline run |
 | Output check (`output-check`) | Built 2026-11-04; on the Report step since 2026-11-05 | For pipelines with no baseline; CSV/Parquet; the paths are given by hand |
 | Validation | Done, live | |

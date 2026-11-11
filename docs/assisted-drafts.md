@@ -90,5 +90,5 @@ what was changed to fit this project:
 | Accepted draft pinned to a hash of its source; stale means the rules are used | Same |
 | A run uses accepted drafts, and the run log marks them | Only with `--assisted`; the conversion record, report, validation and confidence all mark them |
 | Draft kinds: procedures, views, tables, scripts, pipelines, notebooks | Pipelines only (the objects this project converts with a model-free engine) |
-| Demo mode with canned drafts | Not needed: the tests use a fake model |
+| Demo mode with canned drafts | Not built (demo mode was removed on 2026-11-11). The tests that used a fake model were removed the same day. |
 | Chat assistants that fall back to simple commands without a model | Not built: this project has no chat layer |

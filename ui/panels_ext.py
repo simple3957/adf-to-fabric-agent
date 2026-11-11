@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import streamlit as st
 
-import options
 import panels_confidence
 import panels_waves
 import theme
@@ -285,72 +284,116 @@ def _approval_and_apply(api: ApiClient, pid: str, prov: dict) -> None:
 
 
 # ---- 6. validate ----------------------------------------------------------------------------------------------------------
-VALIDATION_STAGES = {
-    "static": "Static: re-read the source and the generated files, independently of the converter",
-    "api": "API: check the workspace answers and the pipelines can be read back",
-    "deployment": "Deployment: compare what is in the workspace with what was generated",
-    "runtime": "Run evidence: compare recorded Fabric runs with the ADF runs (starts nothing)",
-}
+# Each check is run where it belongs (2026-11-11): Validate re-reads the source and the generated files (static); the Deploy step reads the
+# workspace back right after a deploy (api, deployment); the runtime check is recorded when pipelines run in Fabric. One verdict covers all.
+STAGE_TITLES = {"static": "Static", "api": "API", "deployment": "Deployment", "runtime": "Runtime"}
+DEPLOY_NOTES = ("not deployed", "deployed definition differs from the generated file")
 
 
 def validate(api: ApiClient, pid: str, val: dict | None, dest: dict | None = None) -> None:
-    has_ws = bool((dest or {}).get("workspace_id"))
-    brief = options.agreed(api, pid)
-    ver = brief["version"] if brief else 0
-    with options.card("validate", "Validation options", "Which checks run. Only a recorded real run that matches ADF makes a pipeline runtime-validated.",
-                      options.source_label(brief)):
-        # the brief's checks, plus every check the last validation answered: running fewer would record those as "not run" and drop their evidence
-        answered = {x["stage"] for x in (val or {}).get("stages") or [] if x.get("status") not in (None, "NOT_RUN")} if (val or {}).get("available") else set()
-        if not has_ws:
-            answered -= {"api", "deployment"}
-        wanted = set((brief or {}).get("validate_stages") or ["static"]) | answered
-        options.seed(f"val-stages-{pid}-{ver}", [s for s in VALIDATION_STAGES if s in wanted])
-        stages = st.multiselect("Checks to run", list(VALIDATION_STAGES), key=f"val-stages-{pid}-{ver}", format_func=lambda s: VALIDATION_STAGES[s])
-        needs_ws = [s for s in stages if s in ("api", "deployment")]
-        if needs_ws and not has_ws:
-            st.warning("The API and deployment checks read the Fabric workspace: choose it on the Connections page first.")
-    st.markdown(theme.badge("Nothing here starts a run or changes Fabric", "info"), unsafe_allow_html=True)
-    if st.button("Run validation", key="val-run", type="primary", disabled=not (can("plans:generate") and stages and not (needs_ws and not has_ws)),
+    st.markdown(theme.badge("Re-reads the source and the generated files. Nothing here reads or changes Fabric", "info"), unsafe_allow_html=True)
+    if st.button("Run validation", key="val-run", type="primary", disabled=not can("plans:generate"),
                  help="Re-reads the source and the generated files and compares them, independently of the converter."):
-        if (job := run_job(lambda: api.run_stage(pid, "validate", validate_stages=stages, idempotency_key=intent("validate")), "Validating", intent_name="validate")) \
-                and job["state"] == "succeeded":
+        if (job := run_job(lambda: api.run_stage(pid, "validate", validate_stages=["static"], idempotency_key=intent("validate")), "Validating",
+                           intent_name="validate")) and job["state"] == "succeeded":
             st.rerun()
     if not val or not val.get("available"):
         empty_state("Not validated yet", (val or {}).get("needs", "Run validation."))
         return
-    _validation_body(val)
+    _validation_body(val, show=("static",))
+    _checked_elsewhere(val)
     explain_for_step(api, pid, "validate")
 
 
-def _validation_body(val: dict) -> None:
-    tone = {"MIGRATION_VERIFIED": "success", "FAILED": "error", "BLOCKED": "warning", "NOT_VALIDATED": "warning"}.get(val["overall"], "neutral")
-    st.markdown(theme.badge(val["overall"].replace("_", " "), tone), unsafe_allow_html=True)
-    for r in val["reasons"]:
-        st.caption(r)
-    _table([{"Stage": s["stage"], "Result": RESULT_ICON.get(s["status"], s["status"]), "Pass": s["passed"], "Fail": s["failed"], "Blocked": s["blocked"], "Not run": s["not_run"]}
-            for s in val["stages"]], "")
-    if val["open_checks"]:
-        st.markdown(f"**{val['open_checks_total']} check(s) are not passing**")
-        _table([{"Result": RESULT_ICON.get(c["result"], c["result"]), "Stage": c["stage"], "About": c["component"], "What": c["summary"], "Do this": c["remediation"]}
-                for c in val["open_checks"]], "")
-    if val["components_needing_review"]:
-        with st.expander(f"{len(val['components_needing_review'])} component(s) missing, extra, altered or unverified"):
-            _table([{"Component": c["id"], "Status": c["status"], "Note": c["note"]} for c in val["components_needing_review"]], "")
+def _when(stamp: str) -> str:
+    from datetime import datetime
+
+    try:
+        return datetime.fromisoformat(str(stamp).replace("Z", "+00:00")).strftime("%d %b %H:%M")
+    except ValueError:
+        return str(stamp)[:16] or "-"
+
+
+def _checked_elsewhere(val: dict) -> None:
+    """Where the other checks are made, as plain lines (never a red mark for something this step does not do)."""
+    rb = val.get("readback") or {}
+    items = rb.get("items") or []
+    if rb.get("current"):
+        ok = sum(1 for r in items if r["ok"])
+        st.caption(f"Deployment: read back from Fabric on the Deploy step ({_when(rb['at'])}): {ok} of {len(items)} item(s) as expected.")
+    else:
+        st.caption("Deployment: " + (rb.get("note") or "read back from Fabric on the Deploy step, right after a deploy."))
+    rows = [c for c in (val.get("checks_by_stage") or {}).get("runtime") or [] if c["required"]]
+    proven = sum(1 for c in rows if c["result"] == "PASS")
+    if proven:
+        st.caption(f"Runtime: {proven} of {len(rows)} pipeline(s) ran in Fabric and matched ADF. Runs are started on the Report step "
+                   "(Run in Fabric and compare), and their result is recorded there.")
+    else:
+        st.caption("Runtime: recorded when the pipelines run in Fabric (Report step: Run in Fabric and compare).")
+
+
+def _validation_body(val: dict, show: tuple[str, ...] | None = None, overall: bool = True) -> None:
+    """The verdict and the checks of the stages in ``show`` (every recorded stage when None): one dropdown per stage, every check it made."""
+    chosen = [s for s in (val.get("stages_selected") or [x["stage"] for x in val["stages"]]) if show is None or s in show]
+    status = {s["stage"]: s["status"] for s in val["stages"]}
+    badges = []
+    if overall:
+        tone = {"MIGRATION_VERIFIED": "success", "FAILED": "error", "BLOCKED": "warning", "NOT_VALIDATED": "warning"}.get(val["overall"], "neutral")
+        badges.append(theme.badge("Overall: " + val["overall"].replace("_", " "), tone))
+    for stage in chosen:  # each shown stage's own result next to the overall one, which stays the engine's verdict
+        sv = status.get(stage, "NOT_RUN")
+        badges.append(theme.badge(f"{STAGE_TITLES.get(stage, stage)}: {RESULT_ICON.get(sv, sv)}",
+                                  {"PASS": "success", "FAIL": "error", "BLOCKED": "warning"}.get(sv, "neutral")))
+    st.markdown(" ".join(badges), unsafe_allow_html=True)
+    if overall:
+        for r in val["reasons"]:
+            st.caption(r)
+    _table([{"Stage": STAGE_TITLES.get(s["stage"], s["stage"]), "Result": RESULT_ICON.get(s["status"], s["status"]), "Pass": s["passed"], "Fail": s["failed"],
+             "Blocked": s["blocked"], "Not run": s["not_run"]} for s in val["stages"] if s["stage"] in chosen], "")
+    by_stage = val.get("checks_by_stage") or {}
+    for stage in chosen:
+        rows = by_stage.get(stage, [])
+        open_ = sum(1 for c in rows if c["result"] != "PASS")
+        with st.expander(f"{STAGE_TITLES.get(stage, stage)}: {RESULT_ICON.get(status.get(stage, ''), status.get(stage, ''))} · "
+                         f"{len(rows)} check(s) performed" + (f", {open_} not passing" if open_ else ""), expanded=bool(open_)):
+            if not rows:
+                st.caption("This stage recorded no checks.")
+                continue
+            _table([{"Result": RESULT_ICON.get(c["result"], c["result"]), "Check": c["id"], "About": c["component"], "What": c["summary"],
+                     "Do this": c["remediation"]} for c in rows], "")
+    review = [c for c in val["components_needing_review"] if "deployment" in chosen or c["note"] not in DEPLOY_NOTES]
+    if review:
+        with st.expander(f"{len(review)} component(s) missing, extra, altered or unverified"):
+            _table([{"Component": c["id"], "Status": c["status"], "Note": c["note"]} for c in review], "")
+
+
+def readback(api: ApiClient, pid: str, result: dict | None = None) -> None:
+    """Deploy step: what is actually in the workspace, read back from Fabric right after the deploy. Nothing is listed that was not read."""
+    rb_job = (result or {}).get("readback") or {}
+    if result and result.get("applied") and rb_job and not rb_job.get("ok"):
+        st.warning("The deploy finished, but the workspace could not be read back: " + (rb_job.get("error") or "unknown error") +
+                   " Nothing below is claimed until it is read back: deploy again, or check your access to the workspace.")
+    val = call(api.validation, pid) or {}
+    rb = val.get("readback") or {}
+    st.markdown("#### What is in Fabric (read back)")
+    if not val.get("available") or not rb.get("current"):
+        st.caption(rb.get("note") or "Read back from Fabric right after a deploy.")
+        return
+    st.caption(f"Read from the workspace at {_when(rb['at'])}, right after the deploy. Only what was read is listed.")
+    _table([{"": "✅" if r["ok"] else "❌", "Kind": r["kind"], "Name": r["name"], "In Fabric": r["state"], "Detail": r["detail"]}
+            for r in rb.get("items") or []], "Nothing was read back.")
+    _validation_body(val, show=("api", "deployment"), overall=False)
 
 
 # ---- 8. report ------------------------------------------------------------------------------------------------------------
 def report(api: ApiClient, pid: str, rep: dict | None, dest: dict) -> None:
     ws = bool(dest.get("workspace_id"))
     with st.form("report-form", border=False):
-        runtime = st.checkbox("Include recorded run evidence (from `verify`)", key="rep-runtime", value=True,
-                              help="Reads results of real Fabric runs. It never starts a run. Leaving it out records the run check as not run.")
-        go = st.form_submit_button("Validate the migration now (files, Fabric, deployment)", type="primary", disabled=not (ws and can("plans:generate")))
-    if not ws:
-        st.caption("Connect a Fabric workspace to validate the deployment.")
+        st.caption("The verdict combines the static check, what the Deploy step read back from Fabric, and the recorded runs.")
+        go = st.form_submit_button("Update the verdict", type="primary", disabled=not can("plans:generate"))
     if go:
-        stages = ["static", "api", "deployment"] + (["runtime"] if runtime else [])
-        if (job := run_job(lambda: api.run_stage(pid, "validate", validate_stages=stages, idempotency_key=intent("report")), "Validating the migration", intent_name="report")) \
-                and job["state"] == "succeeded":
+        if (job := run_job(lambda: api.run_stage(pid, "validate", validate_stages=["static"], idempotency_key=intent("report")), "Updating the verdict",
+                           intent_name="report")) and job["state"] == "succeeded":
             st.rerun()
     if not rep:
         empty_state("No report yet", "Run validation to get an honest account of what is and is not confirmed.")
@@ -395,19 +438,17 @@ def _run_and_compare(api: ApiClient, pid: str, rep: dict, ws: bool) -> None:
         chosen = st.multiselect("Pipelines to run (up to 20)", deployed, key="run-pipes", max_selections=20, disabled=bool(refused))
         wait = st.select_slider("Wait for each run up to", [5, 10, 20, 30, 50], value=30, key="run-wait", format_func=lambda m: f"{m} min",
                                 help="A run that takes longer keeps running in Fabric; it is simply not compared. Kept within one sign-in's lifetime.")
-        then_validate = st.checkbox("Then validate the migration (files, Fabric, deployment and these runs)", value=True, key="run-then-validate",
-                                    help="Runs the validation once the runs are recorded, so the verdict below includes them. It starts nothing more.")
         sure = typed_confirm("Start real runs of the selected pipelines in Fabric", "RUN", "run-confirm", disabled=not chosen)
         allowed = can("migration:execute")
         if st.button("Run and compare", key="run-go", type="primary", disabled=bool(refused) or not (ws and chosen and sure and allowed),
                      help=refused or (None if allowed else "Your role cannot start runs (needs migration:execute).")):
             ran = run_job(lambda: api.run_stage(pid, "verify", pipelines=chosen, run=True, confirm=True, run_timeout=wait * 60, idempotency_key=intent("run-verify")),
                           "Running in Fabric and comparing", intent_name="run-verify")
-            if ran and ran["state"] == "succeeded":
-                if then_validate:  # only after the runs are recorded: validation reads that record, so it must not start before
-                    run_job(lambda: api.run_stage(pid, "validate", validate_stages=["static", "api", "deployment", "runtime"], idempotency_key=intent("run-validate")),
-                            "Validating the migration", intent_name="run-validate")
+            if ran and ran["state"] == "succeeded":  # the server records the runtime check from these runs itself
                 st.rerun()
+        val = call(api.validation, pid) or {}
+        if val.get("available") and (val.get("checks_by_stage") or {}).get("runtime"):
+            _validation_body(val, show=("runtime",), overall=False)
         st.caption("A pipeline becomes runtime-validated only when its run completes and matches the ADF baseline.")
 
 

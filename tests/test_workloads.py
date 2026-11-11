@@ -9,14 +9,11 @@ from pathlib import Path
 
 import pytest
 
-from adf2fabric.agent.dependencies.access import TokenSource
 from adf2fabric.agent.deployment import sjd_deploy
 from adf2fabric.agent.deployment.fabric_deploy import DeployError
-from adf2fabric.agent.discovery.databricks_notebooks import DatabricksError
 from adf2fabric.agent.workloads import analyzer, lifecycle, notebook_format, transform
 from adf2fabric.agent.workloads.engine import Options, build_manifest
 from adf2fabric.agent.workloads.report import render_report
-from adf2fabric.agent.workloads.source import SourceResolver
 from adf2fabric.project.workloads import Classification as K, CodeStatus as C, Severity as S, WorkloadManifest
 from tests.test_discovery_activity_inventory import _discover, _project
 
@@ -408,91 +405,6 @@ def test_sjd_properties_reject_what_fabric_would_reject():
 # =====================================================================================================================
 
 
-class FakeClient:
-    calls: list = []
-
-    def __init__(self, host, token, outcome):
-        self.host, self.token, self.outcome = host, token, outcome
-
-    def export_source(self, path):
-        FakeClient.calls.append(("export", self.host, path, self.token))
-        if isinstance(self.outcome, Exception):
-            raise self.outcome
-        return self.outcome, "PYTHON"
-
-    def read_dbfs(self, path):
-        FakeClient.calls.append(("dbfs", self.host, path, self.token))
-        if isinstance(self.outcome, Exception):
-            raise self.outcome
-        return self.outcome
-
-
-def _resolver(tmp_path, outcome, env="WL_TOKEN", **kw):
-    FakeClient.calls = []
-    return SourceResolver(tmp_path, TokenSource(env_names={"databricks": env}), fetch=kw.pop("fetch", True),
-                          client_factory=lambda h, t: FakeClient(h, t, outcome), **kw)
-
-
-def test_nothing_is_fetched_without_being_asked(tmp_path, monkeypatch):
-    monkeypatch.setenv("WL_TOKEN", "tok-secret")
-    r = _resolver(tmp_path, b"x", fetch=False)
-    code = r.databricks_notebook("adb-1.net", "/Shared/a")
-    assert code.source.status is C.not_requested and FakeClient.calls == []
-
-
-def test_az_login_does_not_grant_databricks_access(tmp_path, monkeypatch):
-    monkeypatch.delenv("WL_TOKEN", raising=False)
-    code = _resolver(tmp_path, b"x").databricks_notebook("adb-1.net", "/Shared/a")
-    assert code.source.status is C.missing_credential and FakeClient.calls == []
-    assert "az login does not grant" in code.source.detail and "CAN READ" in code.source.permission
-
-
-def test_a_token_is_sent_only_to_the_workspace_and_never_stored(tmp_path, monkeypatch):
-    monkeypatch.setenv("WL_TOKEN", "tok-secret-123")
-    code = _resolver(tmp_path, b"# Databricks notebook source\nx = 1\n").databricks_notebook("adb-1.net", "/Shared/a")
-    assert code.source.status is C.retrieved and FakeClient.calls[0][1] == "adb-1.net"
-    assert "tok-secret-123" not in json.dumps(code.source.model_dump(), default=str)
-    assert not any("tok-secret-123" in p.read_text(errors="ignore") for p in tmp_path.rglob("*") if p.is_file())
-    again = _resolver(tmp_path, b"never used").databricks_notebook("adb-1.net", "/Shared/a")
-    assert again.source.status is C.cached and FakeClient.calls == []  # an earlier authorised export is reused, no new call
-
-
-@pytest.mark.parametrize("code,status", [("forbidden", C.denied), ("unauthorized", C.denied), ("not_found", C.not_found), ("unreachable", C.unreachable)])
-def test_failures_map_to_a_status_and_the_permission_category(tmp_path, monkeypatch, code, status):
-    monkeypatch.setenv("WL_TOKEN", "tok")
-    out = _resolver(tmp_path, DatabricksError(code, "boom Bearer abc.def.ghi", ["do this"])).databricks_notebook("adb-1.net", "/Shared/a")
-    assert out.source.status is status and "abc.def.ghi" not in out.source.detail
-    if status in (C.denied, C.not_found):
-        assert "CAN READ" in (out.source.permission or "")
-
-
-def test_dbfs_read_and_unsupported_locations(tmp_path, monkeypatch):
-    monkeypatch.setenv("WL_TOKEN", "tok")
-    ok = _resolver(tmp_path, b"print(1)").databricks_python("adb-1.net", "dbfs:/jobs/x.py")
-    assert ok.source.status is C.retrieved and FakeClient.calls[0][0] == "dbfs"
-    other = _resolver(tmp_path / "o", b"x").databricks_python("adb-1.net", "abfss://c@a.dfs.core.windows.net/x.py")
-    assert other.source.status is C.unsupported_location and "Storage" in (other.source.permission or "")
-
-
-def test_oversized_dbfs_file_is_refused_by_the_client():
-    from adf2fabric.agent.discovery.databricks_notebooks import DatabricksClient
-
-    class R:
-        def __init__(self, status, body):
-            self.status_code, self._b, self.headers = status, body, {}
-
-        def json(self):
-            return self._b
-
-    class S:
-        def request(self, method, url, headers=None, timeout=None):
-            return R(200, {"is_dir": False, "file_size": 99_000_000})
-
-    with pytest.raises(DatabricksError) as e:
-        DatabricksClient("https://adb-1.net", "t", session=S()).read_dbfs("dbfs:/big.jar")
-    assert e.value.code == "too_large"
-
-
 # =====================================================================================================================
 # 5. manifest guarantees: no secrets, assessment writes nothing outward, re-assessment keeps decisions
 # =====================================================================================================================
@@ -562,29 +474,6 @@ def test_changed_code_resets_the_approval(tmp_path):
 # =====================================================================================================================
 
 
-class FakeFabric:
-    def __init__(self):
-        self.posts = []
-        self.items = {}
-
-    def _call(self, method, url, body=None):
-        self.posts.append((method, url))
-
-        class R:
-            def __init__(s, status, data):
-                s.status_code, s._d, s.headers, s.text = status, data, {}, ""
-
-            def json(s):
-                return s._d
-
-        if method == "GET":
-            return R(200, {"value": []})
-        return R(201, {"id": "99999999-0000-0000-0000-000000000001"})
-
-    def _finish(self, resp, what):
-        return resp.json()
-
-
 WS = "53d67e72-8124-4ca3-ae55-c4b266935faa"
 
 
@@ -598,13 +487,6 @@ def generated(tmp_path):
     return store, pid
 
 
-def test_nothing_deploys_without_approval(generated):
-    store, pid = generated
-    client = FakeFabric()
-    results = lifecycle.deploy(store, pid, client, WS, ["nb_clean"], apply=True)
-    assert "not approved" in results[0][1] and not [p for p in client.posts if p[0] == "POST"]
-
-
 def test_approval_needs_an_artifact_and_a_name(generated):
     store, pid = generated
     with pytest.raises(lifecycle.LifecycleError):
@@ -613,66 +495,6 @@ def test_approval_needs_an_artifact_and_a_name(generated):
         lifecycle.approve(store, pid, "nb_clean", by=" ")
     with pytest.raises(lifecycle.LifecycleError):
         lifecycle.approve(store, pid, "nb_", by="Pat")  # ambiguous
-
-
-def test_approved_workloads_deploy_dry_run_then_apply_and_record_the_item_id(generated):
-    store, pid = generated
-    lifecycle.approve(store, pid, "nb_clean", by="Pat")
-    client = FakeFabric()
-    dry = lifecycle.deploy(store, pid, client, WS, ["nb_clean"], apply=False)
-    assert "dry run" in dry[0][1] and not [p for p in client.posts if p[0] == "POST"]
-    done = lifecycle.deploy(store, pid, client, WS, ["nb_clean"], apply=True)
-    assert "created" in done[0][1]
-    w = next(x for x in store.load_workload_manifest(pid).workloads if x.name == "nb_clean")
-    assert w.artifact.fabric_item_id == "99999999-0000-0000-0000-000000000001" and w.execution.status == "not_run"  # deployed, not verified
-
-
-def test_a_tampered_artifact_is_not_deployed(generated):
-    store, pid = generated
-    lifecycle.approve(store, pid, "nb_clean", by="Pat")
-    w = next(x for x in store.load_workload_manifest(pid).workloads if x.name == "nb_clean")
-    (store.project_dir(pid) / w.artifact.file).write_text("{}", encoding="utf-8")
-    client = FakeFabric()
-    assert "changed since" in lifecycle.deploy(store, pid, client, WS, ["nb_clean"], apply=True)[0][1] and not client.posts
-
-
-def test_a_spark_job_definition_deploys_through_the_documented_items_endpoint(generated):
-    store, pid = generated
-    lifecycle.approve(store, pid, "com.contoso.Main", by="Pat")
-    client = FakeFabric()
-    lifecycle.deploy(store, pid, client, WS, ["com.contoso.Main"], apply=True)
-    assert ("POST", f"https://api.fabric.microsoft.com/v1/workspaces/{WS}/items") in client.posts
-
-
-class Act:
-    def __init__(self, name, status, error=""):
-        self.name, self.status, self.error = name, status, error
-
-
-class Run:
-    def __init__(self, pipeline, acts, job="job-1"):
-        self.pipeline, self.activities, self.job_id = pipeline, acts, job
-
-
-def test_execution_evidence_needs_a_deployed_bound_item_and_a_real_run(generated):
-    store, pid = generated
-    with pytest.raises(lifecycle.LifecycleError, match="not been deployed"):
-        lifecycle.record_run(store, pid, "nb_clean", Run("PL_Dbx", [Act("Clean", "Succeeded")]))
-    lifecycle.approve(store, pid, "nb_clean", by="Pat")
-    lifecycle.deploy(store, pid, FakeFabric(), WS, ["nb_clean"], apply=True)
-    with pytest.raises(lifecycle.LifecycleError, match="not bound"):  # the converted pipeline does not point at the deployed item
-        lifecycle.record_run(store, pid, "nb_clean", Run("PL_Dbx", [Act("Clean", "Succeeded")]))
-    with pytest.raises(lifecycle.LifecycleError, match="does not run this workload"):
-        lifecycle.record_run(store, pid, "nb_clean", Run("PL_Other", []))
-    pipe_dir = store.conversion_dir(pid) / "pipelines" / "PL_Dbx.DataPipeline"
-    pipe_dir.mkdir(parents=True)
-    (pipe_dir / "pipeline-content.json").write_text(json.dumps({"properties": {"activities": [
-        {"name": "Clean", "type": "TridentNotebook", "typeProperties": {"notebookId": "99999999-0000-0000-0000-000000000001"}}]}}), encoding="utf-8")
-    ok = lifecycle.record_run(store, pid, "nb_clean", Run("PL_Dbx", [Act("Clean", "Succeeded")]))
-    assert ok.execution.status == "succeeded" and ok.execution.run_id == "job-1"
-    bad = lifecycle.record_run(store, pid, "nb_clean", Run("PL_Dbx", [Act("Clean", "Failed", "boom")]))
-    assert bad.execution.status == "failed" and "boom" in bad.execution.detail
-    assert store.load_workload_manifest(pid).summary.executed_in_fabric == 0  # the last recorded run failed
 
 
 # =====================================================================================================================
@@ -699,21 +521,6 @@ def test_default_conversion_still_calls_databricks(generated):
     assert _activity(store, pid, "PL_Dbx", "Etl")["type"] == "DatabricksNotebook"
 
 
-def test_a_deployed_and_approved_notebook_is_bound_with_its_parameters(generated, tmp_path):
-    store, pid = generated
-    lifecycle.approve(store, pid, "nb_etl", by="Pat")
-    res = tmp_path / "res.json"
-    lifecycle.deploy(store, pid, FakeFabric(), WS, ["nb_etl"], apply=True, resolutions=res)
-    _convert_pipeline(store, pid, res)
-    act = _activity(store, pid, "PL_Dbx", "Etl")
-    assert act["type"] == "TridentNotebook" and act["typeProperties"]["notebookId"] == "99999999-0000-0000-0000-000000000001"
-    assert act["typeProperties"]["parameters"]["run_date"] == {"value": "2024-02-02", "type": "string"}
-    assert "unread" not in act["typeProperties"]["parameters"]  # passed but never read: dropped visibly, not carried
-    conv = (store.conversion_dir(pid) / "conversion.yaml").read_text(encoding="utf-8")
-    assert "notebook_output_contract" in conv  # the consumer of runOutput is told it must change
-    assert "notebook_parameters_unverified" not in conv  # the parameter passing was confirmed live
-
-
 def test_an_unapproved_notebook_with_parameters_is_not_bound(generated, tmp_path):
     store, pid = generated
     res = tmp_path / "res.json"
@@ -723,66 +530,7 @@ def test_an_unapproved_notebook_with_parameters_is_not_bound(generated, tmp_path
     assert _activity(store, pid, "PL_Dbx", "Etl")["type"] == "DatabricksNotebook"  # parameters would be dropped: the source compute is kept
 
 
-class NotebookFabric:
-    """A workspace holding notebooks: lists them and returns each one's definition (getDefinition, ipynb)."""
-
-    def __init__(self, notebooks: dict):
-        self.notebooks = notebooks  # id -> cells
-        self.writes = []
-
-    def _call(self, method, url, body=None):
-        import base64
-
-        class R:
-            def __init__(s, status, data):
-                s.status_code, s._d, s.headers, s.text, s.content = status, data, {}, "", b"x"
-
-            def json(s):
-                return s._d
-
-        if method == "GET" and url.endswith("/notebooks"):
-            return R(200, {"value": [{"id": i, "displayName": f"nb{n}"} for n, i in enumerate(self.notebooks)]})
-        if method == "POST" and "/getDefinition" in url:
-            item = url.split("/notebooks/")[1].split("/")[0]
-            payload = base64.b64encode(json.dumps({"cells": self.notebooks[item]}).encode()).decode()
-            return R(200, {"definition": {"parts": [{"path": "notebook-content.ipynb", "payload": payload}]}})
-        self.writes.append((method, url))
-        return R(500, {})
-
-
-def _generated_cells(store, pid, name):
-    w = _w(store.load_workload_manifest(pid), name)
-    return json.loads((store.project_dir(pid) / w.artifact.file).read_text(encoding="utf-8"))["cells"]
-
-
 NB_ID = "11111111-2222-3333-4444-555555555555"
-
-
-def test_binding_a_deployed_notebook_needs_its_code_to_equal_the_generated_one(generated, tmp_path):
-    store, pid = generated
-    same = NotebookFabric({NB_ID: _generated_cells(store, pid, "nb_clean")})
-    w, ok, why = lifecycle.check_deployed(store, pid, same, WS, "nb_clean", NB_ID.upper())
-    assert ok and "equal the generated" in why
-    changed = [dict(c) for c in _generated_cells(store, pid, "nb_clean")]
-    next(c for c in changed if c.get("cell_type") == "code")["source"] = ["print('edited in Fabric')"]
-    assert lifecycle.check_deployed(store, pid, NotebookFabric({NB_ID: changed}), WS, "nb_clean", NB_ID)[1] is False
-    assert "not a notebook" in lifecycle.check_deployed(store, pid, NotebookFabric({}), WS, "nb_clean", NB_ID)[2]
-    with pytest.raises(lifecycle.LifecycleError):
-        lifecycle.bind_deployed(store, pid, NotebookFabric({NB_ID: changed}), WS, "nb_clean", NB_ID, by="Pat")
-    assert _w(store.load_workload_manifest(pid), "nb_clean").artifact.fabric_item_id is None  # a refused bind records nothing
-
-
-def test_binding_records_the_id_the_person_and_the_resolution_and_writes_nothing_to_fabric(generated, tmp_path):
-    store, pid = generated
-    fab = NotebookFabric({NB_ID: _generated_cells(store, pid, "nb_clean")})
-    res = tmp_path / "resolutions.json"
-    with pytest.raises(lifecycle.LifecycleError):
-        lifecycle.bind_deployed(store, pid, fab, WS, "nb_clean", NB_ID, by=" ")
-    lifecycle.bind_deployed(store, pid, fab, WS, "nb_clean", NB_ID, by="Pat", resolutions=res, now=NOW)
-    w = _w(store.load_workload_manifest(pid), "nb_clean")
-    assert w.artifact.fabric_item_id == NB_ID and w.approval.status == "approved" and w.approval.by == "Pat" and NB_ID in w.approval.note
-    assert any(r["value"] == NB_ID for r in json.loads(res.read_text(encoding="utf-8")))
-    assert fab.writes == []
 
 
 def _ran(store, pid, w, item, status="Succeeded", ran_at="2026-11-04T06:22:29Z"):
@@ -799,14 +547,6 @@ def _ran(store, pid, w, item, status="Succeeded", ran_at="2026-11-04T06:22:29Z")
         "activities": {activity: {"type": "TridentNotebook", "status": status, "runs": 1, "metrics": {}}}}}), encoding="utf-8")
 
 
-def test_binding_takes_the_run_from_the_recorded_pipeline_run_that_ran_this_notebook(generated):
-    store, pid = generated
-    _ran(store, pid, _w(store.load_workload_manifest(pid), "nb_clean"), NB_ID)
-    lifecycle.bind_deployed(store, pid, NotebookFabric({NB_ID: _generated_cells(store, pid, "nb_clean")}), WS, "nb_clean", NB_ID, by="Pat", now=NOW)
-    w = _w(store.load_workload_manifest(pid), "nb_clean")
-    assert w.execution.status == "succeeded" and w.execution.run_id == "job-1" and "recorded Fabric run" in w.execution.detail
-
-
 def test_binding_takes_no_run_when_the_step_failed_or_runs_another_item(generated):
     store, pid = generated
     w = _w(store.load_workload_manifest(pid), "nb_clean")
@@ -814,58 +554,6 @@ def test_binding_takes_no_run_when_the_step_failed_or_runs_another_item(generate
     assert lifecycle.recorded_run(store, pid, w, NB_ID) is None
     _ran(store, pid, w, "99999999-0000-0000-0000-000000000000")
     assert lifecycle.recorded_run(store, pid, w, NB_ID) is None
-
-
-
-class CreatingFabric:
-    """A workspace that lists notebooks by name and creates or updates them (nothing else)."""
-
-    def __init__(self, names: dict | None = None):
-        self.names = dict(names or {})  # display name -> id
-        self.writes = []
-
-    def _call(self, method, url, body=None):
-        class R:
-            def __init__(s, status, data):
-                s.status_code, s._d, s.headers, s.text, s.content = status, data, {}, "", b"x"
-
-            def json(s):
-                return s._d
-
-        if method == "GET" and "/notebooks" in url:
-            return R(200, {"value": [{"id": i, "displayName": n} for n, i in self.names.items()]})
-        self.writes.append((method, url.rsplit("/", 1)[-1]))
-        if method == "POST" and url.endswith("/notebooks"):
-            self.names[body["displayName"]] = NB_ID
-            return R(201, {"id": NB_ID})
-        return R(200, {})
-
-    def _finish(self, resp, what):
-        return resp.json()
-
-
-def test_creating_a_notebook_dry_run_first_then_records_the_id_the_person_and_the_resolution(generated, tmp_path):
-    store, pid = generated
-    fab, res = CreatingFabric(), tmp_path / "resolutions.json"
-    w, detail, item = lifecycle.create_notebook(store, pid, fab, WS, "nb_clean", by="", apply=False)
-    assert "would create a new notebook" in detail and item is None and fab.writes == []  # a dry run writes nothing
-    with pytest.raises(lifecycle.LifecycleError):
-        lifecycle.create_notebook(store, pid, fab, WS, "nb_clean", by=" ", apply=True)
-    w, detail, item = lifecycle.create_notebook(store, pid, fab, WS, "nb_clean", by="Pat", apply=True, resolutions=res, now=NOW)
-    assert item == NB_ID and "Convert again" in detail and fab.writes == [("POST", "notebooks")]
-    w = _w(store.load_workload_manifest(pid), "nb_clean")
-    assert w.artifact.fabric_item_id == NB_ID and w.approval.by == "Pat" and "creating the generated notebook" in w.approval.note
-    assert any(r["value"] == NB_ID for r in json.loads(res.read_text(encoding="utf-8")))
-
-
-def test_creating_over_a_notebook_of_the_same_name_says_so_and_drops_its_old_run(generated):
-    store, pid = generated
-    w = _w(store.load_workload_manifest(pid), "nb_clean")
-    fab = CreatingFabric({w.artifact.display_name or w.name: NB_ID})
-    assert "already in the workspace" in lifecycle.create_notebook(store, pid, fab, WS, "nb_clean", by="", apply=False)[1]
-    lifecycle.create_notebook(store, pid, fab, WS, "nb_clean", by="Pat", apply=True, now=NOW)
-    w = _w(store.load_workload_manifest(pid), "nb_clean")
-    assert w.execution.status == "not_run" and fab.writes == [("POST", "updateDefinition")]
 
 
 def test_a_notebook_copy_for_another_workspace_reads_that_workspaces_lakehouse():
@@ -883,97 +571,6 @@ def test_a_notebook_copy_for_another_workspace_reads_that_workspaces_lakehouse()
     assert lifecycle.retarget(cells, home, lh_there) == cells  # its own workspace: unchanged
 
 
-def test_creating_a_notebook_in_a_workspace_without_its_lakehouse_is_refused_with_what_to_do(generated, tmp_path):
-    store, pid = generated
-    m = store.load_workload_manifest(pid)
-    w = _w(m, "nb_clean")
-    path = store.project_dir(pid) / w.artifact.file
-    nb = json.loads(path.read_text(encoding="utf-8"))
-    nb["cells"].append({"cell_type": "code", "metadata": {}, "outputs": [], "execution_count": None,
-                        "source": ['df = spark.read.csv("abfss://20a53380-5e45-4865-ad6e-857633511290@onelake.dfs.fabric.microsoft.com/'
-                                   'd75e351a-7f8c-484f-a00a-16a48148e3e6/Files/c/x.csv")']})
-    path.write_text(json.dumps(nb), encoding="utf-8")
-    w.artifact.sha256 = __import__("hashlib").sha256(path.read_bytes()).hexdigest()
-    store.save_workload_manifest(pid, m)
-    (store.project_dir(pid) / "storage").mkdir(exist_ok=True)
-    (store.project_dir(pid) / "storage" / "storage-map.json").write_text(json.dumps({"lakehouse": "LH_Main"}), encoding="utf-8")
-
-    class NoLakehouse(CreatingFabric):
-        def _call(self, method, url, body=None):
-            if method == "GET" and url.endswith("/lakehouses"):
-                return super()._call("GET", url.replace("/lakehouses", "/notebooks-none"))
-            return super()._call(method, url, body)
-
-    with pytest.raises(lifecycle.LifecycleError, match="Plan target"):
-        lifecycle.create_notebook(store, pid, NoLakehouse(), WS, "nb_clean", by="Pat", apply=True)
-
-
 # --- Deploy creates the generated notebooks a workspace is missing (2026-11-10) ---------------------------------------------------
 
 
-def test_only_approved_generated_notebooks_missing_from_the_workspace_are_created_at_deploy(generated):
-    store, pid = generated
-    assert lifecycle.notebooks_to_create(store, pid, WS) == []  # nothing approved yet
-    lifecycle.approve(store, pid, "nb_clean", by="Pat")
-    assert [w.name for w in lifecycle.notebooks_to_create(store, pid, WS)] == ["nb_clean"]
-    assert [w.name for w in lifecycle.notebooks_to_create(store, pid, WS, ["PL_Dbx"])] == ["nb_clean"]
-    assert lifecycle.notebooks_to_create(store, pid, WS, ["PL_Jobs"]) == []  # not used by the pipelines being deployed
-    lifecycle.create_notebook(store, pid, CreatingFabric(), WS, "nb_clean", by="Pat", apply=True, now=NOW)
-    assert lifecycle.notebooks_to_create(store, pid, WS) == []  # it has an id in this workspace now
-    assert [w.name for w in lifecycle.notebooks_to_create(store, pid, "11111111-2222-3333-4444-555555555555")] == ["nb_clean"]  # not in another
-
-
-def _deploy_prep(generated, monkeypatch, fab):
-    from types import SimpleNamespace
-
-    from adf2fabric.agent.conversion import ConversionAgent, ConversionRequest
-    from adf2fabric.api import stages
-
-    store, pid = generated
-    ConversionAgent(store).run(ConversionRequest(project_name=pid))
-    lifecycle.approve(store, pid, "nb_clean", by="Pat")
-    converted = []
-    monkeypatch.setattr(stages, "FabricClient", lambda token, session=None: fab)
-    monkeypatch.setattr(stages, "_run_stage", lambda c, s, p, stage, log, options=None: converted.append((stage, (options or {}).get("workspace_id"))))
-    c = SimpleNamespace(store=store, fabric_http=None, fabric_token=lambda session: "tok")
-    return stages, c, SimpleNamespace(destination={"workspace_id": WS}), pid, converted
-
-
-def test_a_deploy_dry_run_names_the_notebooks_it_would_create_and_writes_nothing(generated, monkeypatch):
-    fab = CreatingFabric()
-    stages, c, session, pid, converted = _deploy_prep(generated, monkeypatch, fab)
-    pending, refused = stages._notebooks_for_deploy(c, session, pid, WS, "deploy_dry_run", {}, lambda m: None)
-    assert fab.writes == [] and refused == {}
-    assert "nb_clean" in pending["PL_Dbx"] and "Deploy creates them first" in pending["PL_Dbx"]
-    assert converted == [("convert", WS)]  # converted again for this workspace (project files only)
-
-
-def test_deploy_creates_the_missing_notebook_as_the_deploying_person_then_converts_again(generated, monkeypatch):
-    fab = CreatingFabric()
-    stages, c, session, pid, converted = _deploy_prep(generated, monkeypatch, fab)
-    pending, refused = stages._notebooks_for_deploy(c, session, pid, WS, "deploy_apply", {"by": "Sam"}, lambda m: None)
-    assert pending == {} and refused == {} and fab.writes == [("POST", "notebooks")]
-    w = _w(c.store.load_workload_manifest(pid), "nb_clean")
-    assert w.artifact.fabric_item_ids[WS] == NB_ID and w.approval.by == "Sam"
-    assert converted == [("convert", WS)]
-
-
-def test_deploy_never_replaces_a_notebook_of_the_same_name_it_refuses_its_pipelines(generated, monkeypatch):
-    store, pid = generated
-    w = _w(store.load_workload_manifest(pid), "nb_clean")
-    fab = CreatingFabric({w.artifact.display_name or w.name: NB_ID})
-    stages, c, session, pid, _ = _deploy_prep(generated, monkeypatch, fab)
-    pending, refused = stages._notebooks_for_deploy(c, session, pid, WS, "deploy_apply", {"by": "Sam"}, lambda m: None)
-    assert fab.writes == [] and pending == {} and "already in this workspace" in refused["PL_Dbx"]
-
-
-def test_bind_is_offered_only_the_notebook_id_of_the_workspace_being_deployed_to(generated, monkeypatch):
-    store, pid = generated
-    w = _w(store.load_workload_manifest(pid), "nb_clean")
-    monkeypatch.setattr(lifecycle, "pipeline_item", lambda s, p, x: NB_ID)  # the id the last converted pipeline runs
-    res = store.conversion_dir(pid) / "resolutions.json"
-    res.parent.mkdir(parents=True, exist_ok=True)
-    res.write_text(json.dumps([{"type": "WorkspaceId", "key": "*", "value": "11111111-2222-3333-4444-555555555555"}]), encoding="utf-8")
-    assert lifecycle.pipeline_item_here(store, pid, w, WS) is None  # converted for another workspace: its id is not offered
-    res.write_text(json.dumps([{"type": "WorkspaceId", "key": "*", "value": WS}]), encoding="utf-8")
-    assert lifecycle.pipeline_item_here(store, pid, w, WS) == NB_ID

@@ -374,13 +374,47 @@ def provisioning(store: ProjectStore, pid: str, roots: tuple[Path, ...] = ()) ->
 # =====================================================================================================================
 
 
-def validation_summary(store: ProjectStore, pid: str, roots: tuple[Path, ...] = ()) -> dict[str, Any]:
+READBACK_STATE = {("deployment.definition_matches", "PASS"): "In Fabric, same as generated", ("deployment.definition_matches", "FAIL"): "In Fabric, differs",
+                  ("deployment.definition_matches", "BLOCKED"): "Could not be read", ("deployment.pipeline_deployed", "FAIL"): "Not in Fabric",
+                  ("deployment.item_present", "PASS"): "In Fabric", ("deployment.item_present", "FAIL"): "Not in Fabric",
+                  ("deployment.connection_present", "PASS"): "Exists", ("deployment.connection_present", "FAIL"): "Not found"}
+
+
+def _readback_rows(rep: Any) -> list[dict[str, str]]:
+    """What the Deploy step read back from Fabric, one row per pipeline, item and connection. Only what was read: nothing is inferred."""
+    rows = []
+    for c in rep.checks:
+        state = READBACK_STATE.get((c.id, c.result.value))
+        if state is None:
+            continue
+        kind, _, name = (c.component or "").partition(":")
+        rows.append({"kind": {"pipeline": "Pipeline"}.get(kind, kind or "Item"), "name": name or c.component or "", "state": state,
+                     "ok": c.result.value == "PASS", "detail": "" if c.result.value == "PASS" else c.summary})
+    return sorted(rows, key=lambda r: (r["ok"], r["kind"], r["name"].lower()))
+
+
+def validation_summary(store: ProjectStore, pid: str, roots: tuple[Path, ...] = (), workspace: str = "") -> dict[str, Any]:
     rep = _try(lambda: store.load_validation_report(pid))
     if rep is None:
         return {"available": False, "needs": "Run validation: it re-reads the source and the generated files and compares them."}
     checks = [{"id": c.id, "stage": c.stage.value, "result": c.result.value, "summary": c.summary, "component": c.component or "", "remediation": c.remediation,
                "required": c.required, "evidence": c.evidence[:4]} for c in rep.checks if c.result.value != "PASS"]
+    # the stages the person chose for this run; an older report without that record counts every stage that answered anything
+    asked = {s for s in (rep.scope.get("stages_requested") or "").split(",") if s}
+    chosen = [s.stage.value for s in rep.stages if (s.stage.value in asked if asked else s.passed + s.failed + s.blocked > 0)]  # static, api, deployment, runtime
+    order = {"FAIL": 0, "BLOCKED": 1, "NOT_RUN": 2, "PASS": 3}
+    by_stage: dict[str, list[dict[str, Any]]] = {s: [] for s in chosen}
+    for c in sorted(rep.checks, key=lambda c: order.get(c.result.value, 4)):
+        if c.stage.value in by_stage and len(by_stage[c.stage.value]) < 200:
+            by_stage[c.stage.value].append({"id": c.id, "result": c.result.value, "summary": c.summary, "component": c.component or "",
+                                            "remediation": c.remediation, "required": c.required})
+    from adf2fabric.agent.validation import engine
+
+    stale = engine.readback_current(store, pid, rep.scope, workspace or None)  # why the last read-back no longer describes the chosen workspace, if it does not
     return sanitize({"available": True, "overall": rep.overall, "reasons": rep.overall_reasons, "full_success": rep.full_success_claimed,
+                     "stages_selected": chosen, "checks_by_stage": by_stage,
+                     "readback": {"at": rep.scope.get("readback_at", ""), "current": stale is None, "note": stale or "",
+                                  "items": _readback_rows(rep) if stale is None else []},
                      "created_at": rep.created_at.isoformat(), "stages": [{"stage": s.stage.value, "status": s.status.value, "passed": s.passed, "failed": s.failed,
                                                                            "blocked": s.blocked, "not_run": s.not_run} for s in rep.stages],
                      "components": rep.inventory.by_status, "open_checks": checks[:120], "open_checks_total": len(checks),
@@ -394,7 +428,7 @@ def report(store: ProjectStore, pid: str, roots: tuple[Path, ...] = (), workspac
     counts = {s: 0 for s in STATES}
     for v in states.values():
         counts[v["state"]] += 1
-    validation = validation_summary(store, pid, roots)
+    validation = validation_summary(store, pid, roots, workspace)
     unresolved: list[dict[str, str]] = []
     for name, v in sorted(states.items()):
         if v["state"] in ("blocked", "unsupported", "inferred") or v["reasons"]:

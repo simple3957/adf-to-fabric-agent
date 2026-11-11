@@ -46,6 +46,16 @@ Verified live on 2026-10-16: `PL_SQL_Data_Validation` completed with its three L
 
 Endpoints and the create/update/list/long-running-operation flow follow the Fabric REST API. Verify against the official docs before changing them.
 
+## Read-back after deploy
+
+Since 2026-11-11 a real deploy from the API (`deploy_apply`) is followed by a read of the workspace: the API and deployment checks
+of the validation engine (`engine.record(readback=True)`, read-only). It lists every pipeline (its definition is fetched with
+`getDefinition` and compared with the generated file), every item and connection the pipelines use, and records them with the time,
+the workspace and a hash of the generated files. The Deploy step shows that list ("What is in Fabric (read back)"; [ui.md](ui.md)).
+The result is used by the verdict only while it still describes the workspace: a new conversion or a later deploy means a new
+read-back. A read that fails is reported in the deploy result (`readback.ok: false`) and nothing is claimed. The CLI's `deploy` does
+not read back; `adf2fabric validate --stage api --stage deployment` does the same read.
+
 ## Results after deploy
 
 `agent/deployment/run_report.py` builds the results the UI shows on Deploy and Report ("Migration results"; [ui.md](ui.md)): per

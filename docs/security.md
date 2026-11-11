@@ -1,7 +1,7 @@
 # Security: trust boundaries, roles, authentication and what is not yet covered
 
-**Status: hardened, not certified production-secure.** The controls below are implemented and covered by negative tests
-(`tests/test_api_security.py`). The application must not be described as production-secure until the deployment checks at the end
+**Status: hardened, not certified production-secure.** The controls below are implemented. Their negative tests (`tests/test_api_security.py`) ran the API on demo
+data and were removed with every stand-in on 2026-11-11, so most of them are **not tested automatically now**; see [testing.md](testing.md). The application must not be described as production-secure until the deployment checks at the end
 have been completed and an independent review has been done. See "Remaining limitations".
 
 ## Trust boundaries
@@ -68,7 +68,7 @@ it (`azure:use`) acts through that session, restricted to the subscriptions, ten
 
 Planning does not imply executing, and approving does not imply executing: an analyst prepares everything; changing the target needs
 `migration:execute`; creating a workspace identity needs both `provision:approve` and `migration:execute`. Give one person both only if
-your process allows it. `tests/test_api_security.py` holds a hand-written route-by-role table and fails if any role can do more or less.
+your process allows it. The hand-written route-by-role test table was removed on 2026-11-11 (it ran on demo data), so no test checks this now.
 
 ## Scoping (tenancy)
 
@@ -109,7 +109,7 @@ to append-only storage for real assurance. Read your organisation's events with 
 
 ## Provisioning, validation and the guided UI routes
 
-These are exposed over HTTP, each with its own permission (the role table in `tests/test_api_security.py` lists every one):
+These are exposed over HTTP, each with its own permission (the route-by-role test table that listed every one was removed on 2026-11-11):
 
 | Route | Permission |
 |---|---|
@@ -126,7 +126,7 @@ These are exposed over HTTP, each with its own permission (the role table in `te
   opaque `ref` and the workspace by its display name, never by resource id. Redaction is server-side; the UI never masks.
 * `Idempotency-Key` (8-64 chars `[A-Za-z0-9_-]`) makes a repeated submission return the first job (`Idempotent-Replay: true`) for 15 minutes,
   per person and only for the exact same project, action and request: the same key for anything else is a 422. Without it, a second job while one runs on the project is refused (409).
-* `ADF2FABRIC_ENV=production` refuses demo mode (403) and builds no stand-in Fabric: nothing canned can pass for a real result.
+* There is no demo mode and no stand-in Fabric (removed 2026-11-11): nothing canned can pass for a real result. `ADF2FABRIC_ENV=production` is only reported by `GET /me` now.
 * The UI hides buttons the signed-in person's role cannot use. That is a convenience; the API enforces every permission itself.
 
 The CLI commands (`provision-*`, `workloads-*`, `validate`) still rely on the operating-system user and their own approval gates, and are audited.
@@ -162,7 +162,7 @@ The CLI commands (`provision-*`, `workloads-*`, `validate`) still rely on the op
 
 ## Deployment checks (all must pass before calling a deployment production-secure)
 
-1. `python -m pytest tests/test_api_security.py` passes, and the full suite passes.
+1. The full suite passes, and each route's permission has been checked again by hand (its test table was removed on 2026-11-11).
 2. `ADF2FABRIC_AUTH_MODE=token`, named users created, no `ADF2FABRIC_API_TOKEN` in the UI's environment; `GET /me` without a token is 401.
 3. TLS terminates in front of the API; `ADF2FABRIC_ALLOWED_HOSTS` and `ADF2FABRIC_ALLOWED_ORIGINS` list only your real names.
 4. Grants are set per user (no `*` except for administrators); `ADF2FABRIC_ALLOWED_GIT_HOSTS` is set.

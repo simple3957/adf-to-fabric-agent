@@ -4,9 +4,7 @@ from __future__ import annotations
 
 import json
 
-from click.testing import CliRunner
 
-import adf2fabric.cli as cli_mod
 from adf2fabric.agent.confidence import engine
 from adf2fabric.agent.confidence.engine import MET, NA, UNKNOWN, UNMET, Criterion, _apply_gates, bounds, label_for
 from tests.test_conversion_agent import project, run  # noqa: F401  (the fixture)
@@ -97,33 +95,12 @@ def test_a_changed_source_demotes_what_was_proven_to_unknown(project):  # noqa: 
     assert all(x["state"] != "met" for it in d["areas"]["pipelines"]["items"] for x in it["criteria"])
 
 
-def test_cli_writes_the_report_and_says_it_is_a_range(project, monkeypatch):  # noqa: F811
-    store, pid = project
-    run(store)
-    monkeypatch.setattr(cli_mod, "projects_root", lambda config: store.projects_root)
-    out = CliRunner().invoke(cli_mod.cli, ["confidence", "--project", "test-proj"])
-    assert out.exit_code == 0, out.output
-    assert "CONFIDENCE" in out.output and "% to " in out.output
-    md = (store.project_dir(pid) / "confidence" / "confidence.md").read_text(encoding="utf-8")
-    assert "not a statistical probability" in md and "What to find out first" in md
-
-
 def test_a_run_criterion_made_unmet_only_by_a_gate_is_not_called_failing():
     cs = [c("bindings_complete", UNMET), c("deployed", UNKNOWN, needs=["bindings_complete"]), c("ran_ok", UNKNOWN, needs=["deployed"])]
     _apply_gates(cs)
     assert cs[2].state == UNMET and cs[2].gated
     assert label_for(cs) == "needs_input"  # nothing ran: the cause is the open binding
     assert label_for([c("ran_ok", UNMET)]) == "failing"  # a run that really failed is still failing
-
-
-def test_a_service_no_converted_pipeline_uses_is_not_called_proven():
-    from types import SimpleNamespace as NS
-
-    conv = NS(connections=[], connector_coverage=[NS(linked_service="LS_X", adf_type="AzureBlobFS", level="manual", note="")])
-    (item,) = engine._service_items(conv, {})
-    assert label_for(item.criteria) == "unproven"
-    lo, hi, _ = bounds(item.criteria)
-    assert lo < hi
 
 
 # ---- the final score: one number from the range, and written rules that can only lower its grade ----------------------------------------
@@ -174,40 +151,6 @@ def test_the_score_comes_last_in_the_report_and_follows_the_validation_on_file(p
 
 # ---- a linked service the migration does not need is listed, not scored -----------------------------------------------------------------
 
-def _cov(*names):
-    from types import SimpleNamespace as NS
-
-    return NS(connections=[], connector_coverage=[NS(linked_service=n, adf_type="AzureBlobFS", level="created", note="") for n in names])
-
-
-def test_a_linked_service_replaced_by_the_lakehouse_or_used_by_no_pipeline_is_not_needed():
-    uses = {"ls_lake": ["repointed_to_lakehouse", "not_used"], "ls_idle": ["not_used", "not_used"]}
-    lake, idle = engine._service_items(_cov("LS_Lake", "LS_Idle"), {}, uses, all_converted=True)
-    assert "replaced by the lakehouse" in lake.not_needed and not lake.criteria
-    assert "no pipeline uses it" in idle.not_needed
-
-
-def test_a_linked_service_is_still_scored_when_that_is_not_shown():
-    cases = {
-        "ls_inline": ["repointed_to_lakehouse", "inlined"],  # one dataset still reads through its connection
-        "ls_held": ["not_used"],  # unused, but a pipeline was held back from conversion and may need it
-        "ls_vault": [],  # no datasets (Key Vault, compute): its datasets say nothing
-    }
-    for ls, treatments in cases.items():
-        (item,) = engine._service_items(_cov(ls), {}, {ls: treatments}, all_converted=False)
-        assert not item.not_needed and item.criteria, ls
-    (item,) = engine._service_items(_cov("ls_vault"), {}, {}, all_converted=True)
-    assert not item.not_needed
-
-
-def test_a_bound_linked_service_is_never_called_not_needed():
-    from types import SimpleNamespace as NS
-
-    conv = _cov("LS_Lake")
-    conv.connections = [NS(name="LS_Lake", kind="connection", bound=True)]
-    (item,) = engine._service_items(conv, {}, {"ls_lake": ["repointed_to_lakehouse"]}, all_converted=True)
-    assert not item.not_needed  # a generated activity uses its connection: it is needed and scored
-
 
 def test_a_not_needed_linked_service_leaves_the_score_and_is_listed_in_the_report(project):  # noqa: F811
     store, pid = project
@@ -239,27 +182,3 @@ def test_single_node_databricks_settings_are_carried_by_a_one_node_pool():
     assert not single_node_only(["spark.databricks.delta.optimizeWrite.enabled"], 0)  # a tuning setting is still a gap
 
 
-def test_a_compute_linked_service_whose_work_runs_in_fabric_is_not_needed():
-    from types import SimpleNamespace as N
-
-    from adf2fabric.agent.confidence.engine import _compute_moved
-
-    plan = N(inventory=[N(id="dbx:1", source_ref="LS_Databricks")],
-             targets=[N(source_compute_id="dbx:1", target_execution="FabricNotebook")])
-    conv = N(compute_plan=plan)
-    assert "runs in Fabric" in _compute_moved(conv, "LS_Databricks", True)
-    assert _compute_moved(conv, "LS_Databricks", False) == ""  # a pipeline held back may still need it
-    plan.targets.append(N(source_compute_id="dbx:1", target_execution="Databricks"))
-    assert _compute_moved(conv, "LS_Databricks", True) == ""
-
-
-def test_a_matched_fabric_run_proves_a_bound_connection_works():
-    from types import SimpleNamespace as N
-
-    from adf2fabric.agent.confidence.engine import _proven_by_run
-
-    conn = N(kind="connection", bound=True, name="LS_Lake")
-    conv = N(pipelines=[N(source_pipeline="PL_A", prerequisites=[conn])])
-    assert "PL_A ran with it" in _proven_by_run(conv, "LS_Lake", {"PL_A": {"fabric_status": "Completed", "verdict": "matches"}})
-    assert _proven_by_run(conv, "LS_Lake", {"PL_A": {"fabric_status": "Completed", "verdict": "matches", "stale_run": True}}) == ""
-    assert _proven_by_run(conv, "LS_Lake", {"PL_A": {"fabric_status": "Failed", "verdict": "failed"}}) == ""

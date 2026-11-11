@@ -1,7 +1,7 @@
 """Shared test helpers.
 
-Tests are fully offline: they build real local git repositories in ``tmp_path``
-and clone from them by filesystem path, so no network or GitHub access is needed.
+No stand-ins (fake services, mocks, demo data) are used anywhere in the tests. Repositories are real local git repositories
+built in ``tmp_path``; the real-call tests in ``test_live.py`` read Azure and Fabric with ``az login`` (docs/testing.md).
 """
 
 from __future__ import annotations

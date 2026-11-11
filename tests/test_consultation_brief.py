@@ -3,12 +3,10 @@ approved brief whose settings drive the run, and nothing guessed."""
 
 from __future__ import annotations
 
-import json
 
 import pytest
 
 from adf2fabric.agent.consultation import brief as B
-from adf2fabric.agent.consultation import brief_record as BR
 
 PIPES = ["PL_A", "PL_B", "PL_C"]
 
@@ -138,139 +136,7 @@ def test_the_brief_and_the_questionnaire_say_where_each_answer_came_from():
 # ---- the record: answer, submit, approve, change ------------------------------------------------------------------------
 
 
-class _Store:
-    """A project store over a temp folder, with the facts injected (the record logic is what is tested here)."""
-
-    def __init__(self, root, f):
-        self.root, self.f = root, f
-
-    def project_dir(self, pid):
-        return self.root / pid
-
-
-@pytest.fixture()
-def rec(tmp_path, monkeypatch):
-    f = facts()
-    monkeypatch.setattr(B, "read_facts", lambda store, pid, destination=None: store.f)
-    return _Store(tmp_path, f)
-
-
-def _answer_required(store):
-    BR.accept_recommendations(store, "p")
-    BR.set_answers(store, "p", {"target.workspace": "existing", "target.capacity": "assigned", "storage.lakehouse": "LH",
-                                "context.owner": "Ann, lead"})
-
-
-def test_inapplicable_and_unknown_answers_are_refused(rec):
-    for bad in ({"nope": "x"}, {"scope.pipelines": ["PL_A"]}, {"compute.engine": "fabric"}, {"scope.mode": "everything"}):
-        with pytest.raises(BR.BriefError):
-            BR.set_answers(rec, "p", bad)
-    assert BR.load(rec, "p")["answers"] == {}  # nothing half-saved
-
-
-def test_submit_needs_every_required_answer_and_no_conflict(rec):
-    with pytest.raises(BR.BriefError, match="required"):
-        BR.submit(rec, "p")
-    _answer_required(rec)
-    BR.set_answers(rec, "p", {"validation.depth": "run", "security.sensitive": "blocked"})
-    with pytest.raises(BR.BriefError, match="conflict"):
-        BR.submit(rec, "p")
-    BR.set_answers(rec, "p", {"security.sensitive": "none"})
-    v = BR.submit(rec, "p", by="ann")
-    assert v["version"] == 1 and BR.view(rec, "p")["state"] == "submitted"
-    with pytest.raises(BR.BriefError, match="already submitted"):
-        BR.submit(rec, "p")
-
-
-def test_approval_is_for_the_answers_the_approver_read(rec):
-    _answer_required(rec)
-    BR.submit(rec, "p")
-    fp = BR.view(rec, "p")["fingerprint"]
-    with pytest.raises(BR.BriefError, match="changed"):
-        BR.approve(rec, "p", "0" * 16, "abe")
-    with pytest.raises(BR.BriefError, match="Name"):
-        BR.approve(rec, "p", fp, "  ")
-    BR.approve(rec, "p", fp, "abe")
-    v = BR.view(rec, "p")
-    assert v["state"] == "approved" and v["settings"]["lakehouse"] == "LH" and v["current_version"]["approved_by"] == "abe"
-    assert BR.approved_settings(rec, "p") == v["settings"]
-
-
-def test_a_changed_answer_takes_the_approval_away_until_approved_again(rec):
-    _answer_required(rec)
-    BR.submit(rec, "p")
-    BR.approve(rec, "p", BR.view(rec, "p")["fingerprint"], "abe")
-    BR.set_answers(rec, "p", {"scope.mode": "pilot"})
-    v = BR.view(rec, "p")
-    assert v["state"] == "draft" and v["changed_since_approval"] and v["settings"] is None and BR.approved_settings(rec, "p") is None
-    BR.set_answers(rec, "p", {"scope.mode": "all"})  # back to exactly what was approved
-    assert BR.view(rec, "p")["state"] == "approved"
-    rec.f.blocked_activities, rec.f.blocked_pipelines = 1, ["PL_C"]  # discovery / conversion changed what applies
-    assert BR.view(rec, "p")["state"] == "draft"
-
-
-def test_importing_a_questionnaire_skips_what_does_not_fit(rec):
-    q = B.questionnaire(rec.f, B.resolve(rec.f, {}))
-    for item in q["questions"]:
-        item["answer"] = {"scope.mode": "selected", "scope.approach": "parallel", "context.owner": "Client owner"}.get(item["id"])
-    q["questions"].append({"id": "made.up", "answer": "x"})
-    q["questions"].append({"id": "validation.depth", "answer": "everything"})
-    assert BR.import_answers(rec, "p", q) == 3
-    a = BR.load(rec, "p")["answers"]
-    assert a == {"scope.mode": "selected", "scope.approach": "parallel", "context.owner": "Client owner"}
-    assert BR.import_answers(rec, "p", {"scope.approach": "phased"}) == 1  # a plain map works too
-    with pytest.raises(BR.BriefError):
-        BR.import_answers(rec, "p", ["not", "a", "questionnaire"])
-
-
-def test_the_record_keeps_notes_and_versions_and_holds_no_secrets(rec):
-    _answer_required(rec)
-    BR.add_note(rec, "p", "Cut over on a Sunday", by="ann")
-    BR.submit(rec, "p", by="ann")
-    data = json.loads(BR.path(rec, "p").read_text(encoding="utf-8"))
-    assert set(data) == {"answers", "notes", "versions", "config"} and any(n["text"] == "Cut over on a Sunday" for n in data["notes"])
-    with pytest.raises(BR.BriefError):
-        BR.add_note(rec, "p", "   ")
-    BR.reset(rec, "p")
-    assert BR.load(rec, "p")["answers"] == {} and BR.load(rec, "p")["versions"]  # history kept
-
-
-def _approve_for(rec, ws):
-    BR.accept_recommendations(rec, "p", destination={"workspace_id": ws})
-    BR.set_answers(rec, "p", {"target.workspace": "existing", "target.capacity": "assigned", "storage.lakehouse": "LH", "context.owner": "Ann, lead"}, destination={"workspace_id": ws})
-    BR.submit(rec, "p", destination={"workspace_id": ws})
-    BR.approve(rec, "p", BR.view(rec, "p")["fingerprint"], "abe")
-
-
 WS_A, WS_B = "11111111-1111-1111-1111-111111111111", "22222222-2222-2222-2222-222222222222"
-
-
-def test_an_approval_is_for_the_workspace_it_was_agreed_for(rec):
-    _approve_for(rec, WS_A)
-    assert BR.workspace_mismatch(rec, "p", WS_A) is None and BR.workspace_mismatch(rec, "p", WS_A.upper()) is None
-    msg = BR.workspace_mismatch(rec, "p", WS_B)
-    assert msg and "different Fabric workspace" in msg and WS_A not in msg and WS_B not in msg  # no id in what a person reads
-    v = BR.view(rec, "p", {"workspace_id": WS_B})
-    assert v["workspace_changed"] is True and v["state"] == "approved"  # the approval stands, the deploy is what stops
-    assert BR.view(rec, "p", {"workspace_id": WS_A})["workspace_changed"] is False
-    assert BR.view(rec, "p")["workspace_changed"] is False  # a viewer with no destination is told nothing false
-
-
-def test_recording_the_new_workspace_returns_the_brief_to_draft_until_approved_again(rec):
-    _approve_for(rec, WS_A)
-    BR.set_answers(rec, "p", {}, destination={"workspace_id": WS_B})  # "Use the workspace chosen now"
-    v = BR.view(rec, "p", {"workspace_id": WS_B})
-    assert v["state"] == "draft" and v["workspace_changed"] is False and v["changed_since_approval"] is True
-    assert BR.workspace_mismatch(rec, "p", WS_B) is None  # not approved, so nothing is claimed about it
-    BR.submit(rec, "p", destination={"workspace_id": WS_B})
-    BR.approve(rec, "p", BR.view(rec, "p")["fingerprint"], "abe")
-    assert BR.workspace_mismatch(rec, "p", WS_B) is None and BR.workspace_mismatch(rec, "p", WS_A)
-
-
-def test_no_workspace_id_reaches_a_view(rec):
-    _approve_for(rec, WS_A)
-    text = json.dumps(BR.view(rec, "p", {"workspace_id": WS_A})) + B.brief_markdown(rec.f, B.resolve(rec.f, {}), "p", 1, "approved")
-    assert WS_A not in text
 
 
 @pytest.mark.parametrize("bad", ["Dana Lee, platform lead", "LH Migration", "a/b", "x" * 257, "lh;drop", "../x", 'q"uote'])
@@ -292,17 +158,6 @@ def test_a_stored_answer_that_no_longer_passes_its_rules_is_ignored_and_says_why
     assert lh.source == "open" and lh.value is None and "letters, digits" in lh.problem
     assert mode.source == "recommendation" and "takes one of" in mode.problem  # falls back to the recommendation, not to the bad value
     assert B.settings_from(f, rs).lakehouse is None  # and the run never sees it
-
-
-def test_a_hand_edited_record_cannot_put_an_invalid_answer_into_the_run(rec):
-    _answer_required(rec)
-    data = BR.load(rec, "p")
-    data["answers"]["storage.lakehouse"] = "bad name, with comma"
-    BR.save(rec, "p", data)
-    v = BR.view(rec, "p")
-    assert next(q for q in v["questions"] if q["id"] == "storage.lakehouse")["problem"]
-    with pytest.raises(BR.BriefError, match="required"):
-        BR.submit(rec, "p")  # the question is open again until someone answers it properly
 
 
 def test_holding_back_every_pipeline_is_a_conflict_not_an_empty_list_that_means_all():
@@ -368,20 +223,3 @@ def test_the_settings_carry_where_secrets_come_from_and_the_tenancy():
     assert (plain.secrets_from, plain.key_vault_url, plain.cross_tenant) == ("person", None, False)
 
 
-def test_a_record_that_cannot_be_read_is_named_not_silently_dropped(tmp_path, monkeypatch):
-    """The six fact reads used to swallow every error: an unreadable record just made its questions vanish, as if there was nothing to ask."""
-    from adf2fabric.project.store import ProjectStore
-    from tests.test_conversion_agent import FILES
-    from tests.test_partial_source import _convert
-
-    store, pid, _ = _convert(tmp_path, FILES)
-    store.load_adf_semantic_discovery(pid)  # discovery exists
-
-    def boom(*a, **k):
-        raise PermissionError("Access is denied")
-
-    monkeypatch.setattr(ProjectStore, "has_workload_manifest", lambda self, p: True)
-    monkeypatch.setattr(ProjectStore, "load_workload_manifest", boom)
-    f = B.read_facts(store, pid)
-    assert f.discovered and any("workload manifest" in x and "PermissionError" in x for x in f.unreadable)
-    assert B.read_facts(*[store, pid]).to_dict()["unreadable"] == f.unreadable  # it travels with the brief the screens show

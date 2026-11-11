@@ -1,4 +1,4 @@
-"""``python -m adf2fabric.api`` — start the API on loopback. Pass ``--demo`` to start with the demo backend selected by default."""
+"""``python -m adf2fabric.api`` — start the API on loopback."""
 
 from __future__ import annotations
 

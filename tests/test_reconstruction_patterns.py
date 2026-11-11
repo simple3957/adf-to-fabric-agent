@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from adf2fabric.project.reconstruction import Completeness
 from tests.reconstruction_support import (
-    DS_LAKE, DS_SQL, HIGH, LOW, MEDIUM, act, blockers, completed, copy_activity, dataset, dep, expr, findings,
+    LOW, MEDIUM, act, blockers, completed, copy_activity, dataset, dep, expr, findings,
     pipeline_of, pl, proposals, reconstruct, ref, with_estate,
 )
 

@@ -1,7 +1,7 @@
 """ADF → Fabric Studio UI. Run: ``streamlit run ui/app.py`` (with the API running: ``python -m adf2fabric.api``).
 
 Same process as the Synapse accelerator (its own look): a Connections page (choose the route, connect both sides, start) and a Migration
-page (one confirmed step at a time), under a top bar with the connection state and the Live/Demo switch.
+page (one confirmed step at a time), under a top bar with the connection state. Every page shows real data read from Azure and Fabric.
 """
 
 from __future__ import annotations
@@ -68,16 +68,13 @@ def top_bar() -> None:
     api = client()
     who = _who(api)
     with st.container(key="topbar"):
-        brand, links, dots, project, mode_col = st.columns([2.0, 4.4, 1.4, 2.0, 1.3], vertical_alignment="center")
+        brand, links, dots, project = st.columns([2.0, 4.4, 1.4, 2.6], vertical_alignment="center")
         brand.markdown('<div class="ma-brand"><span class="ma-brand-mark">◆</span>ADF&nbsp;→&nbsp;Fabric&nbsp;<small>Studio</small></div>',
                        unsafe_allow_html=True)
         with links, st.container(horizontal=True, gap="small", vertical_alignment="center"):
             for key in ("setup", "migration", "activity"):
                 st.page_link(PAGES[key], width="content")
         st.session_state.permissions = set(who.get("permissions") or [])
-        st.session_state.demo_available = bool(who.get("demo_available", True))
-        if who.get("production"):
-            st.session_state.pop("mode", None)
         if who.get("auth_mode") == "token":
             with st.popover(f"{who['id']} ({who['org']})"):
                 st.caption("Roles: " + ", ".join(who.get("roles") or []))
@@ -86,13 +83,10 @@ def top_bar() -> None:
                     st.session_state.pop("permissions", None)
                     st.rerun()
 
-        if not st.session_state.get("url_applied"):  # ?demo=1&project=<id> opens straight into demo data
+        if not st.session_state.get("url_applied"):  # ?project=<id> opens straight into that project
             st.session_state.url_applied = True
-            if st.query_params.get("demo") == "1":
-                call(api.set_mode, "demo")
             if st.query_params.get("project"):
                 st.session_state.project_id = st.query_params["project"]
-        mode = call(api.get_mode) or "live"
         session = call(api.session) or {}
         projects = call(api.projects) or []
         ids = [p["id"] for p in projects]
@@ -112,18 +106,6 @@ def top_bar() -> None:
                 st.session_state.project_id = choice
             elif current:
                 st.session_state.pop("project_id", None)
-        demo_ok = st.session_state.get("demo_available", True)
-        demo = mode_col.toggle("Demo", value=mode == "demo", disabled=not demo_ok,
-                               help="Sample data and canned Azure/Fabric, no sign-in needed." if demo_ok else "Demo data is switched off in production mode.")
-        if demo_ok and demo != (mode == "demo"):
-            call(api.set_mode, "demo" if demo else "live")
-            for k in ("project_id", "conversion", "deploy", "confirmed", "confirmed_loaded", "step"):
-                st.session_state.pop(k, None)
-            st.rerun()
-    st.session_state.mode = mode
-    if mode == "demo":  # never let sample data pass for a real result: say so on every page
-        theme.html_block('<div class="ma-note" role="status">🧪 <span><strong>DEMO DATA.</strong> Everything on this page is a sample. '
-                         'Nothing was read from or sent to Azure or Fabric, and no result here is real.</span></div>')
 
 
 top_bar()

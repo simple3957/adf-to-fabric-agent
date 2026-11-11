@@ -28,7 +28,7 @@ warnings repeat it. Fix: Consult, 'Use the workspace chosen now' and save again;
 Likewise `runs_refused` (that reason, or a brief whose validation depth does not allow real runs) is shown at the top of
 **Run in Fabric and compare**, whose pipeline list and **Run and compare** stay disabled, so nobody chooses pipelines and types RUN only to be refused.
 
-Deploy comes before Validate (since 2026-11-06), so validation checks what is deployed (its API and deployment stages read the workspace).
+Deploy comes before Validate (since 2026-11-06). Since 2026-11-11 the Deploy step itself reads the workspace back after a deploy (API and deployment checks), and Validate runs the static check.
 On Convert, "Things you need to set" lists each notebook a pipeline runs; for a notebook the tool generated, **Create it in Fabric from the
 generated notebook** first asks Fabric what would happen (a new notebook, or the content of the one with that name replaced), then **Yes,
 create** (or **Yes, replace it** when one with that name exists) puts it in the chosen workspace, records the person as accepting it and saves its id; Convert again uses the id
@@ -62,7 +62,23 @@ the existing nine steps and flows.
   or the tool's own), and a choice made there is for that run only and beats the brief:
   * *Conversion*: which pipelines, keep connections or repoint to a lakehouse (name checked as you type), apply the safe
     reconstruction proposals.
-  * *Validation*: which checks run (static, API, deployment, run evidence); API and deployment need a workspace.
+  * *Validation*: since 2026-11-11 each check runs where it belongs, and the Validate step has no options card:
+    - **Deploy step:** right after a real deploy, the API and deployment checks read the workspace back (read-only). "What is in
+      Fabric (read back)" lists every pipeline ("In Fabric, same as generated / differs / Not in Fabric / Could not be read"), every
+      notebook, lakehouse or child pipeline the pipelines use ("In Fabric / Not in Fabric"), and every connection ("Exists / Not found").
+      Then come the API and Deployment dropdowns with every check. Only what was read is listed. If the read itself fails, the step
+      says so and claims nothing.
+    - **Validate step:** runs the static check only. It shows the overall badge, the Static badge, the results table, and a Static
+      dropdown with every check (failing first, passing ones too). Two plain lines say where the other checks are: "Deployment: read
+      back from Fabric on the Deploy step (time): n of m item(s) as expected", or why there is no current read-back. "Runtime: recorded
+      when the pipelines run in Fabric". It never shows a red "not deployed": components that only the read-back reports are left out
+      of this step.
+    - **Runs** (Report: Run in Fabric and compare, or Compare latest runs): the server records the runtime check from the runs
+      itself, and the Runtime dropdown is shown under the run panel.
+    - **The verdict** (`engine.record`) is one record over all of them. Static and runtime are worked out again from the project's
+      files every time. The read-back counts only while it describes the chosen workspace: the same workspace, the generated files
+      unchanged, and no deploy after it (`engine.readback_current`). Otherwise those two stages are left out, and the reason says
+      "Deploy ... to read it back". The view carries `stages_selected`, `checks_by_stage` and `readback` (`at`, `current`, `note`, `items`).
   * *Deployment*: which pipelines, include child pipelines, allow unbound connections.
   * *Run and compare*: which pipelines and how long to wait for each run.
   The server checks every choice again (names, convert-only choices, the real-run rules).
@@ -84,7 +100,7 @@ the existing nine steps and flows.
 * **Report, "Check a pipeline's output".** For a pipeline with no ADF run to compare with: pick the pipeline, give the source data and
   what the run wrote (abfss locations, CSV or Parquet), and the server compares them as a job (`POST /projects/{id}/output-checks`,
   `plans:generate`, read-only, audited; `GET` lists the verdicts and row counts, never a location). Only an ADLS Gen2 account or OneLake
-  is read, a OneLake workspace must be in the caller's grants, and demo mode refuses it. OneLake is read as the Fabric account, ADLS as
+  is read, and a OneLake workspace must be in the caller's grants. OneLake is read as the Fabric account, ADLS as
   the source's sign-in. Same rules as the CLI's `output-check` ([migration-validation.md](migration-validation.md)).
 
 ## Loading and "what is needed from you"
@@ -142,7 +158,7 @@ Checked against the API routes and the CLI on 2026-10-29. Everything the API exp
   matches the ADF baseline; a completed run without a baseline is not proof.
 * Buttons are disabled while a job runs; each intent carries an `Idempotency-Key`, so a double click starts one job.
 * Errors show the server's short message, what to do, and a request reference for 5xx; never a trace or a path.
-* Demo mode is labelled on every page and is refused in production mode. Production never shows sample data.
+* There is no demo mode (removed 2026-11-11): every page shows real data read from Azure and Fabric.
 * Completion is the backend's word: the final banner says "Migration verified" only when the validation engine reports `MIGRATION_VERIFIED`
   (a passing runtime stage); otherwise it says the migration is not verified.
 
@@ -173,9 +189,10 @@ Checked against the API routes and the CLI on 2026-10-29. Everything the API exp
 
 ## Tests
 
-`tests/test_api_views.py` (authorisation, redaction, failure states, progress, duplicate submissions, production mode),
-`tests/test_ui_enterprise.py` (panels with real demo data, typed confirmation, sign-in gate, viewer, production), `tests/test_ui.py`.
+The UI and API tests that ran on demo data (`test_ui_enterprise.py`, most of `test_ui.py`, `test_api_views.py` and `test_api.py`) were removed
+on 2026-11-11 with every other stand-in. What remains: the journey rules and the client's error handling (`test_ui.py`), the validation
+dropdowns (`test_ui_validation_stages.py`), redaction (`test_api_views.py`), and the real-call tests in `test_live.py` ([testing.md](testing.md)).
 
 ## Limits
 
-Provisioning has created a Spark pool and an environment live (workspace `Practise`, 2026-11-03, verified by reading them back). Its other writes (workspace creation, capacity assignment, role assignments, lakehouses, Azure capacity creation) have only been exercised against the in-memory demo target, never a live tenant.
+Provisioning has created a Spark pool and an environment live (workspace `Practise`, 2026-11-03, verified by reading them back). Its other writes (workspace creation, capacity assignment, role assignments, lakehouses, Azure capacity creation) were only ever exercised against the in-memory demo target (removed 2026-11-11), never a live tenant, so nothing tests them now.

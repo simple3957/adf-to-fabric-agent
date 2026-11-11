@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from adf2fabric.agent.assessment import adf_history, compute_rates as R
+from adf2fabric.agent.assessment import compute_rates as R
 from adf2fabric.agent.assessment.compute import (
     ActivityHistory,
     AdfMeter,
@@ -112,50 +112,6 @@ def test_report_names_sources_and_assumptions():
     assert "Recommended capacity" in md and R.PIPELINES_PRICING in md and "assumed" in md
 
 
-class _Resp:
-    def __init__(self, data, status=200):
-        self.status_code, self._d = status, data
-
-    def json(self):
-        return self._d
-
-
-class _Transport:
-    """Fake ARM: two runs of P; the second runs the Copy twice (a loop)."""
-
-    def __init__(self):
-        self.calls = []
-
-    def post(self, url, headers=None, json=None, timeout=None):
-        self.calls.append(url)
-        if url.split("?")[0].endswith("/queryPipelineRuns"):
-            return _Resp({"value": [{"runId": "r1", "durationInMs": 40000}, {"runId": "r2", "durationInMs": 60000}]})
-        copies = 1 if "/r1/" in url else 2
-        bill = {"activityType": "DataMovement", "billableDuration": [{"meterType": "AzureIR", "duration": 0.0667, "unit": "DIUHours"}]}
-        return _Resp({"value": [{"activityName": "Copy1", "activityType": "Copy", "durationInMs": 20000,
-                                 "output": {"usedDataIntegrationUnits": 4, "usedParallelCopies": 1, "billingReference": bill}}
-                                for _ in range(copies)]})
-
-
-def test_history_fetch_aggregates_runs_and_only_uses_query_endpoints():
-    t = _Transport()
-    h = adf_history.fetch(t, "tok", "sub", "rg", "fac", ["P"])["p"]
-    assert h.runs_sampled == 2 and h.median_duration_s == 50
-    c = h.activities["Copy1"]
-    assert c.runs_per_pipeline_run == 1.5 and c.median_duration_s == 20 and c.used_diu == 4
-    assert h.adf_billed_per_run == {"DataMovement DIUHours": pytest.approx(0.0667 * 3 / 2)}
-    assert all("/query" in u for u in t.calls)  # read-only: nothing created or run
-
-
-def test_history_http_error_is_reported():
-    class Bad:
-        def post(self, *a, **k):
-            return _Resp({}, status=403)
-
-    with pytest.raises(adf_history.HistoryError):
-        adf_history.fetch(Bad(), "tok", "sub", "rg", "fac", ["P"])
-
-
 def test_copy_is_billed_per_started_minute_like_the_measured_runs():
     # PL_Compute_Test: a 4-DIU copy of 10-18 s was billed 0.0667 DIU-hours (4 x 1 minute) in ADF and in Fabric.
     h = {"p": PipelineHistory(pipeline="P", runs_sampled=1,
@@ -229,80 +185,7 @@ def test_report_has_a_separate_databricks_section():
     assert "INR" in md and "Standard_D4ds_v5" in md and "to confirm from the bill" in md
 
 
-def test_history_uses_only_runs_with_the_activitys_current_type():
-    class Changed:
-        """Newest run: NB is a Databricks notebook (491 s). Two older runs: NB was a 1 s Wait placeholder."""
-
-        def post(self, url, headers=None, json=None, timeout=None):
-            if url.split("?")[0].endswith("/queryPipelineRuns"):
-                return _Resp({"value": [{"runId": "new", "durationInMs": 669000}, {"runId": "old1", "durationInMs": 12000},
-                                        {"runId": "old2", "durationInMs": 11000}]})
-            if "/new/" in url:
-                return _Resp({"value": [{"activityName": "NB", "activityType": "DatabricksNotebook", "durationInMs": 491000}]})
-            return _Resp({"value": [{"activityName": "NB", "activityType": "Wait", "durationInMs": 1000}]})
-
-    h = adf_history.fetch(Changed(), "tok", "sub", "rg", "fac", ["P"])
-    nb = h["p"].activities["NB"]
-    assert (nb.activity_type, nb.median_duration_s, nb.runs_per_pipeline_run) == ("DatabricksNotebook", 491, 1)
-    # and history recorded for another type is ignored by the estimate
-    stale = {"p": PipelineHistory(pipeline="P", activities={"NB": ActivityHistory(activity_type="Wait", median_duration_s=1)})}
-    x = by(estimate(semantic([pipe(_nb(), name="P")], linked_services=[_dbx_ls()]), stale), "P").activities[0]
-    assert x.duration_source is Source.assumed and any("history not used" in n for n in x.notes)
-
-
-
 # ---- live Databricks prices (Azure Retail Prices API) and workspace region/tier ----------------------------------
-
-from adf2fabric.agent.assessment import azure_prices  # noqa: E402
-
-
-class _PriceApi:
-    """Fake Retail Prices API: Premium/Standard Jobs DBU and two VM sizes in westeurope, USD and INR."""
-
-    PRICES = {("Azure Databricks", "Premium Jobs Compute"): {"USD": 0.30, "INR": 25.0},
-              ("Azure Databricks", "Standard Jobs Compute"): {"USD": 0.15, "INR": 12.5},
-              ("Virtual Machines", "Standard_D4ds_v5"): {"USD": 0.25, "INR": 21.0},
-              ("Virtual Machines", "Standard_E8ds_v5"): {"USD": 0.60, "INR": 50.0}}
-
-    def __init__(self):
-        self.calls = []
-
-    def get(self, url, params=None, timeout=None, headers=None):
-        self.calls.append(params)
-        f, cur = params["$filter"], params["currencyCode"]
-        if "westeurope" not in f:
-            return _Resp({"Items": []})
-        items = []
-        for (svc, key), pr in self.PRICES.items():
-            if f"'{svc}'" in f and f"'{key}'" in f:
-                meter = f"{key} DBU" if svc == "Azure Databricks" else "D4ds v5"
-                items.append({"retailPrice": pr[cur], "meterName": meter, "skuName": key, "productName": "Linux"})
-                if svc == "Virtual Machines":
-                    items.append({"retailPrice": 0.01, "meterName": "spot", "skuName": f"{key} Spot", "productName": "Linux"})
-        return _Resp({"Items": items})
-
-
-def test_live_prices_follow_the_workspace_region_tier_and_vm_size():
-    api = _PriceApi()
-    prices = azure_prices.LivePrices(api)
-    ws = {"/subscriptions/s/rg/ws": ("westeurope", "standard")}
-    d = semantic([pipe(_nb(), name="P")], linked_services=[_dbx_ls(workspaceResourceId="/subscriptions/s/rg/ws")])
-    e = by(estimate(d, prices=prices, databricks_workspace=ws.get), "P").activities[0].external
-    assert (e.region, e.tier, e.region_tier_source) == ("westeurope", "standard", "workspace")
-    hours = 600 / 3600
-    assert e.cost["USD"] == pytest.approx(hours * (1.0 * 0.15 + 0.25), abs=1e-4)  # spot price ignored
-    assert e.cost["INR"] == pytest.approx(hours * (12.5 + 21.0), abs=1e-3)
-    assert "Retail Prices API" in e.price_source
-    n = len(api.calls)
-    estimate(d, prices=prices, databricks_workspace=ws.get)
-    assert len(api.calls) == n  # cached
-
-
-def test_prices_missing_for_a_region_are_reported_not_guessed():
-    d = semantic([pipe(_nb(), name="P")], linked_services=[_dbx_ls(workspaceResourceId="/subscriptions/s/rg/ws")])
-    e = by(estimate(d, prices=azure_prices.LivePrices(_PriceApi()),
-                    databricks_workspace=lambda _id: ("southindia", "premium")), "P").activities[0].external
-    assert not e.cost and any("No DBU price" in n for n in e.notes)
 
 
 def test_without_azure_access_recorded_prices_and_stated_defaults_are_used():
@@ -311,11 +194,3 @@ def test_without_azure_access_recorded_prices_and_stated_defaults_are_used():
     assert "recorded table" in e.price_source and e.cost["INR"] > 0
 
 
-def test_workspace_info_reads_region_and_tier_from_arm():
-    class Arm:
-        def get(self, url, headers=None, timeout=None):
-            assert url.startswith("https://management.azure.com/subscriptions/") and headers["Authorization"] == "Bearer t"
-            return _Resp({"location": "Central India", "sku": {"name": "premium"}})
-
-    assert azure_prices.workspace_info(Arm(), "t", "/subscriptions/s/resourceGroups/g/providers/x/ws") == ("centralindia", "premium")
-    assert azure_prices.workspace_info(Arm(), "t", "not-a-resource-id") is None

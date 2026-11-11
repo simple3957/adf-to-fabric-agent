@@ -15,7 +15,7 @@ from components import STATE_LABELS, call, can, empty_state, intent, read, run_j
 import panels_assist
 from journey import PROBLEM_STATES, READY_STATES
 import panels_bindings
-from panels_ext import explain_for_step
+from panels_ext import explain_for_step, readback
 import panels_results
 
 
@@ -533,6 +533,7 @@ def deploy(api: ApiClient, pid: str, dest: dict, conversion: dict | None, result
                     else theme.badge("Dry run: nothing was changed in Fabric", "info"), unsafe_allow_html=True)
         st.dataframe([{"pipeline": x["name"], "action": x["action"], "detail": x.get("detail") or "", "children": ", ".join(x.get("children") or [])}
                       for x in result.get("results", [])], hide_index=True)
+    readback(api, pid, result)
     explain_for_step(api, pid, "deploy")
     panels_results.results(api, pid, key="dep-res")
     _notebooks(api, pid)

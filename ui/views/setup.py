@@ -26,9 +26,6 @@ theme.html_block(f'<div class="ma-pagehead"><span class="ma-eyebrow">{theme.esc(
                  '<h1>Connect your source and Fabric</h1>'
                  '<p>Azure Data Factory → Microsoft Fabric. Each side signs in with its own account, so they can differ. '
                  'Sign-in happens on the machine running the accelerator; no password or token reaches this browser.</p></div>')
-if st.session_state.get("mode") == "demo":
-    theme.html_block('<div class="ma-note">ℹ️ <span><strong>Demo data.</strong> Sample accounts are already signed in. '
-                     'Pick the project <code>demo-estate</code> in the top bar.</span></div>')
 
 
 def side_head(letters: str, color: str, side: str, name: str, label: str, tone: str) -> None:

@@ -175,10 +175,6 @@ class ProvisionApplyBody(_In):
     confirm: bool = False  # required when apply is true
 
 
-class ModeBody(_In):
-    mode: str
-
-
 class GrantsBody(_In):
     subscriptions: list[str] = Field(default_factory=list, max_length=200)
     tenants: list[str] = Field(default_factory=list, max_length=200)

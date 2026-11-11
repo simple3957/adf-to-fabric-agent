@@ -15,7 +15,6 @@ from tests.conversion_support import (
     LAKE_LS,
     SQL_LS,
     act,
-    activities,
     by_name,
     codes,
     convert,

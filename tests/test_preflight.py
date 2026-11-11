@@ -28,39 +28,6 @@ def test_a_bracketed_or_ordinary_alias_is_not_flagged():
     assert not preflight._reserved_aliases({"PL": _content("SELECT 1 AS [Order]", "SELECT 1 AS Total, 2 AS \"Key\"")})
 
 
-class _P:
-    def __init__(self, name, default=None, has_default=False):
-        self.name, self.default_value, self.has_default = name, default, has_default
-
-
-def test_wait_only_pipelines_are_noted_and_real_ones_are_not():
-    class Pipe:
-        def __init__(self, name, counts):
-            self.name, self.activity_type_counts = name, counts
-
-    class D:
-        pipelines = [Pipe("W", {"Wait": 2}), Pipe("C", {"Copy": 1}), Pipe("M", {"Wait": 1, "Lookup": 1})]
-
-    got = preflight._wait_only(D())
-    assert [f.subject for f in got] == ["W"] and got[0].severity == "info"
-
-
-def test_a_linked_service_parameter_with_no_value_is_flagged_as_an_adf_side_warning(monkeypatch):
-    import adf2fabric.connections.resolution as R
-
-    class LS:
-        name, parameters = "LS_SQL", [_P("DBName"), _P("Port", "1433", True)]
-
-    class D:
-        linked_services = [LS()]
-
-    monkeypatch.setattr(R, "usage", lambda d, n: (["DS"], [{"pipeline": "PL_X", "activity": "A", "type": "Lookup"}], {}))
-    got = preflight._parameters_without_value(D())
-    assert len(got) == 1 and got[0].severity == "warning" and "DBName" in got[0].message and "Port" not in got[0].message
-    monkeypatch.setattr(R, "usage", lambda d, n: (["DS"], [], {"DBName": {"db1"}}))
-    assert preflight._parameters_without_value(D()) == []  # a dataset passes it
-
-
 def test_temporal_queries_types_literals_and_comments_are_not_flagged():
     assert not preflight._reserved_aliases({"PL": _content(
         "SELECT * FROM t FOR SYSTEM_TIME AS OF '2024-01-01'",

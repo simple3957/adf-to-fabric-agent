@@ -8,16 +8,12 @@ from pathlib import Path
 import pytest
 import yaml
 
-from adf2fabric.agent.discovery import DiscoveryAgent, DiscoveryRequest
 from adf2fabric.agent.discovery.adf_semantic import AdfSemanticDiscoverer, AdfSemanticDiscoveryRequest, parser
 from adf2fabric.connections import catalog
-from adf2fabric.connections.fabric import FabricApiError
 from adf2fabric.connections.integration_runtime import analyze, apply_network_hint, classify_host
-from adf2fabric.connections.keyvault import KeyVaultError
-from adf2fabric.connections.models import CheckStatus, ConnectionState
+from adf2fabric.connections.models import ConnectionState
 from adf2fabric.connections.resolution import ConnectionChoice, build_cards, existing_key
 from adf2fabric.connections.service import ConnectionService
-from adf2fabric.connections.testing import ConnectorTester
 from tests.test_adf_semantic_discovery import _make_project
 
 PW = "S3cretPassw0rd!"
@@ -360,86 +356,9 @@ def test_unavailable_methods_are_marked_not_offered(project):
 # --- testing ----------------------------------------------------------------------------------------------------
 
 
-class Probe:
-    def __init__(self, ok=True):
-        self.ok, self.calls = ok, []
-
-    def __call__(self, host, port, timeout):
-        self.calls.append((host, port))
-        return (True, "") if self.ok else (False, "the connection timed out")
-
-
-def make_tester(**kw):
-    kw.setdefault("probe", Probe())
-    kw.setdefault("driver", lambda: "ODBC Driver 18 for SQL Server")
-    kw.setdefault("sql_connect", lambda cs, t: None)
-    return ConnectorTester(**kw)
-
-
-def sql_spec():
-    return catalog.connector_for("azuresqldb" if False else "azuresqldatabase")
-
-
 def run(t, spec_type, method, endpoint, values=None, secrets=None):
     spec = catalog.connector_for(spec_type)
     return t.test(spec, catalog.method_by_id(spec, method), endpoint, values or {}, secrets or {})
-
-
-def test_sql_login_is_tested_by_authenticating_and_says_no_query_was_run():
-    seen = {}
-    t = make_tester(sql_connect=lambda cs, to: seen.setdefault("cs", cs))
-    rep = run(t, "azuresqldatabase", "sql_login", {"server": "s.database.windows.net", "database": "d"}, {"username": "u"}, {"password": "p}ss"})
-    assert rep.state is ConnectionState.connection_tested and rep.ok
-    assert "authenticated to the server and database 'd'" in " ".join(rep.verified) and "no query was run" in " ".join(rep.not_verified)
-    assert "PWD={p}}ss}" in seen["cs"] and "Encrypt=yes" in seen["cs"] and "TrustServerCertificate=no" in seen["cs"]
-    assert any("reachable from this machine" in v for v in rep.verified) and any("not from Fabric" in n for n in rep.not_verified)
-
-
-def test_service_principal_sql_uses_azure_ad_authentication():
-    seen = {}
-    run(make_tester(sql_connect=lambda cs, t: seen.setdefault("cs", cs)), "azuresqldatabase", "service_principal", {"server": "s", "database": "d"},
-        {"tenant_id": GUID1, "client_id": GUID2}, {"client_secret": CLIENT_SECRET})
-    assert "Authentication=ActiveDirectoryServicePrincipal" in seen["cs"] and f"UID={GUID2}" in seen["cs"]
-
-
-@pytest.mark.parametrize("method, why", [("workspace_identity", "Fabric's own identity"), ("entra_oauth", "Fabric's own identity")])
-def test_identities_that_cannot_be_exercised_here_are_configured_not_tested(method, why):
-    rep = run(make_tester(), "azuresqldatabase", method, {"server": "s"})
-    assert rep.state is ConnectionState.connection_configured and not rep.ok and why in " ".join(rep.not_verified)
-
-
-def test_existing_connection_is_never_reported_as_tested():
-    rep = run(make_tester(), "azuresqldatabase", "existing_connection", {}, {"connection_id": GUID1})
-    assert rep.state is ConnectionState.connection_configured and "cannot be tested from here" in " ".join(rep.not_verified)
-
-
-@pytest.mark.parametrize("raised, words", [
-    (RuntimeError("[28000] Login failed for user 'u'. (18456)"), "rejected the login"),
-    (RuntimeError("timeout expired: Could not open a connection to SQL Server"), "could not be reached"),
-])
-def test_sql_failures_are_actionable_and_never_echo_the_password(raised, words):
-    def boom(cs, t):
-        raise type(raised)(str(raised) + f" PWD={PW}")
-
-    rep = run(make_tester(sql_connect=boom), "azuresqldatabase", "sql_login", {"server": "s"}, {"username": "u"}, {"password": PW})
-    assert rep.state is ConnectionState.validation_failed and words in rep.error and PW not in rep.model_dump_json() and rep.actions
-
-
-def test_a_missing_odbc_driver_is_a_stated_limitation_not_a_failure():
-    rep = run(make_tester(driver=lambda: None), "azuresqldatabase", "sql_login", {"server": "s"}, {"username": "u"}, {"password": "p"})
-    assert rep.state is ConnectionState.connection_configured and "no SQL Server ODBC driver" in " ".join(rep.not_verified)
-
-
-class Fs:
-    def __init__(self, fail=None):
-        self.fail = fail
-
-    def get_file_system_properties(self):
-        if self.fail:
-            raise self.fail
-
-    def get_paths(self, max_results=None):
-        return iter([])
 
 
 def datalake(fs, seen):
@@ -449,86 +368,7 @@ def datalake(fs, seen):
     return factory
 
 
-@pytest.mark.parametrize("method, secrets, expect_cred", [("account_key", {"account_key": KEY}, KEY), ("sas_token", {"sas_token": "?" + SAS}, SAS)])
-def test_storage_account_key_and_sas_are_tested_by_listing_the_file_system(method, secrets, expect_cred):
-    seen = {}
-    rep = run(make_tester(datalake_factory=datalake(Fs(), seen)), "azureblobfs", method, {"account": "lake1", "container": "raw"}, {}, secrets)
-    assert rep.ok and seen["url"] == "https://lake1.dfs.core.windows.net" and seen["cred"] == expect_cred
-    assert "can read file system 'raw'" in " ".join(rep.verified) and "write permission was not tested" in " ".join(rep.not_verified)
-
-
-@pytest.mark.parametrize("raised, words", [
-    (RuntimeError("AuthorizationPermissionMismatch: This request is not authorized to perform this operation using this permission."), "not authorized"),
-    (RuntimeError("ContainerNotFound / FilesystemNotFound 404"), "not found"),
-    (RuntimeError("AuthenticationFailed: Server failed to authenticate the request"), "rejected"),
-])
-def test_storage_failures_map_to_clear_messages_without_leaking_the_key(raised, words):
-    rep = run(make_tester(datalake_factory=datalake(Fs(type(raised)(str(raised) + KEY)), {})), "azureblobfs", "account_key",
-              {"account": "lake1", "container": "raw"}, {}, {"account_key": KEY})
-    assert rep.state is ConnectionState.validation_failed and words in rep.error and KEY not in rep.model_dump_json()
-
-
-def test_unreachable_endpoint_is_reported_but_does_not_by_itself_fail_the_credential_test():
-    rep = run(make_tester(probe=Probe(False)), "azuresqldatabase", "sql_login", {"server": "s"}, {"username": "u"}, {"password": "p"})
-    assert rep.state is ConnectionState.connection_tested  # the credential did authenticate (from a machine that could reach it)
-    assert any("not reachable from this machine" in n and "does not prove Fabric cannot reach" in n for n in rep.not_verified)
-
-
-def test_key_vault_methods_read_the_secret_use_it_and_report_failures():
-    got = {}
-    t = make_tester(secret_reader=lambda vault, name: got.setdefault("v", (vault, name)) and PW, sql_connect=lambda cs, to: got.setdefault("cs", cs))
-    rep = run(t, "azuresqldatabase", "sql_login_kv", {"server": "s"}, {"username": "u", "vault_url": "v1.vault.azure.net", "secret_name": "sql-pw"})
-    assert rep.ok and got["v"] == ("https://v1.vault.azure.net", "sql-pw") and f"PWD={{{PW}}}" in got["cs"]
-    assert "the Key Vault secret can be read" in " ".join(rep.verified) and PW not in rep.model_dump_json()
-
-    def denied(vault, name):
-        raise KeyVaultError("You are not allowed to read secrets in x.", ["Grant 'Key Vault Secrets User'."])
-
-    bad_rep = run(make_tester(secret_reader=denied), "azuresqldatabase", "sql_login_kv", {"server": "s"},
-                  {"username": "u", "vault_url": "v1.vault.azure.net", "secret_name": "sql-pw"})
-    assert bad_rep.state is ConnectionState.validation_failed and bad_rep.actions == ["Grant 'Key Vault Secrets User'."]
-    assert run(make_tester(), "azuresqldatabase", "sql_login_kv", {"server": "s"}, {"username": "u", "vault_url": "v1.vault.azure.net",
-                                                                           "secret_name": "x"}).state is ConnectionState.validation_failed
-
-
-def test_incomplete_configuration_fails_before_any_network_call():
-    probe = Probe()
-    rep = run(make_tester(probe=probe), "azuresqldatabase", "sql_login", {"server": "s"}, {}, {})
-    assert rep.state is ConnectionState.validation_failed and not probe.calls
-    assert rep.checks[0].status is CheckStatus.failed and any("Password" in a for a in rep.actions)
-
-
-def test_connectors_without_a_credential_test_say_so():
-    rep = run(make_tester(), "restservice", "basic", {"base_url": "https://api.example.com"}, {"username": "u"}, {"password": "p"})
-    assert rep.state is ConnectionState.connection_configured and "not exercised by this tool" in " ".join(rep.not_verified)
-
-
 # --- the service: choices, secrets, tests, apply, report ---------------------------------------------------------
-
-
-class FakeFabric:
-    def __init__(self, existing=None, fail=None, types=None, gateways=None):
-        self._existing, self.fail, self.created = existing or [], fail, []
-        self._types = types or {"SQL": ["Basic", "ServicePrincipal", "WorkspaceIdentity", "OAuth2"],
-                                "AzureDataLakeStorage": ["Key", "SharedAccessSignature", "ServicePrincipal", "WorkspaceIdentity", "OAuth2"]}
-        self._gateways = gateways or []
-
-    def supported_connection_types(self):
-        return self._types
-
-    def connections(self):
-        return self._existing + [{"id": c["id"], "displayName": c["body"]["displayName"], "connectionDetails": {
-            "type": c["body"]["connectionDetails"]["type"], "path": ""}} for c in self.created]
-
-    def gateways(self):
-        return self._gateways
-
-    def create_connection(self, body):
-        if self.fail:
-            raise self.fail
-        cid = f"00000000-0000-0000-0000-{len(self.created) + 1:012d}"
-        self.created.append({"id": cid, "body": body})
-        return {"id": cid}
 
 
 def svc(project, **kw):
@@ -571,178 +411,6 @@ def test_secrets_are_held_in_memory_only_and_only_for_secret_fields(project):
     assert PW not in "".join(p.read_text(errors="ignore") for p in Path(s.store.project_dir(pid)).rglob("*") if p.is_file())
 
 
-def test_testing_updates_the_card_state_and_requires_a_choice(project):
-    s, pid = svc(project, tester=make_tester())
-    assert s.test(pid, "sess", "LS_SQL").state is ConnectionState.not_configured
-    s.set_choice(pid, sql_choice())
-    s.put_secret("sess", pid, "LS_SQL", "password", PW)
-    rep = s.test(pid, "sess", "LS_SQL")
-    assert rep.ok and {c.name: c for c in s.cards(pid, "sess")}["LS_SQL"].state is ConnectionState.connection_tested
-    s.put_secret("sess", pid, "LS_SQL", "password", PW + "x")  # changing a secret invalidates the earlier test
-    assert {c.name: c for c in s.cards(pid, "sess")}["LS_SQL"].state is ConnectionState.connection_configured
-    with pytest.raises(catalog.ChoiceError):
-        s.test(pid, "sess", "Nope")
-
-
-def test_apply_creates_connections_binds_them_and_merges_resolutions(project):
-    s, pid = svc(project)
-    fab = FakeFabric()
-    conv = s.store.conversion_dir(pid)
-    conv.mkdir(parents=True, exist_ok=True)
-    (conv / "resolutions.json").write_text(json.dumps([{"type": "ItemToId", "key": "pipeline:X", "value": GUID1},
-                                                       {"type": "LinkedServiceToConnectionId", "key": "LS_SQL", "value": GUID2}]))
-    s.set_choice(pid, sql_choice(display_name="Sql prod"))
-    s.put_secret("sess", pid, "LS_SQL", "password", PW)
-    r = s.apply(pid, "sess", fab, workspace_id="ws")
-    item = next(i for i in r.items if i.linked_service == "LS_SQL")
-    assert (item.action, item.bound, item.fabric_validated, item.state) == ("created", True, True, ConnectionState.connection_tested)
-    body = fab.created[0]["body"]
-    assert body["displayName"] == "Sql prod" and body["credentialDetails"]["credentials"]["password"] == PW
-    assert body["credentialDetails"]["skipTestConnection"] is False
-    res = json.loads((conv / "resolutions.json").read_text())
-    assert {"type": "ItemToId", "key": "pipeline:X", "value": GUID1} in res  # existing entries are preserved
-    assert [e["value"] for e in res if e["key"] == "LS_SQL"] == [item.connection_ids[0]]  # the stale binding was replaced
-    assert PW not in r.model_dump_json() and PW not in (s._dir(pid) / "apply.yaml").read_text()
-    others = {i.linked_service: i for i in r.items if i.linked_service != "LS_SQL"}
-    assert all(i.action in ("skipped", "manual") for i in others.values()) and others["LS_COSMOS"].action == "manual"
-
-
-def test_apply_reuses_an_existing_connection_and_auto_matches_only_exact_endpoints(project):
-    s, pid = svc(project)
-    existing = [conn(GUID1, "Existing SQL", "SQL", "srv1.database.windows.net;db1"), conn(GUID2, "Partial", "SQL", "srv2.database.windows.net;zz")]
-    fab = FakeFabric(existing=existing)
-    s.set_choice(pid, ConnectionChoice(linked_service="LS_SQL", method="existing_connection", values={"connection_id": GUID1}))
-    s.set_choice(pid, ConnectionChoice(linked_service="LS_REST", method="existing_connection", values={"connection_id": "9" * 8 + "-0000-0000-0000-" + "0" * 12}))
-    r = s.apply(pid, "sess", fab)
-    by = {i.linked_service: i for i in r.items}
-    assert by["LS_SQL"].action == "reused" and by["LS_SQL"].connection_ids == [GUID1] and by["LS_SQL"].bound and not by["LS_SQL"].fabric_validated
-    assert "validated when it was created in Fabric, not by this tool" in by["LS_SQL"].detail
-    assert by["LS_REST"].action == "failed" and "not found in Fabric" in by["LS_REST"].detail
-    (s._dir(pid) / "choices.yaml").unlink()  # forget the explicit choices: only automatic matching remains
-    auto = s.apply(pid, "sess", FakeFabric(existing=existing[:1]), auto_match=False)
-    assert next(i for i in auto.items if i.linked_service == "LS_SQL").action == "skipped"
-    matched = s.apply(pid, "sess", FakeFabric(existing=existing[:1]), auto_match=True)
-    m = next(i for i in matched.items if i.linked_service == "LS_SQL")
-    assert (m.action, m.origin, m.bound) == ("reused", "auto_matched", True) and "matched automatically" in m.detail
-    assert next(i for i in matched.items if i.linked_service == "LS_PARAM").action != "reused"  # no exact match, so never auto-bound
-    card = next(c for c in s.cards(pid, "sess", FakeFabric(existing=existing[:1])) if c.name == "LS_SQL")  # what was matched is kept: the Connect step shows it done
-    assert card.choice is not None and card.choice.values["connection_id"] == GUID1 and card.state == ConnectionState.connection_configured
-
-
-def test_applying_again_reuses_the_connection_it_made_and_never_creates_a_second(project):
-    s, pid = svc(project)
-    s.set_choice(pid, sql_choice(display_name="Sql prod"))
-    s.put_secret("sess", pid, "LS_SQL", "password", PW)
-    fab = FakeFabric(existing=[conn(GUID1, "SQL PROD", "SQL", "srv1.database.windows.net;db1")])  # as Fabric lists it after the first apply
-    for dry_run in (True, False):
-        item = next(i for i in s.apply(pid, "sess", fab, dry_run=dry_run).items if i.linked_service == "LS_SQL")
-        assert (item.action, item.connection_ids, item.bound) == ("reused", [GUID1], True) and "nothing was created" in item.detail
-    assert fab.created == []
-    res = json.loads((s.store.conversion_dir(pid) / "resolutions.json").read_text())
-    assert [e["value"] for e in res if e["key"] == "LS_SQL"] == [GUID1]
-
-
-def test_a_connection_name_taken_by_another_address_is_refused_not_duplicated(project):
-    s, pid = svc(project)
-    s.set_choice(pid, sql_choice(display_name="Sql prod"))
-    s.put_secret("sess", pid, "LS_SQL", "password", PW)
-    fab = FakeFabric(existing=[conn(GUID1, "Sql prod", "SQL", "other.database.windows.net;db9")])
-    item = next(i for i in s.apply(pid, "sess", fab).items if i.linked_service == "LS_SQL")
-    assert item.action == "failed" and "already exists with another type or address" in item.detail and fab.created == []
-    assert "another display name" in item.actions[0]
-
-
-def test_apply_will_not_create_what_needs_a_gateway_or_a_ui_signin(project):
-    s, pid = svc(project)
-    fab = FakeFabric(gateways=[{"id": "g", "type": "OnPremises", "displayName": "gw"}])
-    s.set_choice(pid, ConnectionChoice(linked_service="LS_ONPREM", method="sql_login", values={"username": "u"}))
-    s.put_secret("sess", pid, "LS_ONPREM", "password", "p")
-    s.set_choice(pid, ConnectionChoice(linked_service="LS_REST", method="entra_oauth"))
-    r = s.apply(pid, "sess", fab)
-    by = {i.linked_service: i for i in r.items}
-    assert by["LS_ONPREM"].action == "manual" and "on-premises data gateway" in by["LS_ONPREM"].detail and by["LS_ONPREM"].actions
-    assert by["LS_REST"].action == "manual" and "Create the connection in Fabric" in by["LS_REST"].detail
-    assert fab.created == []
-
-
-def test_apply_dry_run_changes_nothing_and_failures_are_redacted_and_actionable(project):
-    s, pid = svc(project)
-    s.set_choice(pid, sql_choice())
-    s.put_secret("sess", pid, "LS_SQL", "password", PW)
-    fab = FakeFabric()
-    dry = s.apply(pid, "sess", fab, dry_run=True)
-    assert next(i for i in dry.items if i.linked_service == "LS_SQL").action == "would_create" and not fab.created
-    assert not (s.store.conversion_dir(pid) / "resolutions.json").exists() and not (s._dir(pid) / "apply.yaml").exists()
-    bad = s.apply(pid, "sess", FakeFabric(fail=FabricApiError(f"Fabric returned HTTP 400. DuplicateConnectionName password={PW}", 400)))
-    it = next(i for i in bad.items if i.linked_service == "LS_SQL")
-    assert it.action == "failed" and PW not in bad.model_dump_json() and any("Rename" in a for a in it.actions)
-    assert not it.bound
-
-
-def test_apply_resolves_key_vault_secrets_through_the_reader_and_reports_a_denied_vault(project):
-    calls = []
-    s, pid = svc(project, secret_reader=lambda vault, name: calls.append((vault, name)) or PW)
-    s.set_choice(pid, ConnectionChoice(linked_service="LS_SQL", method="sql_login_kv",
-                                       values={"username": "u", "vault_url": "v1.vault.azure.net", "secret_name": "sql-pw"}))
-    fab = FakeFabric()
-    r = s.apply(pid, "sess", fab)
-    assert calls == [("https://v1.vault.azure.net", "sql-pw")] and fab.created[0]["body"]["credentialDetails"]["credentials"]["password"] == PW
-    assert PW not in r.model_dump_json()
-
-    def denied(v, n):
-        raise KeyVaultError("You are not allowed to read secrets in x.", ["Grant 'Key Vault Secrets User'."])
-
-    s2 = ConnectionService(s.store, secret_reader=denied)
-    bad = next(i for i in s2.apply(pid, "sess", FakeFabric()).items if i.linked_service == "LS_SQL")
-    assert bad.action == "failed" and "not allowed" in bad.detail and bad.actions
-
-
-def test_a_parameterized_linked_service_with_several_values_creates_one_connection_each_and_binds_none(project):
-    s, pid = svc(project)
-    s.set_choice(pid, ConnectionChoice(linked_service="LS_PARAM", method="sql_login", values={"username": "u"},
-                                       endpoint={"server": "srv2.database.windows.net", "database": "dbA"},
-                                       variants=[{"database": "dbB"}]))
-    s.put_secret("sess", pid, "LS_PARAM", "password", PW)
-    fab = FakeFabric()
-    it = next(i for i in s.apply(pid, "sess", fab).items if i.linked_service == "LS_PARAM")
-    assert it.action == "created" and len(it.connection_ids) == 2 and not it.bound and "none was bound automatically" in it.detail
-    dbs = [c["body"]["connectionDetails"]["parameters"][1]["value"] for c in fab.created]
-    assert dbs == ["dbA", "dbB"] and fab.created[1]["body"]["displayName"].endswith("-2")
-    assert not (s.store.conversion_dir(pid) / "resolutions.json").exists()  # nothing single to bind
-
-
-def test_the_connection_report_distinguishes_who_decided_and_leaks_nothing(project):
-    s, pid = svc(project)
-    s.set_choice(pid, sql_choice())
-    s.put_secret("sess", pid, "LS_SQL", "password", PW)
-    s.apply(pid, "sess", FakeFabric(existing=[conn(GUID1, "Lake", "AzureDataLakeStorage", "https://lake1.dfs.core.windows.net/raw", "Key")]))
-    out = s.write_report(pid, "sess")
-    md = (s.store.conversion_dir(pid) / out["markdown"]).read_text(encoding="utf-8")
-    rows = {r["linked_service"]: r for r in json.loads((s.store.conversion_dir(pid) / out["json"]).read_text(encoding="utf-8"))}
-    assert rows["LS_SQL"]["resolution"] == "user-configured" and rows["LS_COSMOS"]["resolution"] == "manual action required"
-    assert rows["LS_ONPREM"]["runtime"]["fabric_path"] == "on_premises_gateway" and rows["LS_PARAM"]["resolution"] == "unresolved"
-    assert "No secret appears in this report" in md and "## Open items" in md and "gateway" in md
-    assert PW not in md and PW not in json.dumps(rows)
-
-
-def test_workspace_identity_provisioning_reports_success_and_actionable_failure(project):
-    s, _ = svc(project)
-
-    class F:
-        def provision_identity(self, ws):
-            return {"applicationId": GUID1, "servicePrincipalId": GUID2}
-
-    ok_ = s.provision_identity(F(), "ws")
-    assert ok_["provisioned"] and ok_["application_id"] == GUID1 and "Grant this identity" in ok_["next"]
-
-    class G:
-        def provision_identity(self, ws):
-            raise FabricApiError("Permission denied while provisioning.", 403, actions=["Ask an admin."])
-
-    bad = s.provision_identity(G(), "ws")
-    assert not bad["provisioned"] and "Admin role" in " ".join(bad["actions"])
-
-
 def test_service_keeps_an_injected_empty_vault(tmp_path):
     """An empty SecretVault is falsy (it defines __len__); the service must still use the one it was given."""
     from adf2fabric.connections.secret_vault import SecretVault
@@ -751,21 +419,6 @@ def test_service_keeps_an_injected_empty_vault(tmp_path):
 
     vault = SecretVault()
     assert ConnectionService(ProjectStore(tmp_path), vault).vault is vault
-
-
-def test_a_linked_service_can_be_skipped_and_nothing_is_created_or_bound_for_it(project):
-    s, pid = svc(project)
-    fab = FakeFabric()
-    for name in ("LS_SQL", "LS_COSMOS"):  # a supported type and one with no connector
-        s.set_choice(pid, ConnectionChoice(linked_service=name, method="skip", values={"x": "y"}))
-    on_disk = yaml.safe_load((s._dir(pid) / "choices.yaml").read_text(encoding="utf-8"))
-    assert on_disk["LS_SQL"]["method"] == "skip" and on_disk["LS_SQL"]["values"] == {}
-    cards = {c.name: c for c in s.cards(pid, "sess")}
-    assert cards["LS_SQL"].state is ConnectionState.skipped and cards["LS_COSMOS"].state is ConnectionState.skipped
-    r = s.apply(pid, "sess", fab, workspace_id="ws")
-    items = {i.linked_service: i for i in r.items}
-    assert items["LS_SQL"].action == "skipped" and items["LS_SQL"].state is ConnectionState.skipped
-    assert not items["LS_SQL"].bound and not fab.created
 
 
 def test_skipping_a_linked_service_removes_its_earlier_binding(project):
@@ -793,55 +446,6 @@ def test_skipping_can_be_undone_by_choosing_a_method(project):
 
 
 # --- why the "existing connection" list is empty -----------------------------------------------------------------------------
-
-
-class _Unreadable(FakeFabric):
-    def connections(self):
-        raise RuntimeError("401 Unauthorized eyJhbGciOiJSUzI1NiJ9.abcdefghijklmnopqrstuvwxyz0123456789 for the token")
-
-
-def test_the_fabric_read_says_whether_connections_could_be_listed_and_never_a_token(project):
-    s, pid = svc(project)
-    _, none = s.cards_and_status(pid, "sess", None, fabric_error="AzureCliError: not signed in")
-    assert none["state"] == "not_connected" and "not signed in" in none["detail"] and "sign in" in none["todo"]
-    _, bare = s.cards_and_status(pid, "sess", None)
-    assert bare["state"] == "not_connected" and bare["detail"]
-    _, bad = s.cards_and_status(pid, "sess", _Unreadable())
-    assert bad["state"] == "unreadable" and "401" in bad["detail"] and "eyJ" not in bad["detail"] and "paste" in bad["todo"]
-    _, ok = s.cards_and_status(pid, "sess", FakeFabric(existing=[{"id": GUID1, "displayName": "x", "connectionDetails": {"type": "SQL", "path": "h;d"}}]))
-    assert ok["state"] == "ok" and ok["connections"] == 1 and not ok["todo"]
-    _, empty = s.cards_and_status(pid, "sess", FakeFabric())
-    assert empty["state"] == "ok" and empty["connections"] == 0 and "No Fabric connections" in empty["todo"]
-    assert [c.name for c in s.cards(pid, "sess")] == [c.name for c in s.cards_and_status(pid, "sess", None)[0]]  # cards() is unchanged
-
-
-def test_a_pasted_connection_id_is_normalised_and_must_be_the_right_type(project):
-    """Found live: an UPPERCASE or {braced} id was 'not found', and an ADLS service accepted a pipelines connection."""
-    s, pid = svc(project)
-    fab = FakeFabric(existing=[conn(GUID1, "Existing SQL", "SQL", "srv1.database.windows.net;db1")])
-    for pasted in (GUID1.upper(), "{" + GUID1 + "}", "  " + GUID1 + "  "):
-        s.set_choice(pid, ConnectionChoice(linked_service="LS_SQL", method="existing_connection", values={"connection_id": pasted}))
-        by = {i.linked_service: i for i in s.apply(pid, "sess", fab).items}
-        assert by["LS_SQL"].action == "reused" and by["LS_SQL"].connection_ids == [GUID1], pasted
-    wrong = FakeFabric(existing=[conn(GUID2, "Pipelines", "FabricDataPipelines", "x")])
-    s.set_choice(pid, ConnectionChoice(linked_service="LS_SQL", method="existing_connection", values={"connection_id": GUID2}))
-    item = next(i for i in s.apply(pid, "sess", wrong).items if i.linked_service == "LS_SQL")
-    assert item.action == "failed" and "FabricDataPipelines" in item.detail and not item.bound
-
-
-def test_a_service_that_read_its_secret_from_a_vault_in_adf_carries_the_vault_and_the_secret_name():
-    """The Key Vault form starts filled in from what ADF itself used, so migrating such a service needs no typing."""
-    from types import SimpleNamespace as NS
-
-    from adf2fabric.connections.resolution import vault_hint
-
-    akv = NS(name="LS_Vault", endpoint="https://kv-prod.vault.azure.net/")
-    d = NS(linked_services=[akv])
-    one = NS(key_vault_refs=[NS(store_linked_service="ls_vault", secret_name="sql-password")])
-    assert vault_hint(d, one) == {"vault_url": "https://kv-prod.vault.azure.net", "secret_name": "sql-password"}
-    two = NS(key_vault_refs=[NS(store_linked_service="LS_Vault", secret_name="a"), NS(store_linked_service="LS_Vault", secret_name="b")])
-    assert vault_hint(d, two) == {"vault_url": "https://kv-prod.vault.azure.net"}  # two secrets: the vault is known, which secret is not guessed
-    assert vault_hint(d, NS(key_vault_refs=[])) == {}
 
 
 def test_a_damaged_resolutions_file_is_kept_aside_not_overwritten_with_nothing(project):

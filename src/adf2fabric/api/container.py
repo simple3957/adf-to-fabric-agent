@@ -1,8 +1,7 @@
 """The API's shared state: providers, per-session selections, the secret vault, jobs and the project store.
 
 One container per server. ``Session`` holds what the UI has selected (source, destination) and nothing sensitive; secrets live
-only in the container's ``SecretVault``. Live and Demo modes differ only in which providers the container builds, so every
-route is identical in both.
+only in the container's ``SecretVault``. Every call goes to the real Azure, Fabric and Git services.
 """
 
 from __future__ import annotations
@@ -28,7 +27,6 @@ from adf2fabric.project.store import ProjectStore
 
 FABRIC_RESOURCE = cloud.FABRIC_ENDPOINT
 STORAGE_RESOURCE = "https://storage.azure.com/"  # the audience ADLS Gen2 and OneLake both accept
-MODES = ("live", "demo")
 
 
 @dataclass
@@ -57,13 +55,12 @@ class Settings:
 
 
 class Container:
-    def __init__(self, settings: Optional[Settings] = None, *, store: Optional[ProjectStore] = None, mode: str = "live",
+    def __init__(self, settings: Optional[Settings] = None, *, store: Optional[ProjectStore] = None,
                  azure: Optional[AzureCliProvider] = None, fabric_cli: Optional[FabricCliProvider] = None,
                  git: Optional[GitProvider] = None, tester: Optional[ConnectorTester] = None,
                  vault_reader: Optional[Callable[[str, str], str]] = None,
-                 fabric_factory: Optional[Callable[["Session", str], FabricService]] = None, fabric_http: Any = None):
+                 fabric_factory: Optional[Callable[["Session", str], FabricService]] = None):
         self.settings = settings or Settings()
-        self.mode = mode
         self.store = store or ProjectStore(self.settings.projects_dir or projects_root(load_config()))
         self.azure = azure or AzureCliProvider()
         self.fabric_cli = fabric_cli or FabricCliProvider()
@@ -73,7 +70,6 @@ class Container:
         self.sessions: dict[str, Session] = {}
         self._vault_reader = vault_reader
         self._fabric_factory = fabric_factory
-        self.fabric_http = fabric_http  # demo only: an in-memory Fabric REST stand-in; None means the real service
         self.connections = ConnectionService(self.store, self.vault, tester or ConnectorTester(secret_reader=self.read_vault_secret),
                                              secret_reader=self.read_vault_secret)
         self.upload_dir = Path(tempfile.gettempdir()) / "adf2fabric-uploads"
@@ -101,9 +97,7 @@ class Container:
 
     # ---- Fabric REST (deploy, verify, validation, provisioning) ----------------------------------------------------------
     def fabric_token(self, session: Session) -> str:
-        """A Fabric token for the session's destination account. Demo mode returns a placeholder that only its own stand-in accepts."""
-        if self.fabric_http is not None:
-            return "demo-token"
+        """A Fabric token for the session's destination account."""
         dest = session.destination
         return self.azure.token(tenant=dest.get("tenant_id"), account=dest.get("account"), resource=FABRIC_RESOURCE)
 
@@ -120,9 +114,9 @@ class Container:
         from adf2fabric.agent.provisioning.transport import ArmGateway, FabricGateway
 
         dest = session.destination
-        fab = FabricGateway(lambda: self.fabric_token(session), session=self.fabric_http)
+        fab = FabricGateway(lambda: self.fabric_token(session))
         arm = None
-        if need_arm and self.fabric_http is None:
+        if need_arm:
             arm = ArmGateway(lambda: self.azure.token(tenant=dest.get("tenant_id"), account=dest.get("account"), resource=cloud.ARM_RESOURCE))
         return fab, arm
 

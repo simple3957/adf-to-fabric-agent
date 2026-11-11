@@ -8,17 +8,15 @@ import pathlib
 
 import pytest
 import yaml
-from click.testing import CliRunner
 
 import adf2fabric.agent.reconstruction as rpkg
-from adf2fabric import cli as cli_mod
 from adf2fabric.agent.conversion import ConversionAgent, ConversionRequest
 from adf2fabric.agent.reconstruction.agent import ReconstructionAgent
 from adf2fabric.agent.reconstruction.models import ReconstructionRequest
 from adf2fabric.project.conversion import ConversionStatus as S
 from adf2fabric.project.reconstruction import Completeness, ProjectReconstruction, ReconstructionOutcome
 from tests.reconstruction_support import (
-    LOW, act, blockers, completed, copy_activity, dep, expr, fingerprint, make_project, pl, proposals, reconstruct,
+    LOW, act, blockers, copy_activity, dep, expr, fingerprint, make_project, pl, proposals, reconstruct,
     ref, with_estate,
 )
 from tests.test_reconstruction_patterns import FILES, inc_pipeline
@@ -263,26 +261,6 @@ def test_unreadable_files_make_the_outcome_incomplete(tmp_path):
 # =============================================================================
 # CLI
 # =============================================================================
-
-
-def test_cli_reconstruct_then_convert_applying_it(tmp_path, monkeypatch):
-    store = make_project(tmp_path, with_estate(inc_pipeline(), **FILES))
-    monkeypatch.setattr(cli_mod, "projects_root", lambda config: store.projects_root)
-    out = CliRunner().invoke(cli_mod.cli, ["reconstruct", "--project", PID])
-    assert out.exit_code == 0, out.output
-    assert "RECONSTRUCTION (original source is never modified)" in out.output and "reconstructable" in out.output
-    assert "convert --apply-reconstruction" in out.output and store.has_reconstruction(PID)
-    conv = CliRunner().invoke(cli_mod.cli, ["convert", "--project", PID, "--apply-reconstruction"])
-    assert conv.exit_code == 0, conv.output
-    assert "inferred elements applied: P-0001" in conv.output
-
-
-def test_cli_reconstruct_fails_cleanly_without_discovery(tmp_path, monkeypatch):
-    store = make_project(tmp_path, with_estate(inc_pipeline(), **FILES))
-    store.adf_semantic_discovery_path(PID).unlink()
-    monkeypatch.setattr(cli_mod, "projects_root", lambda config: store.projects_root)
-    out = CliRunner().invoke(cli_mod.cli, ["reconstruct", "--project", PID])
-    assert out.exit_code == 1 and "Semantic Discovery has not run" in out.output
 
 
 # =============================================================================

@@ -105,12 +105,6 @@ class ApiClient:
     def clear_token(self) -> None:
         self._token = None
 
-    def get_mode(self) -> str:
-        return self._get("/mode")["mode"]
-
-    def set_mode(self, mode: str) -> str:
-        return self._post("/mode", {"mode": mode})["mode"]
-
     def session(self) -> dict:
         return self._get("/session")
 

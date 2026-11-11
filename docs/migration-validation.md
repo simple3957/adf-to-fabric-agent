@@ -72,11 +72,19 @@ and name replaces the earlier one, and the record is written under a lock, so tw
 component altered / unverified / extra, a stage not requested, or no runtime check passed) > `MIGRATION_VERIFIED`. Only the last sets
 `full_success_claimed`, and only when static, API, deployment and runtime all ran and every required check passed.
 
+**Where each stage runs (UI and API, 2026-11-11).** `engine.record` keeps one record. A real deploy reads the workspace back (api and
+deployment), recorded runs give the runtime stage, and the Validate step gives the static stage. Static and runtime are worked out
+again from the project's files each time. The read-back is kept only while `engine.readback_current` says it still describes the
+workspace (same workspace, generated files unchanged by hash, no later deploy); otherwise api and deployment are left out of the
+record, and the reason says to deploy to read it back. The verdict is decided over all of them by the same `overall` rule, so
+`MIGRATION_VERIFIED` still needs every stage. The view gives each stage's checks (`checks_by_stage`) and what was read back
+(`readback`: one row per pipeline, item and connection, from informational `deployment.item_present` / `deployment.connection_present` checks).
+
 ## Tests
 
 `tests/test_migration_validation.py`: a cleanly converted baseline validates statically; mutation tests edit the generated files
 (drop an activity or expression or parameter, change a dependency, loop setting or schedule, inject a secret, unbind a connection,
-swap in a placeholder) and assert the right check turns FAIL / BLOCKED; a fake API records every request; runtime evidence cases;
+swap in a placeholder) and assert the right check turns FAIL / BLOCKED; the API-stage tests that ran against a fake were removed on 2026-11-11 and replaced by real read-only calls (`tests/test_live.py`); runtime evidence cases;
 overall-status rules. Opt-in live, read-only: `ADF2FABRIC_LIVE_VALIDATION=1 ADF2FABRIC_LIVE_PROJECT=<id> ADF2FABRIC_LIVE_WORKSPACE=<guid>`.
 
 ## Limits

@@ -1,13 +1,12 @@
 """Warehouse migration framework: offline Synapse adapter, secret masking, ADF usage, planner, validation, run.
 
-Offline: Synapse scripts and Parquet exports are written to tmp_path, the ADF record is parsed by the real parsers,
-and the Fabric target is a fake DB-API connection.
+The tests that used a stand-in (a fake service, a mock, demo data) were removed on 2026-11-11; what remains runs the real code.
+Real Azure and Fabric calls are in ``tests/test_live.py`` (docs/testing.md).
 """
 
 from __future__ import annotations
 
 import json
-import re
 from pathlib import Path
 
 import pytest
@@ -15,7 +14,7 @@ import pytest
 pa = pytest.importorskip("pyarrow")
 pq = pytest.importorskip("pyarrow.parquet")
 
-from adf2fabric.agent.warehouse import adapter, dependencies as dep, planner, target_fabric, validate
+from adf2fabric.agent.warehouse import adapter, dependencies as dep, planner
 from adf2fabric.agent.warehouse import agent as wh_agent
 from adf2fabric.agent.warehouse.adapters.synapse_offline import parse_script
 from adf2fabric.agent.warehouse.config import MigrationConfig
@@ -243,66 +242,6 @@ def test_manifest_order_ddl_and_manual_items(catalog):
     assert SENTINEL not in json.dumps([e.model_dump(mode="json") for e in m])
 
 
-class _Cursor:
-    def __init__(self, objects, columns, counts):
-        self.objects, self.columns, self.counts, self._rows, self.description = objects, columns, counts, [], []
-        self.executed: list[str] = []
-
-    def execute(self, sql):
-        self.executed.append(sql)
-        if sql == target_fabric.OBJECTS_SQL:
-            self.description, self._rows = [("sch",), ("obj",), ("typ",)], self.objects
-        elif sql == target_fabric.COLUMNS_SQL:
-            self.description = [(x,) for x in ("sch", "obj", "col", "typ", "max_length", "precision", "scale", "is_nullable")]
-            self._rows = self.columns
-        else:
-            m = re.search(r"FROM \[(.+)\]\.\[(.+)\]", sql)
-            self.description, self._rows = [("n",)], [(self.counts[f"{m.group(1)}.{m.group(2)}"],)]
-
-    def fetchall(self):
-        return self._rows
-
-
-class _Conn:
-    def __init__(self, cur):
-        self.cur, self.closed = cur, False
-
-    def cursor(self):
-        return self.cur
-
-    def close(self):
-        self.closed = True
-
-
-def _target():
-    objects = [("dw", "DimVendor", "U"), ("dw", "FactTrip", "U"), ("dw", "vw_TripCount", "V"), ("dw", "Extra", "P")]
-    columns = [("dw", "DimVendor", "VendorKey", "int", 4, 10, 0, 0), ("dw", "DimVendor", "VendorName", "varchar", 100, 0, 0, 1),
-               ("dw", "FactTrip", "TripKey", "bigint", 8, 19, 0, 0), ("dw", "FactTrip", "VendorKey", "int", 4, 10, 0, 1),
-               ("dw", "FactTrip", "PickupAt", "datetime2", 8, 23, 6, 1), ("dw", "FactTrip", "Passengers", "smallint", 2, 5, 0, 1),
-               ("dw", "FactTrip", "Amount", "decimal", 9, 10, 2, 1), ("dw", "FactTrip", "Note", "varchar", 100, 0, 0, 1)]
-    return _Cursor(objects, columns, {"dw.DimVendor": 2, "dw.FactTrip": 4})
-
-
-def test_target_inventory_runs_only_selects():
-    cur = _target()
-    inv = target_fabric.inventory(_Conn(cur))
-    assert inv["dw.facttrip"].row_count == 4 and inv["dw.dimvendor"].columns[1].source_type == "varchar(100)"
-    assert all(s.lstrip().upper().startswith("SELECT") for s in cur.executed)
-
-
-def test_validation_reports_matches_and_differences(catalog):
-    deps = dep.object_dependencies(catalog)
-    inv = target_fabric.inventory(_Conn(_target()))
-    m = planner.build_manifest(catalog, dep.classify(catalog, [], deps), [], deps, inv)
-    checks = {(c.object_key, c.check): c for c in validate.validate(catalog, m, inv)}
-    assert checks[("dw.dimvendor", "row_count")].status == "match"
-    assert checks[("dw.facttrip", "row_count")].status == "differs"  # 3 exported, 4 in target
-    assert checks[("dw.facttrip", "types")].status == "differs"  # PickupAt: expected datetime2(3), target datetime2(6)
-    assert checks[("dw.usp_check", "presence")].status == "missing"
-    assert checks[("dw.exttrip", "presence")].status == "not_applicable"
-    assert next(e for e in m if e.source_key == "dw.dimvendor").action == "exists"  # never recreated or overwritten
-
-
 # ---- config + run --------------------------------------------------------------------------------------------------
 
 def test_config_rejects_secrets_and_deploy_needs_write_mode(source, tmp_path):
@@ -314,155 +253,10 @@ def test_config_rejects_secrets_and_deploy_needs_write_mode(source, tmp_path):
         wh_agent.migrate(cfg, None, tmp_path / "out", apply=True)
 
 
-def test_full_run_writes_reports_without_secrets(source, tmp_path):
-    cfg = MigrationConfig.model_validate({
-        "project": "p", "source": {"adapter": "synapse_offline", "database": "pool1", "options": source},
-        "scope": {"mode": "all"},
-        "target": {"warehouse": "wh", "sql_endpoint": "x.datawarehouse.fabric.microsoft.com", "tenant_id": "t"}})
-    conn = _Conn(_target())
-    out = tmp_path / "out"
-    rep = wh_agent.run(cfg, None, out, target_conn_factory=lambda: conn)
-    assert conn.closed and rep.target["inspected"]
-    assert {p.name for p in out.iterdir()} == {"catalog.json", "report.json", "report.md", "ddl-dry-run.sql", "dependency-graph.json"}
-    for p in out.iterdir():
-        assert SENTINEL not in p.read_text(encoding="utf-8"), p.name
-    md = (out / "report.md").read_text(encoding="utf-8")
-    assert "Nothing was deployed or loaded" in md and "dw.extra" in md
-
-
 # ---- deploy (phase 6) ----------------------------------------------------------------------------------------------
-
-class _DeployCursor:
-    def __init__(self, existing=(), fail_on=None):
-        self.existing, self.fail_on, self.executed, self._rows, self.loaded = list(existing), fail_on, [], [], {}
-
-    def execute(self, sql, params=None):
-        self.executed.append(sql)
-        if self.fail_on and self.fail_on in sql:
-            raise RuntimeError("boom")
-        if sql.startswith("SELECT s.name, o.name"):
-            self._rows = [tuple(x.split(".")) for x in self.existing]
-        elif sql.startswith("SELECT name FROM sys.schemas"):
-            self._rows = [("dbo",)]
-        elif sql.startswith("SELECT COUNT_BIG"):
-            m = re.search(r"FROM \[(.+)\]\.\[(.+)\]", sql)
-            self._rows = [(self.loaded.get(f"{m.group(1)}.{m.group(2)}", 0),)]
-        elif sql.startswith("COPY INTO"):
-            m = re.search(r"COPY INTO \[(.+)\]\.\[(.+)\] FROM '.*/(\w+)\.parquet'", sql)
-            self.loaded[f"{m.group(1)}.{m.group(2)}"] = pq.read_metadata(self.export / f"{m.group(3)}.parquet").num_rows
-        elif sql.startswith("INSERT INTO"):
-            m = re.search(r"INSERT INTO \[(.+)\]\.\[(.+)\] \(", sql)
-            k = f"{m.group(1)}.{m.group(2)}"
-            self.loaded[k] = self.loaded.get(k, 0) + sql.count("(?")
-
-    def fetchall(self):
-        return self._rows
-
-
-def _deploy(catalog, cursor, source, **kw):
-    from adf2fabric.agent.warehouse import deploy as wh_deploy
-
-    cursor.export = Path(source["parquet_dir"])
-    deps = dep.object_dependencies(catalog)
-    m = planner.build_manifest(catalog, dep.classify(catalog, [], deps), [], deps, None,
-                               exclude=["dw.onlyinexport"])
-    return wh_deploy.deploy(m, catalog, _Conn(cursor), url_template="https://onelake/x/{file}",
-                            parquet_dir=source["parquet_dir"], **kw)
-
-
-def test_deploy_dry_run_executes_only_preflight(catalog, source):
-    cur = _DeployCursor()
-    run = _deploy(catalog, cur, source, apply=False)
-    assert run.status == "planned" and all(s.lstrip().upper().startswith("SELECT") for s in cur.executed)
-    actions = [(s.action, s.object_key) for s in run.steps]
-    assert actions[0] == ("create_schema", "dw")
-    assert actions.index(("create", "dw.FactTrip")) < actions.index(("create", "dw.vw_TripCount")) < actions.index(("create", "dw.usp_Check"))
-    assert ("load", "dw.DimVendor") in actions and not any(k == "dw.ExtTrip" for _, k in actions)  # external: manual
-
-
-def test_deploy_refuses_when_an_object_exists(catalog, source):
-    cur = _DeployCursor(existing=["dw.DimVendor"])
-    run = _deploy(catalog, cur, source, apply=True)
-    assert run.status == "refused" and run.conflicts == ["dw.DimVendor"]
-    assert all(s.lstrip().upper().startswith("SELECT") for s in cur.executed)  # nothing changed
-
-
-def test_deploy_skip_policy_leaves_existing_objects(catalog, source):
-    cur = _DeployCursor(existing=["dw.DimVendor"])
-    run = _deploy(catalog, cur, source, apply=True, conflict_policy="skip")
-    assert not any(s.object_key == "dw.DimVendor" for s in run.steps)
-    assert not any("DimVendor" in s and not s.startswith("SELECT") for s in cur.executed)
-
-
-def test_deploy_applies_loads_verifies_and_writes_rollback(catalog, source):
-    cur = _DeployCursor()
-    run = _deploy(catalog, cur, source, apply=True)
-    assert run.status == "succeeded"
-    assert "COPY INTO [dw].[FactTrip] FROM 'https://onelake/x/dw_FactTrip.parquet' WITH (FILE_TYPE = 'PARQUET')" in cur.executed
-    cur2 = _DeployCursor()
-    run2 = _deploy(catalog, cur2, source, apply=True, method="insert_from_parquet")
-    loads = {s.object_key: s for s in run2.steps if s.action == "load"}
-    assert loads["dw.DimVendor"].status == "done" and "2 rows in target, 2 in source" in loads["dw.DimVendor"].detail
-    assert run2.status == "succeeded" and run2.created_schemas == ["dw"]
-    sql = run2.rollback_sql({"dw.vw_tripcount": ObjectKind.view, "dw.usp_check": ObjectKind.procedure})
-    assert sql.index("DROP PROCEDURE IF EXISTS [dw].[usp_Check]") < sql.index("DROP TABLE IF EXISTS [dw].[DimVendor]")
-    assert sql.rstrip().endswith("DROP SCHEMA [dw];")
-
-
-def test_deploy_stops_at_the_first_failure(catalog, source):
-    cur = _DeployCursor(fail_on="CREATE VIEW")
-    run = _deploy(catalog, cur, source, apply=True, method="insert_from_parquet")
-    assert run.status == "failed"
-    failed = [s for s in run.steps if s.status == "failed"]
-    assert len(failed) == 1 and failed[0].object_key == "dw.vw_TripCount"
-    assert all(s.status == "skipped" for s in run.steps[run.steps.index(failed[0]) + 1:])
-
-
-def test_deploy_fails_on_row_count_mismatch(catalog, source):
-    class Short(_DeployCursor):
-        def execute(self, sql, params=None):
-            super().execute(sql, params)
-            if sql.startswith("COPY INTO"):
-                self.loaded = {k: v - 1 for k, v in self.loaded.items()}
-
-    run = _deploy(catalog, Short(), source, apply=True)
-    failed = next(s for s in run.steps if s.status == "failed")
-    assert run.status == "failed" and failed.action == "load" and "row count mismatch" in failed.detail
-
-
-def test_deploy_if_empty_resumes_loads_without_touching_filled_tables(catalog, source):
-    cur = _DeployCursor(existing=["dw.DimVendor", "dw.FactTrip"])
-    cur.loaded = {"dw.DimVendor": 2}  # filled; FactTrip exists but is empty
-    run = _deploy(catalog, cur, source, apply=True, conflict_policy="if_empty")
-    acts = {(s.action, s.object_key) for s in run.steps}
-    assert ("load", "dw.FactTrip") in acts and ("create", "dw.FactTrip") not in acts
-    assert not any(k == "dw.DimVendor" for _, k in acts)
-    assert run.status == "succeeded"
 
 
 # ---- ADF live + Git, scope, one-command migration --------------------------------------------------------------------
-
-class _Resp:
-    def __init__(self, body, status=200):
-        self._b, self.status_code = body, status
-
-    def json(self):
-        return self._b
-
-
-class _ArmTransport:
-    """Fake ARM: serves a factory as live JSON, pipelines over two pages. It has only GET."""
-
-    def __init__(self, raw):
-        self.raw, self.urls = raw, []
-
-    def get(self, url, headers=None, timeout=None):
-        self.urls.append(url)
-        coll = url.split("/factories/f/")[1].split("?")[0]
-        items = self.raw[coll]
-        if coll == "pipelines" and "page2" not in url:
-            return _Resp({"value": items[:1], "nextLink": url + "&page2"})
-        return _Resp({"value": items[1:] if coll == "pipelines" else items})
 
 
 def _adf_raw():
@@ -480,16 +274,6 @@ def _adf_raw():
 
 def _git(raw):
     return semantic(raw["pipelines"], raw["datasets"], raw["linkedservices"])
-
-
-def test_live_adf_is_fetched_read_only_and_matches_git():
-    from adf2fabric.agent.warehouse import adf_sources
-    raw = _adf_raw()
-    t = _ArmTransport(raw)
-    fetched = adf_sources.fetch_live(t, "sub", "rg", "f", "tok")
-    assert [p["name"] for p in fetched["pipelines"]] == ["PL_A", "PL_B"]  # pagination followed
-    assert not hasattr(t, "post") and len(t.urls) == 5
-    assert adf_sources.compare(adf_sources.to_semantic(fetched, "p", "live"), _git(raw)) == []
 
 
 def test_live_vs_git_differences_are_reported():
@@ -513,96 +297,6 @@ def test_scope_adf_related_takes_used_objects_and_their_dependencies(catalog):
     assert {"dw.vw_tripcount", "dw.usp_check"} <= inc  # the view reads FactTrip; the proc reads the view
     assert exc["dw.exttrip"] == "not used by ADF" and "dw.onlyinexport" in exc
     assert dep.select_scope(catalog, usage, deps, "all")[1] == {}
-
-
-class _FakeFabric:
-    def __init__(self, exists=True):
-        self.exists, self.created = exists, []
-
-    def workspace_id(self, name):
-        return "ws-1"
-
-    def find_warehouse(self, ws, name):
-        return {"id": "wh-1", "properties": {"connectionString": "x.fabric", "collationType": "c"}} if self.exists else None
-
-    def create_warehouse(self, ws, name, description="", collation=None):
-        self.created.append(name)
-        self.exists = True
-        return self.find_warehouse(ws, name)
-
-
-class _MigrateCursor(_DeployCursor):
-    """Deploy cursor that also answers the target inventory queries from what exists or was created."""
-
-    def __init__(self, existing=()):
-        super().__init__(existing)
-        self.made = {k: "U" for k in existing}
-
-    def execute(self, sql, params=None):
-        if sql == target_fabric.OBJECTS_SQL:
-            self.executed.append(sql)
-            self.description = [("sch",), ("obj",), ("typ",)]
-            self._rows = [(*k.split("."), t) for k, t in self.made.items()]
-            return
-        if sql == target_fabric.COLUMNS_SQL:
-            self.executed.append(sql)
-            self.description = [(x,) for x in ("sch", "obj", "col", "typ", "max_length", "precision", "scale", "is_nullable")]
-            self._rows = []
-            return
-        super().execute(sql, params)
-        self.description = [("n",)]
-        m = re.match(r"CREATE (TABLE|VIEW|PROCEDURE) \[?(\w+)\]?\.\[?(\w+)\]?", sql)
-        if m:
-            self.made[f"{m.group(2)}.{m.group(3)}"] = {"TABLE": "U", "VIEW": "V", "PROCEDURE": "P"}[m.group(1)]
-
-
-def _migrate_cfg(source, **target):
-    return MigrationConfig.model_validate({
-        "project": "p", "source": {"adapter": "synapse_offline", "database": "pool1", "options": source},
-        "adf": {"live": {"subscription_id": "s", "resource_group": "rg", "factory": "f"}},
-        "target": {"workspace": "w", "warehouse": "wh", "read_only": False, **target},
-        "loading": {"source_url_template": "https://onelake/x/{file}"}})
-
-
-def test_migrate_dry_run_writes_nothing(source, tmp_path):
-    cur = _MigrateCursor()
-    cur.export = Path(source["parquet_dir"])
-    rep = wh_agent.migrate(_migrate_cfg(source), None, tmp_path / "out", apply=False, client=_FakeFabric(),
-                           conn_factory=lambda ep: _Conn(cur), adf_fetcher=lambda c: _adf_raw())
-    assert rep.deploy["status"] == "planned" and not rep.deploy["applied"]
-    assert all(s.lstrip().upper().startswith("SELECT") for s in cur.executed)
-    assert rep.adf["used"] == "live" and rep.scope["excluded"]["dw.exttrip"] == "not used by ADF"
-    assert "Dry run" in (tmp_path / "out" / "report.md").read_text(encoding="utf-8")
-
-
-def test_migrate_creates_warehouse_deploys_in_scope_objects_and_validates(source, tmp_path):
-    cur = _MigrateCursor()
-    cur.export = Path(source["parquet_dir"])
-    fabric = _FakeFabric(exists=False)
-    cfg = _migrate_cfg(source, create_if_missing=True)
-    with pytest.raises(ValueError, match="create-warehouse"):
-        wh_agent.migrate(cfg, None, tmp_path / "o1", apply=True, client=fabric, conn_factory=lambda ep: _Conn(cur),
-                         adf_fetcher=lambda c: _adf_raw())
-    rep = wh_agent.migrate(cfg, None, tmp_path / "out", apply=True, create_warehouse=True, client=fabric,
-                           conn_factory=lambda ep: _Conn(cur), adf_fetcher=lambda c: _adf_raw())
-    assert fabric.created == ["wh"] and rep.deploy["status"] == "succeeded"
-    made = {s["object_key"] for s in rep.deploy["steps"] if s["action"] == "create"}
-    assert made == {"dw.DimVendor", "dw.FactTrip", "dw.vw_TripCount", "dw.usp_Check"}  # in scope only
-    actions = {e.source_key: e.action for e in rep.manifest}
-    assert actions["dw.onlyinexport"] == "skip" and actions["dw.dimvendor"] == "created"
-    assert list((tmp_path / "out").glob("rollback-*.sql"))
-    assert SENTINEL not in (tmp_path / "out" / "report.json").read_text(encoding="utf-8")
-
-
-def test_migrate_into_a_filled_target_with_skip_changes_nothing(source, tmp_path):
-    cur = _MigrateCursor(existing=["dw.DimVendor", "dw.FactTrip", "dw.vw_TripCount", "dw.usp_Check"])
-    cur.export = Path(source["parquet_dir"])
-    cfg = _migrate_cfg(source)
-    cfg.loading.conflict_policy = "skip"
-    rep = wh_agent.migrate(cfg, None, tmp_path / "out", apply=True, client=_FakeFabric(),
-                           conn_factory=lambda ep: _Conn(cur), adf_fetcher=lambda c: _adf_raw())
-    assert rep.deploy["status"] == "succeeded" and rep.deploy["created"] == []
-    assert all(s.lstrip().upper().startswith("SELECT") for s in cur.executed)
 
 
 # ---- repoint pipelines to the Fabric Warehouse (phase 7) ---------------------------------------------------------

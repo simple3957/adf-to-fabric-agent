@@ -15,7 +15,6 @@ import json
 import subprocess
 from pathlib import Path
 
-import pytest
 
 import adf2fabric.agent.discovery.agent as agent_mod
 import adf2fabric.agent.discovery.repository.artifacts as artifacts_mod
@@ -296,24 +295,6 @@ def test_missing_source_dir(tmp_path):
 # --- 12. unreadable file behavior -------------------------------------------
 
 
-def test_unreadable_file(tmp_path, monkeypatch):
-    store, pid = _setup(tmp_path, ADF_FILES)
-    real = hashing_mod.sha256_file
-
-    def flaky(path: Path):
-        if path.name == "README.md":
-            raise PermissionError("denied")
-        return real(path)
-
-    monkeypatch.setattr(hashing_mod, "sha256_file", flaky)
-    d = _run(store, pid).discovery
-    rec = next(f for f in d.files if f.path == "README.md")
-    assert rec.status == DiscoveryStatus.failed
-    assert rec.sha256 is None
-    assert d.complete is False
-    assert d.failed_count >= 1
-
-
 # --- 13. malformed candidate JSON -------------------------------------------
 
 
@@ -416,24 +397,6 @@ def test_phase_agent_is_orchestration_only():
         "json.load", "scan_repository", "extract_candidates", "get_service_properties",
     ):
         assert forbidden not in src, f"phase agent must not contain {forbidden!r}"
-
-
-def test_phase_agent_delegates_to_injected_discoverers():
-    class _FakeDiscoverer:
-        def __init__(self):
-            self.calls = []
-
-        def run(self, request):
-            self.calls.append(request)
-            return f"handled:{request}"
-
-    repo, adls = _FakeDiscoverer(), _FakeDiscoverer()
-    agent = DiscoveryAgent(
-        store=None, repository_discoverer=repo, adls_discoverer=adls
-    )
-    assert agent.discover_repository("REQ_R") == "handled:REQ_R"
-    assert agent.discover_adls("REQ_A") == "handled:REQ_A"
-    assert repo.calls == ["REQ_R"] and adls.calls == ["REQ_A"]
 
 
 def test_no_assessment_fields():

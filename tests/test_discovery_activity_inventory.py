@@ -22,7 +22,6 @@ from adf2fabric.agent.discovery import DiscoveryAgent, DiscoveryRequest
 from adf2fabric.agent.discovery.adf_semantic import (
     AdfSemanticDiscoverer,
     AdfSemanticDiscoveryRequest,
-    discoverer as discoverer_mod,
     parser_pipelines as pp,
 )
 from adf2fabric.agent.discovery.adf_semantic.activity_registry import ACTIVITY_REGISTRY
@@ -497,39 +496,6 @@ def test_every_candidate_is_a_record_or_a_ledger_entry_even_when_the_source_is_d
     assert seen == _record_paths(d) | ledger and not _record_paths(d) & ledger
 
 
-def test_an_unreadable_file_is_reported_as_unreadable_without_a_stack_trace(tmp_path, monkeypatch):
-    store, pid = _project(tmp_path, {k: v for k, v in _fixture_files().items() if k.startswith(("pipeline/PL_Child", "pipeline/PL_Ping", "dataset", "linkedService"))})
-    target = (store.source_dir(pid) / "pipeline" / "PL_Ping.json").resolve()
-    real_open = Path.open
-
-    def guarded(self, *a, **k):
-        if Path(self).resolve() == target:
-            raise PermissionError(13, "denied by the test")
-        return real_open(self, *a, **k)
-
-    monkeypatch.setattr(Path, "open", guarded)
-    d = _discover(store)
-    entry = next(u for u in d.unprocessed_artifacts if u.path == "pipeline/PL_Ping.json")
-    assert entry.reason == "unreadable" and "PermissionError" in entry.detail and "denied" not in entry.detail
-    assert d.status is AdfSemanticStatus.partial and [p.name for p in d.pipelines] == ["PL_Child"]
-
-
-def test_a_parser_crash_is_a_ledger_entry_with_the_exception_type_only(tmp_path, monkeypatch):
-    store, _ = _project(tmp_path, {k: v for k, v in _fixture_files().items() if k.startswith(("pipeline/PL_Child", "pipeline/PL_Ping", "dataset", "linkedService"))})
-    real = pp.parse_pipeline
-
-    def crash(data, path):
-        if path.endswith("PL_Ping.json"):
-            raise ValueError("CONTENT_THAT_MUST_NOT_LEAK")
-        return real(data, path)
-
-    monkeypatch.setattr(pp, "parse_pipeline", crash)
-    d = _discover(store)
-    entry = next(u for u in d.unprocessed_artifacts if u.path == "pipeline/PL_Ping.json")
-    assert entry.reason == "parse_error" and "ValueError" in entry.detail and "MUST_NOT_LEAK" not in entry.detail
-    assert d.status is AdfSemanticStatus.partial
-
-
 # --- 8. robustness: nothing raises, and a mutated pipeline still reconciles or says why --------------------------------------
 
 
@@ -689,24 +655,6 @@ def test_conversion_is_partial_and_says_so_when_discovery_could_not_process_an_a
 # --- 12. the CLI says what discovery could not account for ----------------------------------------------------------------------
 
 
-def test_the_cli_reports_unknown_types_cycles_data_flows_and_lost_artifacts(tmp_path, monkeypatch):
-    from click.testing import CliRunner
-
-    from adf2fabric import cli as cli_mod
-
-    files = {k: v for k, v in _fixture_files().items() if k.startswith(("pipeline/PL_Graph", "pipeline/PL_Unknown", "dataflow/DF_Map",
-                                                                      "dataflow/DF_Flowlet", "dataset", "linkedService"))}
-    files["pipeline/PL_Truncated.json"] = '{"name": "PL_Truncated", "properties": {'
-    store, pid = _project(tmp_path, files)
-    monkeypatch.setattr(cli_mod, "projects_root", lambda config: store.projects_root)
-    out = CliRunner().invoke(cli_mod.cli, ["discovery-adf-semantic", "--project", pid])
-    assert out.exit_code == 0, out.output
-    assert "data flows: 2" in out.output and "dependency cycles: 2" in out.output
-    assert "FutureActivityV2" in out.output and "Mystery" in out.output
-    assert "not in the record: pipeline/PL_Truncated.json [pipeline] malformed_json" in out.output
-    assert "ACTIVITY INVENTORY MISMATCH" not in out.output
-
-
 # --- 13. follow-ups from the independent review ----------------------------------------------------------------------------------
 
 
@@ -743,38 +691,6 @@ def test_a_parameter_default_that_contains_an_activities_list_is_not_a_mismatch(
     assert p.inventory.matched and p.inventory.source_activity_count == 1 and p.inventory.suspect_pointers
 
 
-def test_a_real_drop_is_flagged_as_a_mismatch_with_the_exact_pointers(monkeypatch):
-    real = pp._parse_children
-
-    def lossy(items, parent, ctx, label, pointer, nesting, depth):  # a defect: the false branch is never walked
-        if label == "ifFalse":
-            return None
-        return real(items, parent, ctx, label, pointer, nesting, depth)
-
-    monkeypatch.setattr(pp, "_parse_children", lossy)
-    raw = json.loads((FIXTURES / "pipeline" / "PL_Containers.json").read_text(encoding="utf-8"))
-    p = pp.parse_pipeline(raw, "pipeline/PL_Containers.json")
-    base = "properties.activities[1].typeProperties.activities[0].typeProperties.ifFalseActivities[0]"
-    assert not p.inventory.matched
-    assert p.inventory.missing_pointers == sorted([
-        base, f"{base}.typeProperties.cases[0].activities[0]", f"{base}.typeProperties.cases[1].activities[0]",
-        f"{base}.typeProperties.cases[1].activities[1]", f"{base}.typeProperties.defaultActivities[0]"])
-    assert p.inventory.source_activity_count - p.inventory.parsed_activity_count == 5
-    issue = next(i for i in p.issues if i.code == "inventory_mismatch")
-    assert issue.severity.value == "error"
-
-
-def test_a_real_drop_is_counted_and_shown_by_discovery(tmp_path, monkeypatch):
-    real = pp._parse_children
-    monkeypatch.setattr(pp, "_parse_children",
-                        lambda items, parent, ctx, label, *a: None if label == "ifFalse" else real(items, parent, ctx, label, *a))
-    keep = ("pipeline/PL_Containers", "pipeline/PL_Child", "dataset", "linkedService")
-    store, pid = _project(tmp_path, {k: v for k, v in _fixture_files().items() if k.startswith(keep)})
-    d = _discover(store)
-    assert d.inventory_mismatch_count == 1 and _pipeline(d, "PL_Containers").inventory.matched is False
-    assert _pipeline(d, "PL_Child").inventory.matched
-
-
 def test_duplicate_names_neither_orphan_the_first_nor_invent_a_self_dependency():
     p = _parse(_wait("A"), _wait("A"), _wait("B", "A"))
     edge = next(e for e in p.dependency_graph.edges if e.to_id == "P/B")
@@ -793,21 +709,6 @@ def test_switch_cases_with_the_same_value_keep_separate_dependency_scopes():
     assert g.scope_count == 3  # the top level and one scope per case, even though both cases are named "x"
     assert sorted((e.from_id, e.to_id) for e in g.edges) == [("P/S/X", "P/S/Y"), ("P/S/X#2", "P/S/Y#2")]
     assert all(e.resolved for e in g.edges) and g.cycles == []
-
-
-def test_a_failing_integration_runtime_parse_is_counted_as_a_failure_and_listed(tmp_path, monkeypatch):
-    files = {"integrationRuntime/ir1.json": {"name": "ir1", "properties": {"type": "Managed", "typeProperties": {}}},
-             "pipeline/PL_Child.json": _fixture_files()["pipeline/PL_Child.json"]}
-    store, _ = _project(tmp_path, files)
-
-    def boom(data, path):
-        raise ValueError("IR_CONTENT_MUST_NOT_LEAK")
-
-    monkeypatch.setattr(discoverer_mod.parser, "parse_integration_runtime", boom)
-    d = _discover(store)
-    entry = next(u for u in d.unprocessed_artifacts if u.path == "integrationRuntime/ir1.json")
-    assert entry.reason == "parse_error" and "MUST_NOT_LEAK" not in entry.detail
-    assert d.failed_count == 1 and d.status is AdfSemanticStatus.partial
 
 
 def test_a_data_flow_without_properties_is_marked_failed_not_discovered():

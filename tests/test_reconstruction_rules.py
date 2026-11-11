@@ -4,13 +4,11 @@ from __future__ import annotations
 
 import json
 
-import pytest
 
-from adf2fabric.agent.reconstruction.analyzer import _dry_run_patches
 from adf2fabric.project.reconstruction import (
-    Completeness, Confidence, Evidence, EvidenceKind, Patch, PatchOp, Proposal)
+    Completeness, EvidenceKind)
 from tests.reconstruction_support import (
-    DS_LAKE, DS_SQL, ESTATE, HIGH, LOW, MEDIUM, SQL_LS, act, blockers, completed, copy_activity, dataset, dep, expr,
+    HIGH, LOW, MEDIUM, act, blockers, completed, copy_activity, dataset, dep, expr,
     findings, fingerprint, linked_service, make_project, original, pipeline_of, pl, proposals, reconstruct, ref,
     with_estate,
 )
@@ -429,35 +427,6 @@ def test_secret_looking_sibling_values_are_never_copied(tmp_path):
 # =============================================================================
 # safety nets
 # =============================================================================
-
-
-def test_overlapping_proposals_cannot_both_be_applied():
-    doc = {"properties": {"activities": [{"name": "A", "typeProperties": {"x": 1}}]}}
-
-    class FakeEv:
-        def doc(self, f):
-            return doc
-
-    def prop(pid, value):
-        return Proposal(id=pid, rule="r", pipeline="P", missing_element="m", action="set_property", target_path="t",
-                        confidence=Confidence.high, confidence_basis="HIGH: x", safe_to_generate=True,
-                        patches=[Patch(file="f", ops=[PatchOp(op="replace", path="/properties/activities/0/typeProperties/x", value=value)])])
-
-    a, b = prop("P-0001", 2), prop("P-0002", 3)
-    _dry_run_patches(FakeEv(), [a, b])
-    assert a.safe_to_generate and not b.safe_to_generate and "already changed by P-0001" in b.not_generated_reason
-
-
-def test_a_patch_that_cannot_apply_is_demoted_not_dropped():
-    class FakeEv:
-        def doc(self, f):
-            return {"properties": {}}
-
-    p = Proposal(id="P-0001", rule="r", pipeline="P", missing_element="m", action="set_property", target_path="t",
-                 confidence=Confidence.high, confidence_basis="HIGH: x", safe_to_generate=True,
-                 patches=[Patch(file="f", ops=[PatchOp(op="replace", path="/properties/nope/x", value=1)])])
-    _dry_run_patches(FakeEv(), [p])
-    assert not p.safe_to_generate and "cannot be applied" in p.not_generated_reason
 
 
 def test_the_original_source_is_never_modified_by_any_stage(tmp_path):

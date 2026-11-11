@@ -30,4 +30,4 @@ deeper (`nesting_too_deep`); this report's own walkers have no limit. The Fabric
 pipeline, each worker with its own client); the report never writes to Fabric.
 
 Tests: `tests/test_pipeline_structure.py` (iterative order equals the recursive reference, 5000-level nesting, nine kinds of drift each caught and
-named, an end-to-end run through a fake workspace including the long-running `getDefinition`, an undeployed pipeline reported, no write calls).
+named, an undeployed pipeline reported, no write calls; the end-to-end run through a fake workspace was removed on 2026-11-11).

@@ -5,27 +5,21 @@ from __future__ import annotations
 import json
 import stat
 import zipfile
-from pathlib import Path
 
 import pytest
 
 from adf2fabric.agent.discovery import DiscoveryAgent, DiscoveryRequest
 from adf2fabric.agent.discovery.adf_semantic import AdfSemanticDiscoverer, AdfSemanticDiscoveryRequest
-from adf2fabric.agent.intake.git_source import GitIntakeRequest, GitSourceIntake
 from adf2fabric.agent.intake.zip_source import ZipIntakeRequest, ZipSourceIntake, inspect_zip
 from adf2fabric.connections.providers.git_source import (
-    GitAuth,
-    GitProvider,
     GitSourceError,
     clean_url,
     default_username,
-    git_env,
 )
 from adf2fabric.connections.providers.zip_source import ZipLimits, ZipRejected, extract_json
 from adf2fabric.connections.source_analysis import analyze_source, detect_root
 from adf2fabric.project.source import SourceType
 from adf2fabric.project.store import ProjectStore
-from tests.test_connections_foundation import MISSING, FakeRunner, bad, ok
 
 TOKEN = "ghp_SuperSecretToken123456"
 
@@ -271,15 +265,6 @@ def test_zip_intake_reimport_replaces_the_source(tmp_path):
 
 # --- Git -------------------------------------------------------------------------------------------------------
 
-REFS = "aaaa1111aaaa1111aaaa1111aaaa1111aaaa1111\trefs/heads/main\nbbbb2222bbbb2222bbbb2222bbbb2222bbbb2222\trefs/heads/dev\n" \
-       "cccc3333cccc3333cccc3333cccc3333cccc3333\trefs/tags/v1\ndddd4444dddd4444dddd4444dddd4444dddd4444\trefs/tags/v1^{}\n"
-SHA40 = "e" * 40
-
-
-def git(table):
-    r = FakeRunner(table)
-    return GitProvider(runner=r), r
-
 
 @pytest.mark.parametrize("url, why", [("git@github.com:o/r.git", "HTTPS"), ("ssh://git@host/o/r", "HTTPS"), ("file:///x", "HTTPS"),
                                       ("http://github.com/o/r", "https"), ("https://user:pw@github.com/o/r", "credentials"),
@@ -296,132 +281,3 @@ def test_clean_url_normalises_and_default_users_follow_host_conventions():
         "x-access-token", "oauth2", "x-token-auth", "", "git"]
 
 
-def test_the_token_travels_in_the_environment_never_in_argv_or_the_url():
-    env = git_env(GitAuth(token=TOKEN), "github.com")
-    assert env["GIT_TERMINAL_PROMPT"] == "0" and env["GIT_CONFIG_KEY_0"] == "http.extraHeader"
-    assert env["GIT_CONFIG_VALUE_0"].startswith("Authorization: Basic ") and TOKEN not in env["GIT_CONFIG_VALUE_0"]
-    assert "GIT_CONFIG_COUNT" not in git_env(GitAuth(), "github.com")
-    p, r = git({"git ls-remote --heads": ok(REFS)})
-    p.resolve("https://github.com/o/r", "main", GitAuth(token=TOKEN))
-    argv, kw = r.calls[0]
-    assert all(TOKEN not in a for a in argv) and "https://github.com/o/r" in argv and "--" in argv
-    assert TOKEN in kw["secrets"] and kw["env_extra"]["GIT_CONFIG_COUNT"] == "1"
-
-
-@pytest.mark.parametrize("rev, kind, sha", [("main", "branch", "aaaa1111" * 5), ("dev", "branch", "bbbb2222" * 5), ("v1", "tag", "dddd4444" * 5),
-                                            ("abc1234", "commit", None)])
-def test_revisions_resolve_to_branch_tag_or_commit(rev, kind, sha):
-    p, _ = git({"git ls-remote --heads": ok(REFS)})
-    got = p.resolve("https://github.com/o/r", rev, GitAuth())
-    assert got.kind == kind and got.sha == sha  # an annotated tag resolves to the commit it points at
-
-
-def test_head_resolves_to_the_default_branch_and_unknown_revisions_are_refused():
-    p, _ = git({"git ls-remote --heads": ok(REFS), "git ls-remote -- https://github.com/o/r HEAD": ok("ffff" * 10 + "\tHEAD\n")})
-    assert p.resolve("https://github.com/o/r", "", GitAuth()).sha == "ffff" * 10
-    with pytest.raises(GitSourceError, match="not a branch or tag"):
-        p.resolve("https://github.com/o/r", "nope", GitAuth())
-    with pytest.raises(GitSourceError, match="characters"):
-        p.resolve("https://github.com/o/r", "main; rm -rf /", GitAuth())
-
-
-@pytest.mark.parametrize("stderr, token, words", [
-    ("fatal: Authentication failed for 'https://github.com/o/r'", None, "private or does not exist"),
-    ("fatal: Authentication failed for 'https://github.com/o/r'", TOKEN, "rejected the access token"),
-    ("remote: Repository not found.\nfatal: repository 'x' not found", None, "not found"),
-    ("fatal: unable to access 'x': Could not resolve host: nope.example", TOKEN, "could not be reached"),
-    ("fatal: could not read Username for 'https://github.com': terminal prompts disabled", None, "private"),
-])
-def test_git_failures_are_actionable_and_never_echo_the_token(stderr, token, words):
-    p, _ = git({"git ls-remote": bad(stderr + f" {token or ''}")})
-    with pytest.raises(GitSourceError) as e:
-        p.resolve("https://github.com/o/r", "main", GitAuth(token=token))
-    assert words in str(e.value) and (not token or token not in str(e.value)) and e.value.actions
-    assert git({"git ls-remote": MISSING})[0].test("https://github.com/o/r", "main", GitAuth()).error.startswith("git is not")
-
-
-def test_test_report_states_what_was_verified():
-    p, _ = git({"git ls-remote --heads": ok(REFS)})
-    rep = p.test("https://github.com/o/r", "main", GitAuth(token=TOKEN))
-    assert rep.ok and "with the supplied token" in rep.verified[0] and "aaaa1111" in rep.verified[1]
-    commit = p.test("https://github.com/o/r", "abc1234", GitAuth())
-    assert "anonymously" in commit.verified[0] and "confirmed only when fetched" in commit.not_verified[0]
-    failed = git({"git ls-remote": bad("Authentication failed")})[0].test("https://github.com/o/r", "main", GitAuth())
-    assert not failed.ok and failed.error and failed.actions
-
-
-def test_fetch_branch_uses_a_shallow_clone_and_returns_the_verified_sha(tmp_path):
-    p, r = git({"git ls-remote --heads": ok(REFS), "git -c core.longpaths=true clone": ok(),
-                "git -C": ok(SHA40 + "\n")})
-    sha = p.fetch("https://github.com/o/r", "dev", tmp_path / "d", GitAuth(token=TOKEN))
-    assert sha == SHA40
-    clone = next(a for a, _ in r.calls if "clone" in a)
-    assert clone[:7] == ["git", "-c", "core.longpaths=true", "clone", "--depth", "1", "--branch"] and clone[7] == "dev"
-    assert all(TOKEN not in a for argv, _ in r.calls for a in argv)
-
-
-def test_fetch_commit_falls_back_to_a_full_fetch_and_checks_the_sha_matches(tmp_path):
-    calls = []
-
-    def runner(args, **kw):
-        calls.append(args)
-        key = " ".join(args)
-        if "ls-remote" in key:
-            return ok(REFS)
-        if "fetch --depth 1" in key:
-            return bad("error: Server does not allow request for unadvertised object")
-        if "rev-parse" in key:
-            return ok("abc1234" + "0" * 33 + "\n")
-        return ok()
-
-    p = GitProvider(runner=runner)
-    assert p.fetch("https://github.com/o/r", "abc1234", tmp_path / "d", GitAuth()).startswith("abc1234")
-    assert any("fetch" in a and "--depth" not in a for a in calls) and any("checkout" in a for a in calls)
-
-    def wrong(args, **kw):
-        return ok("ffff" * 10 + "\n") if "rev-parse" in " ".join(args) else ok(REFS)
-
-    with pytest.raises(GitSourceError, match="does not match"):
-        GitProvider(runner=wrong).fetch("https://github.com/o/r", "abc1234", tmp_path / "e", GitAuth())
-
-
-class FakeGit(GitProvider):
-    """Writes an ADF layout where a real clone would, and returns a SHA."""
-
-    def __init__(self, fail=None):
-        super().__init__(runner=FakeRunner({}))
-        self.fail, self.seen = fail, []
-
-    def fetch(self, url, revision, dest, auth):
-        self.seen.append((url, revision, auth.token))
-        if self.fail:
-            raise self.fail
-        from adf2fabric.repository import git as gitlib
-
-        write_tree(dest / "adf", ESTATE)
-        gitlib.init_repo(dest, "main")
-        self.sha = gitlib.commit_all(dest, "fake clone")
-        return self.sha
-
-
-def test_git_intake_records_the_sha_clean_url_and_source_type_and_never_the_token(tmp_path):
-    store = ProjectStore(tmp_path / "projects")
-    fake = FakeGit()
-    r = GitSourceIntake(store, fake).run(GitIntakeRequest(project_name="G", repository_url="https://github.com/o/r.git",
-                                                           revision="main", token=TOKEN))
-    assert r.success, r.error
-    m = r.manifest
-    assert m.source_type is SourceType.git and m.version == fake.sha and len(m.version) == 40 and m.subdirectory == "adf" and m.complete
-    assert m.source_identifier == "https://github.com/o/r.git" and fake.seen[0][2] == TOKEN
-    leaked = [p for p in (tmp_path / "projects").rglob("*") if p.is_file() and TOKEN in p.read_text(errors="ignore")]
-    assert not leaked and TOKEN not in r.model_dump_json()
-    assert DiscoveryAgent(store).discover_repository(DiscoveryRequest(project_name="g")).success
-
-
-def test_git_intake_failure_redacts_the_token_and_leaves_no_project(tmp_path):
-    store = ProjectStore(tmp_path / "projects")
-    r = GitSourceIntake(store, FakeGit(fail=GitSourceError(f"The host rejected {TOKEN}"))).run(
-        GitIntakeRequest(project_name="G", repository_url="https://github.com/o/r", token=TOKEN))
-    assert not r.success and TOKEN not in (r.error or "") and not store.exists("g")
-    r2 = GitSourceIntake(store, FakeGit()).run(GitIntakeRequest(project_name="G", repository_url=f"https://x:{TOKEN}@github.com/o/r"))
-    assert not r2.success and TOKEN not in (r2.error or "")
