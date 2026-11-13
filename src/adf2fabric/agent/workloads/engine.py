@@ -89,6 +89,7 @@ class _Spec:
     notebook_path: Optional[str] = None  # a notebook task of a Databricks job: the path the job runs (the activity holds only a job id)
     job_code: Optional[CodeSource] = None  # a Databricks job entry: how its definition was obtained
     job_reasons: list[str] = field(default_factory=list)  # a Databricks job entry: why Fabric notebooks cannot run it
+    python_file: bool = False  # a Python file task of a Databricks job: its code becomes a notebook, sys.argv[N] -> argv_N
 
 
 def _literal_args(raw: Any) -> tuple[list[str], bool]:
@@ -125,15 +126,18 @@ def _job_specs(p: Any, a: AdfActivity, d: AdfSemanticDiscovery, read_job: Option
         struct, src = None, CodeSource(status=C.not_requested, location=item)
     reasons: list[str] = []
     if struct is not None:
-        shape = databricks_jobs.fabric_shape(struct, bool(raw.get("jobParameters")))
+        shape = databricks_jobs.fabric_shape(struct, raw.get("jobParameters"))
         if not shape.reasons:
             out = []
             for t in shape.tasks:
-                path = t["notebook_path"]
+                path = databricks_jobs.code_path(t)
                 runs_in = databricks_jobs.task_activity_name(a.name, t["key"], len(shape.tasks) == 1)
                 out.append(_Spec(f"{W.databricks_notebook.value}:{path.lower()}", W.databricks_notebook,
-                                 path.rstrip("/").rsplit("/", 1)[-1] or t["key"], path, a, p.name, used_by=[f"{p.name}/{runs_in}"],
-                                 libraries=[], compute_id=cid, notebook_path=path))
+                                 databricks_jobs.notebook_name(path) or t["key"], path, a, p.name, used_by=[f"{p.name}/{runs_in}"],
+                                 # what the task is given explicitly; job parameters reach every notebook task whether it reads them or not
+                                 passed=sorted(n for n in shape.parameters.get(t["key"], {}) if n not in shape.job_parameters),
+                                 libraries=[], compute_id=cid, notebook_path=path,
+                                 python_file=t.get("kind") == "spark_python"))
             return out
         reasons = shape.reasons
     name = (struct or {}).get("name") or item
@@ -428,7 +432,7 @@ def _assess_notebook(spec: _Spec, code: Code, env: ExecutionEnvironment, opts: O
             cells, _ = notebook_format.load(code.text, code.filename or "notebook.py")
     except ValueError as exc:
         return None, None, [_finding("unreadable_notebook", F.source, S.blocker, f"The notebook source cannot be read: {exc}.")], None
-    an = analyzer.analyze(cells, platform)
+    an = analyzer.analyze(cells, platform, argv=spec.python_file)
     tr = transform.transform(cells, an, platform, opts.secret_map, spec.passed)
     findings = list(an.findings)
     # mark what the generator fixed
@@ -653,7 +657,7 @@ def _assess(spec: _Spec, d: AdfSemanticDiscovery, plan: Any, resolver: SourceRes
     if spec.kind is W.databricks_job:
         return _assess_job(spec, env, d)
     if spec.kind is W.databricks_notebook:
-        code = resolver.databricks_notebook(env.workspace, spec.notebook_path or _text(raw.get("notebookPath")))
+        code = resolver.databricks_notebook(env.workspace, spec.notebook_path or _text(raw.get("notebookPath")), file=spec.python_file)
     elif spec.kind is W.databricks_python:
         code = resolver.databricks_python(env.workspace, _text(raw.get("pythonFile")))
     elif spec.kind is W.databricks_jar:

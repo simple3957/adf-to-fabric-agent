@@ -4,6 +4,10 @@ Only rewrites whose Fabric target is documented AND whose meaning is unchanged a
 
 * Databricks widgets become parameter-cell variables (``dbutils.widgets.get("x")`` -> ``x``; declarations are removed and
   their defaults move to the parameter cell, so a pipeline that passes ``x`` overrides it, as it overrode the widget).
+  ``x = int(dbutils.widgets.get("x"))`` becomes ``x = int(x)`` only when that is the code's single read of the widget and the only
+  place ``x`` is bound (otherwise a later read would see the converted value): see ``analyzer.analyze``.
+* In a Python file a Databricks job runs (``spark_python_task``), ``sys.argv[N]`` with a literal N >= 1 becomes the
+  parameter-cell variable ``argv_N`` (default ``""``); the pipeline passes the task's arguments by those names.
 * ``dbutils.notebook.exit`` -> ``notebookutils.notebook.exit``; ``dbutils.fs.{ls,mkdirs,cp,mv,rm,put,head,append}`` ->
   ``notebookutils.fs.*`` (``mv`` only with two arguments: the third positional argument means something else in Fabric).
 * ``dbutils.secrets.get(scope, key)`` -> ``notebookutils.credentials.getSecret(<vault URL>, key)`` ONLY when the caller
@@ -24,7 +28,7 @@ import ast
 from dataclasses import dataclass, field
 from typing import Optional
 
-from adf2fabric.agent.workloads.analyzer import Analysis, FABRIC_FS, _chain, _IDENT
+from adf2fabric.agent.workloads.analyzer import Analysis, FABRIC_FS, _chain, _IDENT, argv_index
 from adf2fabric.agent.workloads.notebook_format import Cell
 from adf2fabric.project.workloads import Rewrite
 
@@ -132,6 +136,14 @@ class _Rewriter(ast.NodeVisitor):
             if (sub in ("fs", "notebook", "runtime")) or (sub == "credentials" and method in _SYNAPSE_CRED_OK):
                 self.edits.replace(node.func if sub != "runtime" else node.func, chain.replace("mssparkutils", "notebookutils", 1))
                 self._count("mssparkutils_alias")
+        self.generic_visit(node)
+
+    def visit_Subscript(self, node: ast.Subscript) -> None:
+        n = argv_index(node) if self.a.argv else None
+        if n is not None and f"argv_{n}" in self.widget_ok:
+            self.edits.replace(node, f"argv_{n}")
+            self._count("argv_get")
+            return
         self.generic_visit(node)
 
     def visit_Attribute(self, node: ast.Attribute) -> None:
@@ -247,6 +259,7 @@ def transform(cells: list[Cell], analysis: Analysis, platform: str, secret_map: 
     describe = {
         "widget_declaration": "dbutils.widgets declarations removed; their defaults are in the parameter cell",
         "widget_get": "dbutils.widgets.get(name) replaced by the parameter-cell variable",
+        "argv_get": "sys.argv[N] (the Python file task's argument N) replaced by the parameter-cell variable argv_N",
         "notebook_exit": "dbutils.notebook.exit -> notebookutils.notebook.exit",
         "secrets_get": "dbutils.secrets.get -> notebookutils.credentials.getSecret with the supplied vault URL",
         "source_only_spark_conf": "source-platform-only spark.conf.set statements replaced by pass",

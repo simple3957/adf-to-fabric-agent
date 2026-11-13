@@ -49,18 +49,26 @@ def _job(job_id, *tasks, **settings):
 # =====================================================================================================================
 
 
-def test_only_the_structure_is_kept_never_values_or_cluster_settings():
-    raw = _job(1, _task("a", nb={"base_parameters": {"day": "2024-01-01"}},
+def test_parameter_values_are_kept_but_never_secrets_or_cluster_settings():
+    # values are kept since 2026-11-13 (the user's decision: they cannot be mapped without them); secrets never are
+    raw = _job(1, _task("a", nb={"base_parameters": {"day": "2024-01-01", "db_password": "hunter2-hunter2", "key": "{{secrets/s/k}}"}},
                         libraries=[{"pypi": {"package": "pandas==2.0", "repo": "https://user:pw@pypi.example"}}, {"whl": "dbfs:/x.whl"}]),
-               parameters=[{"name": "env", "default": "prod-secret"}])
+               _task("py", kind="spark_python", spark_python_task={"python_file": "/Workspace/Shared/x/run.py", "source": "WORKSPACE",
+                                                                   "parameters": ["{{job.parameters.env}}", "10", "dapi" + "0" * 32]}),
+               parameters=[{"name": "env", "default": "prod"}])
     s = J.structure(raw)
     text = json.dumps(s)
-    for leaked in ("2024-01-01", "prod-secret", "SECRET-VALUE", "user:pw", "someone@example.com", "job_clusters"):
+    for leaked in ("hunter2", "secrets/s/k", "dapi" + "0" * 32, "SECRET-VALUE", "user:pw", "someone@example.com", "job_clusters"):
         assert leaked not in text
-    t = s["tasks"][0]
-    assert t["parameter_names"] == ["day"] and s["parameter_names"] == ["env"]
-    assert t["libraries"] == [{"pypi": {"package": "pandas==2.0"}}, {"whl": "dbfs:/x.whl"}]
-    assert t["notebook_path"] == "/Shared/x/a"  # /Workspace/Shared/x/a and /Shared/x/a are one notebook
+    a, py = s["tasks"]
+    assert a["base_parameters"] == {"day": "2024-01-01"} and a["parameter_names"] == ["day", "db_password", "key"]
+    assert s["parameters"] == {"env": "prod"} and s["parameter_names"] == ["env"]
+    assert s["withheld"] == ["task 'a' base parameter 'db_password'", "task 'a' base parameter 'key'", "task 'py' argument 3"]
+    assert py["kind"] == "spark_python" and py["python_file"] == "/Shared/x/run.py" and py["python_source"] == "WORKSPACE"
+    assert py["arguments"] == ["{{job.parameters.env}}", "10"] and py["argument_count"] == 3
+    assert a["libraries"] == [{"pypi": {"package": "pandas==2.0"}}, {"whl": "dbfs:/x.whl"}]
+    assert a["notebook_path"] == "/Shared/x/a"  # /Workspace/Shared/x/a and /Shared/x/a are one notebook
+    assert any("looks like one" in r for r in J.fabric_shape(s).reasons)  # a withheld value blocks the job, never a blank value
 
 
 @pytest.mark.parametrize("raw,expected", [({"jobId": "123"}, "123"), ({"jobId": 123}, "123"), ({"jobId": "@pipeline().parameters.j"}, None),
@@ -77,23 +85,49 @@ def test_a_job_of_workspace_notebook_tasks_runs_in_dependency_order():
     assert J.terminal_tasks(shape) == ["side", "report"]
 
 
+def _py(key, file="/Workspace/Shared/x/run.py", args=(), source="WORKSPACE", **extra):
+    return _task(key, kind="spark_python", spark_python_task={"python_file": file, "source": source, "parameters": list(args)}, **extra)
+
+
 @pytest.mark.parametrize("task,reason", [
     (_task("q", kind="sql"), "task 'q' is a sql task"),
     (_task("g", nb={"source": "GIT"}), "from a Git repository"),
-    (_task("p", nb={"base_parameters": {"d": "1"}}), "passes base parameters (d)"),
+    (_task("p", nb={"base_parameters": {"d": "{{job.start_time.iso_date}}"}}), "dynamic value reference {{job.start_time.iso_date}}"),
+    (_task("p", nb={"base_parameters": {"d": "{{job.parameters.nowhere}}"}}), "job parameter 'nowhere', which the job does not define"),
+    (_py("y", file="dbfs:/scripts/run.py", source=""), "not in the workspace (dbfs:/scripts/run.py)"),
+    (_py("y", args=["x-{{job.parameters.env}}"]), "dynamic value reference {{job.parameters.env}}"),  # only a WHOLE reference is mapped
     (_task("l", libraries=[{"pypi": {"package": "x"}}]), "installs libraries"),
     (_task("r", run_if="AT_LEAST_ONE_SUCCESS"), "AT_LEAST_ONE_SUCCESS"),
     (_task("u", deps=["nowhere"]), "depends on 'nowhere'"),
 ])
 def test_every_part_fabric_cannot_run_is_a_reason_never_a_guess(task, reason):
-    shape = J.fabric_shape(J.structure(_job(1, task)))
+    shape = J.fabric_shape(J.structure(_job(1, task, parameters=[{"name": "env", "default": "dev"}])))
     assert any(reason in r for r in shape.reasons), shape.reasons
 
 
-def test_job_parameters_cycles_and_activity_parameters_are_reasons():
-    assert "job parameters" in J.fabric_shape(J.structure(_job(1, _task("a"), parameters=[{"name": "p", "default": "1"}]))).reasons[0]
+def test_what_each_task_receives_job_parameters_by_name_base_parameters_and_arguments_by_position():
+    s = J.structure(_job(1, _task("nb", nb={"base_parameters": {"min": "10", "day": "{{job.parameters.run_date}}"}}),
+                         _py("py", args=["{{job.parameters.run_date}}", "@literal"], deps=["nb"]),
+                         parameters=[{"name": "run_date", "default": "2026-01-01"}]))
+    shape = J.fabric_shape(s, {"run_date": {"value": "@pipeline().parameters.d", "type": "Expression"}})
+    assert shape.reasons == []
+    assert shape.parameters["nb"] == {"run_date": ("job", "run_date"), "min": ("literal", "10"), "day": ("job", "run_date")}
+    assert shape.parameters["py"] == {"argv_1": ("job", "run_date"), "argv_2": ("literal", "@literal")}  # no job parameter pushed
+    assert J.fabric_value(("job", "run_date"), shape, {"run_date": "x"}) == "x"  # what the ADF activity passes wins
+    assert J.fabric_value(("job", "run_date"), shape, {}) == "2026-01-01"  # else the job's default
+    assert J.code_path(s["tasks"][1]) == "/Shared/x/run.py" and J.notebook_name("/Shared/x/run.py") == "run"
+
+
+def test_job_parameter_problems_cycles_and_old_records_are_reasons():
+    both = _job(1, _task("a", nb={"base_parameters": {"p": "1"}}), parameters=[{"name": "p", "default": "1"}])
+    assert "has the name of a job parameter" in J.fabric_shape(J.structure(both)).reasons[0]
+    one = J.structure(_job(1, _task("a"), parameters=[{"name": "p", "default": "1"}]))
+    assert "passes job parameter 'q', which the job does not define" in J.fabric_shape(one, {"q": "1"}).reasons[0]
+    assert "are an expression" in J.fabric_shape(one, {"value": "@pipeline().parameters.all", "type": "Expression"}).reasons[0]
+    old = {"job_id": "1", "parameter_names": ["p"], "tasks": [{"key": "a", "kind": "notebook", "notebook_path": "/a", "notebook_source": "WORKSPACE",
+                                                               "parameter_names": [], "run_if": "ALL_SUCCESS"}]}
+    assert "read before parameter values were kept" in J.fabric_shape(old).reasons[0]
     assert "cycle" in " ".join(J.fabric_shape(J.structure(_job(1, _task("a", deps=["b"]), _task("b", deps=["a"])))).reasons)
-    assert "activity passes job parameters" in J.fabric_shape(J.structure(_job(1, _task("a"))), activity_passes_parameters=True).reasons[0]
     assert J.fabric_shape({"tasks": []}).reasons == ["the job has no tasks"]
 
 
@@ -137,10 +171,22 @@ def _bound(*names):
     return [{"type": "ItemToId", "key": f"notebook:{n}", "value": IDS[n]} for n in names] + [{"type": "WorkspaceId", "key": "*", "value": WS}]
 
 
-def _convert(pipeline, jobs, resolutions):
+def _workload(path, *reads):
+    """The approved, deployed workload record of a task's notebook: which parameters its generated notebook reads."""
+    from adf2fabric.project.workloads import (Classification, CodeSource, CodeStatus, ExecutionEnvironment, ParameterContract,
+                                              WorkloadEntry, WorkloadKind)
+
+    return WorkloadEntry(id=f"databricks_notebook:{path.lower()}", kind=WorkloadKind.databricks_notebook, name=J.notebook_name(path),
+                         source_item=path, environment=ExecutionEnvironment(platform="databricks"),
+                         code=CodeSource(status=CodeStatus.cached, location=path), classification=Classification.convertible_with_changes,
+                         parameters=[ParameterContract(name=n, passed_by_pipeline=True, declared_in_code=True, mapped=True) for n in reads])
+
+
+def _convert(pipeline, jobs, resolutions, workloads=()):
     d = semantic([pipeline], [], [linked_service("LS_Job", "AzureDatabricks", {"domain": f"https://{HOST}"})])
     ctx = build_project_context(d, Resolutions(resolutions))
     ctx.databricks_jobs = {k: J.structure(v) for k, v in jobs.items()}
+    ctx.workloads = {w.source_item.lower(): w for w in workloads}
     rec, content = ConversionEngine(ctx).convert_pipeline(d.pipelines[0])
     return rec, content
 
@@ -183,13 +229,37 @@ def test_a_multi_task_job_is_wired_as_the_job_wires_its_tasks():
     ({}, ("NB_A",), "has not been read (workloads-assess"),
     ({"7": _job(7, _task("only", "/Shared/NB_A"))}, (), "not deployed and bound yet"),
     ({"7": _job(7, _task("only", "/Shared/NB_A"), _task("q", kind="sql"))}, ("NB_A",), "task 'q' is a sql task"),
-    ({"7": _job(7, _task("only", "/Shared/NB_A", nb={"base_parameters": {"d": "1"}}))}, ("NB_A",), "passes base parameters"),
+    ({"7": _job(7, _task("only", "/Shared/NB_A", nb={"base_parameters": {"d": "1"}}))}, ("NB_A",), "is not an approved, deployed workload"),
 ])
 def test_anything_short_of_that_stays_a_fail_placeholder_with_the_reason(jobs, bound, needle):
     rec, content = _convert(pipe(_jact("Job")), jobs, _bound(*bound))
     a = by_name(rec)["Job"]
     assert find(content, "Job")["type"] == "Fail" and a.status is S.blocked and "databricks_job" in codes(a)
     assert any(needle in (w.message or "") for w in a.warnings), [w.message for w in a.warnings]
+
+
+def test_job_parameters_base_parameters_and_python_arguments_reach_the_notebooks_that_read_them():
+    """The shape of the live test job (2026-11-13): job parameter run_date, a notebook task with base parameter min_amount, then a
+    Python file task given run_date and a literal as arguments."""
+    job = _job(7, _task("nb", "/Shared/NB_A", nb={"base_parameters": {"min_amount": "10000", "unused": "x"}}),
+               _py("py", "/Workspace/Shared/NB_B.py", args=["{{job.parameters.run_date}}", "10000"], deps=["nb"]),
+               parameters=[{"name": "run_date", "default": "2026-01-01"}, {"name": "region", "default": "@in"}])
+    passed = expr("@pipeline().parameters.day")
+    p = pipe(_jact("Job", tp={"jobParameters": {"run_date": passed}}), parameters={"day": {"type": "String"}})
+    wl = (_workload("/Shared/NB_A", "run_date", "min_amount", "region"), _workload("/Shared/NB_B.py", "argv_1", "argv_2"))
+    rec, content = _convert(p, {"7": job}, _bound("NB_A", "NB_B"), wl)
+    nb, py = find(content, "Job_nb"), find(content, "Job_py")
+    assert nb["type"] == py["type"] == "TridentNotebook" and py["typeProperties"]["notebookId"] == IDS["NB_B"]
+    assert nb["typeProperties"]["parameters"] == {
+        "run_date": {"value": {"value": "@pipeline().parameters.day", "type": "Expression"}, "type": "string"},  # what ADF passes
+        "min_amount": {"value": "10000", "type": "string"},
+        "region": {"value": "@@in", "type": "string"}}  # a literal starting with @ is escaped, never read as an expression
+    assert py["typeProperties"]["parameters"] == {
+        "argv_1": {"value": {"value": "@pipeline().parameters.day", "type": "Expression"}, "type": "string"},
+        "argv_2": {"value": "10000", "type": "string"}}
+    a = by_name(rec)["Job"]
+    assert a.status is not S.blocked
+    assert any("unused" in (w.message or "") for w in a.warnings)  # given explicitly but never read: reported, not passed
 
 
 def test_job_parameters_on_the_activity_keep_the_placeholder():
@@ -218,3 +288,73 @@ def test_the_real_client_is_given_a_url_for_the_bare_host_the_linked_service_res
     assert isinstance(client, DatabricksClient) and client.host == f"https://{HOST}"
 
 
+
+
+# =====================================================================================================================
+# 5. a Python file task's code becomes a notebook: sys.argv[N] -> parameter-cell variable argv_N
+# =====================================================================================================================
+
+PY_TASK = '''"""The live test job's Python file task (2026-11-13)."""
+import sys
+
+from pyspark.sql import functions as F
+
+run_date, min_amount = sys.argv[1], int(sys.argv[2])
+print(run_date, min_amount)
+'''
+
+
+def _as_notebook(text, argv=True):
+    from adf2fabric.agent.workloads import analyzer, notebook_format, transform
+
+    cells, _ = notebook_format.load(text, "run.py")
+    an = analyzer.analyze(cells, "databricks", argv=argv)
+    return an, transform.transform(cells, an, "databricks")
+
+
+def test_a_python_file_tasks_arguments_become_parameters_argv_n():
+    an, tr = _as_notebook(PY_TASK)
+    assert tr.parameters == [("argv_1", ""), ("argv_2", "")]
+    param_cell, body = tr.cells[0], "".join(tr.cells[1]["source"])
+    assert param_cell["metadata"] == {"tags": ["parameters"]} and "argv_1 = ''" in "".join(param_cell["source"])
+    assert "run_date, min_amount = argv_1, int(argv_2)" in body and "sys.argv" not in body
+    assert {r.code for r in tr.rewrites} == {"argv_get"}
+    assert not any(f.code == "argv_other" for f in an.findings)
+
+
+@pytest.mark.parametrize("code", ["n = len(sys.argv)", "args = sys.argv[1:]", "from sys import argv", "i = 1\nx = sys.argv[i]"])
+def test_any_other_use_of_the_argument_list_stays_a_finding_never_a_guess(code):
+    an, tr = _as_notebook("import sys\n" + code + "\n")
+    assert any(f.code == "argv_other" for f in an.findings)
+
+
+def test_a_notebook_task_never_has_its_sys_argv_rewritten():
+    an, tr = _as_notebook(PY_TASK, argv=False)
+    assert tr.parameters == [] and "sys.argv[1]" in "".join(tr.cells[0]["source"])
+
+
+# =====================================================================================================================
+# 6. `x = f(dbutils.widgets.get("x"))`: mapped only when it is the single read and the only binding of x (2026-11-13)
+# =====================================================================================================================
+
+
+def test_a_widget_converted_into_a_variable_of_its_own_name_becomes_a_parameter():
+    an, tr = _as_notebook('min_amount = int(dbutils.widgets.get("min_amount"))\nprint(min_amount)\n', argv=False)
+    assert tr.parameters == [("min_amount", "")]
+    assert "min_amount = int(min_amount)" in "".join(tr.cells[1]["source"])
+    assert not any(f.code == "widget_not_convertible" for f in an.findings)
+
+
+@pytest.mark.parametrize("extra", [
+    'min_amount = 5\n',                                       # bound again
+    'for min_amount in range(3):\n    pass\n',                 # bound by a loop
+    'def f(min_amount):\n    return min_amount\n',            # bound as an argument
+    'y = dbutils.widgets.get("min_amount")\n',                # the widget is read again: it would now get the int
+    'min_amount += 1\n',
+])
+def test_it_stays_a_clash_when_the_name_is_bound_elsewhere_or_the_widget_is_read_again(extra):
+    from adf2fabric.agent.workloads import analyzer, notebook_format
+
+    cells, _ = notebook_format.load('min_amount = int(dbutils.widgets.get("min_amount"))\n' + extra, "nb.py")
+    an = analyzer.analyze(cells, "databricks")
+    assert "min_amount" in an.assigned_names

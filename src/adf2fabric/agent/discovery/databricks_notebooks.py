@@ -211,6 +211,24 @@ class DatabricksClient:
             raise DatabricksError("too_large", f"'{path}' is larger than the 10 MB export limit.")
         return raw, language
 
+    def export_file(self, path: str) -> tuple[bytes, str]:
+        """``(source bytes, "PYTHON")`` of one Python workspace file (what a job's Python file task runs). Anything else is refused.
+        A workspace FILE exports in SOURCE format like a notebook (checked live on 2026-11-13)."""
+        info = self.get_status(path)
+        kind = info.get("object_type")
+        if kind != "FILE" or not path.lower().endswith(".py"):
+            raise DatabricksError("not_a_file", f"'{path}' is a {kind or 'unknown object'}, not a Python workspace file.",
+                                  ["Point the task at a .py file in the workspace."])
+        resp = self._get("/api/2.0/workspace/export", {"path": path, "format": "SOURCE"})
+        if resp.status_code != 200:
+            raise self._fail(resp, path)
+        try:
+            raw = base64.b64decode(resp.json().get("content", ""), validate=True)
+        except Exception:  # noqa: BLE001
+            raise DatabricksError("bad_response", "The export returned content that is not valid base64.") from None
+        if len(raw) > _MAX_BYTES:
+            raise DatabricksError("too_large", f"'{path}' is larger than the 10 MB export limit.")
+        return raw, "PYTHON"
 
     def get_job(self, job_id: str) -> dict:
         """The Jobs API ``get`` response of one job, with every page of its tasks. Read-only."""

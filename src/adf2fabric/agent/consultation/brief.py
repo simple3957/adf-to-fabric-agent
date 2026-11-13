@@ -665,7 +665,7 @@ def _job_migrated(store: Any, pid: str, pipeline: str, a: Any, ready: set[str]) 
     struct = J.load(store.project_dir(pid), job_id) if job_id else None
     if struct is None:
         return False
-    shape = J.fabric_shape(struct, bool(a.raw_properties.get("jobParameters")))
+    shape = J.fabric_shape(struct, a.raw_properties.get("jobParameters"))
     if shape.reasons:
         return False
     single = len(shape.tasks) == 1

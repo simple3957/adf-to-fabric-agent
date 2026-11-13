@@ -49,7 +49,7 @@ unsupported properties, manual configuration, validation rules and runtime dispo
 | AzureFunction, Databricks notebook, HDInsight Hive/Pig, Custom (Batch), Azure ML pipeline, Kusto | same Fabric activity, runtime reused (Databricks: the linked service's cluster is copied to the activity, under the ADF names Fabric stores it with) | B |
 | Synapse notebook, Spark job, Mapping/Wrangling data flow | Notebook / Spark job definition / Dataflow Gen2 **scaffold** (item must be migrated) | D |
 | SSIS, U-SQL, ML Studio classic, Databricks JAR/Python/Job, HDInsight MapReduce/Streaming/Spark, unknown types | blocked + documented alternatives (Databricks Job: Fabric has the task type but documents only its portal settings) | E |
-| Databricks Job whose notebook tasks were migrated (opt-in) | one Fabric Notebook activity per notebook task, wired as the job's tasks; only when the job's definition was read and every task's notebook is deployed and bound, else the blocked row above ([workload-migration.md](workload-migration.md#databricks-job-activities)) | C |
+| Databricks Job whose notebook and Python file tasks were migrated (opt-in) | one Fabric Notebook activity per task, wired as the job's tasks, with job parameters, base parameters and Python arguments (`argv_N`) passed as notebook parameters; only when the job's definition was read and every task's notebook is deployed and bound, else the blocked row above ([workload-migration.md](workload-migration.md#databricks-job-activities)) | C |
 
 ## Expressions
 

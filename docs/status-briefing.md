@@ -12,18 +12,26 @@ and the ADF original now fails on the 5,000-row Lookup cap. Validation: API, dep
 records (below). Also live: notebook deploy, schedules, a Spark pool and an environment created by provisioning, OneLake shortcuts,
 Lakehouse repointing of CSV/Parquet datasets.
 
+On 2026-11-13, project `adf2fabricv1`, workspace `fabric-demo`: the Databricks job behind `PL_DatabricksJob_Params_Test` (job parameter
+`run_date` passed by the ADF activity, a notebook task with base parameter `min_amount`, then a Python file task with two arguments)
+was read with `jobs/get` (az login, Entra ID token), its two tasks generated as notebooks, approved by a person, created in the
+workspace by the Deploy step and converted to two Notebook activities with their parameters. The Fabric run completed and both
+outputs equal the Databricks run's row for row (4 rows; 3 product totals). `verify` reports `no_baseline` for it: the ADF run has one
+activity (`Run_Param_Job`) and the Fabric run two, so nothing matches by name; the proof was the outputs, compared by hand.
+
 ## Where each area stands
 
 | Area | Status | What is missing |
 |---|---|---|
 | Discovery (Git, ZIP, live ARM, `adf_publish`) | Done | Sovereign-cloud storage suffixes are public-cloud only, and the endpoints are untested |
-| Activities | Done for about 35 types | SSIS, U-SQL, AzureML classic blocked on purpose; Synapse-only types such as `SqlPoolStoredProcedure` have no rule |
+| Activities | Done for about 35 types | SSIS, U-SQL, AzureML classic blocked on purpose; `SqlPoolStoredProcedure` converts to a Fabric Stored procedure (connection bound by pool name), other Synapse-only types have no rule |
 | Datasets | Done | Inlined as `datasetSettings` |
 | Data flows | Scaffold | `ExecuteDataFlow` becomes a Dataflow Gen2 refresh; the flow itself is not read or converted |
 | Triggers | Partial | Schedule and tumbling window convert (created disabled); event and custom-event triggers are manual |
 | Connections | Partial | Auto-create for SQL/Synapse, ADLS Gen2, Blob, REST, Databricks; about 50 other types get a verdict only; OAuth and gateway are manual |
 | Storage | Partial | ADLS Gen2 shortcuts and CSV/Parquet repointing; other stores, `wasbs://` and computed paths stay as written |
-| Spark workloads | Built, CLI only | Generate, approve, deploy, record-run for Databricks notebooks, and for the notebook tasks of a Databricks Job activity (job read with `jobs/get`; parameters not mapped, non-notebook tasks stay blocked; not yet run live); no custom jar/wheel libraries |
+| Spark workloads | Built, CLI only | Generate, approve, deploy, record-run for Databricks notebooks, and for the notebook and Python file tasks of a Databricks Job activity (job read with `jobs/get`, live 2026-11-13; job parameters, base parameters and Python arguments mapped to notebook parameters, run live in Fabric 2026-11-13 with outputs equal to Databricks; other task types stay blocked); no custom jar/wheel libraries |
+| Run and compare of a split Databricks job | Gap | `verify` matches activities by name, so a job activity converted to several task activities reports `no_baseline` |
 | Compute (pools, environments) | Built | `compute-deploy` creation not tested (its fake-only test was removed 2026-11-11; provisioning created the same items live) |
 | Provisioning | Partial live | Pool and environment live; workspace, capacity, roles, lakehouse, ARM capacity never run live, and their fake-only tests were removed 2026-11-11 |
 | Run and compare (`verify`) | Done, live | Compares by activity facts; needs a baseline run |

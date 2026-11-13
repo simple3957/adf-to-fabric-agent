@@ -45,7 +45,7 @@ def _ls(cx: ActivityBuilder) -> Optional[str]:
 def _bound_notebook_name(cx: ActivityBuilder, path: Any) -> Optional[str]:
     """The notebook's name when it was deployed to Fabric and bound in the resolutions file (``notebook:<name>``), where
     ``<name>`` is the last part of the Databricks notebook path. None when it was not, so nothing is registered."""
-    name = path.rstrip("/").rsplit("/", 1)[-1] if isinstance(path, str) else ""
+    name = databricks_jobs.notebook_name(path)  # a Python file task's notebook drops the .py
     resolutions = cx.pc.project.resolutions
     return name if name and f"notebook:{name}".lower() in resolutions.items else None
 
@@ -229,12 +229,39 @@ def _reads_output_of(cx: ActivityBuilder, name: str) -> list[str]:
                    if a.name != name and pattern.search(json.dumps(a.raw_properties, default=str))})
 
 
+def _task_parameters(cx: ActivityBuilder, shape: Any, t: dict) -> dict:
+    """What the task's Fabric notebook receives: each parameter its generated notebook reads, with the value the job gives it
+    (a literal, or the job parameter's value as the ADF activity passes it, converted like any expression). The shape is the one
+    a live Fabric run confirmed on 2026-10-22 (``{value, type}``, an Expression value reaching the notebook)."""
+    passed = cx.act.raw_properties.get("jobParameters")
+    entry = cx.pc.project.workloads.get((databricks_jobs.code_path(t) or "").lower())
+    read = {p.name for p in (entry.parameters if entry is not None else []) if p.mapped}
+    out: dict = {}
+    for name, source in (shape.parameters.get(t["key"]) or {}).items():
+        origin = f"job {source[1]}" if source[0] == "job" else f"task '{t['key']}' {'argument' if name.startswith('argv_') else 'parameter'} {name}"
+        if name not in read:
+            if source[0] != "job":  # a job parameter reaches every notebook task; only one the task is given explicitly is a drop
+                cx.dropped(f"databricks job {origin}", "the migrated notebook never reads this parameter")
+            continue
+        value = databricks_jobs.fabric_value(source, shape, passed)
+        if source[0] == "job" and isinstance(passed, dict) and source[1] in passed:
+            out[name] = {"value": cx.tree(value, f"typeProperties.jobParameters.{source[1]}", f"typeProperties.parameters.{name}.value"),
+                         "type": "string"}
+            cx.mapping(f"typeProperties.jobParameters.{source[1]}", f"typeProperties.parameters.{name}", "job_parameter_to_parameter")
+        else:  # a literal: a leading @ would make Fabric read it as an expression, so it is escaped as @@ (ADF's own escape)
+            out[name] = {"value": "@" + value if isinstance(value, str) and value.startswith("@") else value, "type": "string"}
+            cx.mapping(f"databricks job {origin}", f"typeProperties.parameters.{name}", "job_definition_value_to_parameter",
+                       "the value is in the Databricks job's definition, read by workloads-assess")
+    return out
+
+
 def _databricks_job_as_fabric_notebooks(cx: ActivityBuilder, shape: Any, struct: dict) -> None:
-    """Run the job's notebook tasks as Fabric Notebook activities, in the job's task order, instead of calling Databricks.
+    """Run the job's notebook and Python file tasks as Fabric Notebook activities, in the job's task order, instead of calling Databricks.
 
     One task keeps the activity's name. Several tasks become ``<activity>_<task key>``, wired as the job wires them
     (``ALL_SUCCESS`` -> Succeeded, ``ALL_DONE`` -> Completed); the activity's own dependencies attach to the tasks that
-    start the job, and what depended on the activity waits for the tasks that end it.
+    start the job, and what depended on the activity waits for the tasks that end it. Each notebook receives its task's
+    parameters (``_task_parameters``).
     """
     a = cx.act
     single = len(shape.tasks) == 1
@@ -245,10 +272,15 @@ def _databricks_job_as_fabric_notebooks(cx: ActivityBuilder, shape: Any, struct:
         if not single:
             cx.pc.reserve(comp_of[t["key"]])
     for t in shape.tasks:
-        nb = _bound_notebook_name(cx, t["notebook_path"])
-        tp = {"notebookId": cx.item("notebook", nb, f"The Fabric notebook that runs task '{t['key']}' (Databricks notebook "
-                                                    f"'{t['notebook_path']}') of Databricks job {struct.get('job_id')}."),
+        path = databricks_jobs.code_path(t)
+        nb = _bound_notebook_name(cx, path)
+        what = "Python file" if t.get("kind") == "spark_python" else "notebook"
+        tp = {"notebookId": cx.item("notebook", nb, f"The Fabric notebook that runs task '{t['key']}' (Databricks {what} "
+                                                    f"'{path}') of Databricks job {struct.get('job_id')}."),
               "workspaceId": cx.workspace()}
+        params = _task_parameters(cx, shape, t)
+        if params:
+            tp["parameters"] = params
         cfg = cx.envelope(comp_of[t["key"]], "TridentNotebook", tp, primary=first is None)
         if first is None:
             first = cfg
@@ -262,7 +294,7 @@ def _databricks_job_as_fabric_notebooks(cx: ActivityBuilder, shape: Any, struct:
     cx.entry = [comp_of[t["key"]] for t in shape.tasks if not t.get("depends_on")]
     cx.exit = [comp_of[k] for k in databricks_jobs.terminal_tasks(shape)]
     cx.mapping("typeProperties.jobId", "typeProperties.notebookId", "job_notebook_tasks_bound",
-               f"job {struct.get('job_id')}: {len(shape.tasks)} notebook task(s), read from the job's definition")
+               f"job {struct.get('job_id')}: {len(shape.tasks)} notebook / Python file task(s), read from the job's definition")
     cx.cover(Op.external_execution, *comp_of.values())
     readers = _reads_output_of(cx, a.name)
     if readers:
@@ -288,11 +320,14 @@ def convert_databricks_job(cx: ActivityBuilder) -> None:
         why = ("its jobId is an expression or missing, so the job it runs is not known" if not job_id else
                f"the definition of job {job_id} has not been read (workloads-assess with a Databricks credential reads it)")
     else:
-        shape = databricks_jobs.fabric_shape(struct, bool(raw.get("jobParameters")))
-        unbound = [t["key"] for t in shape.tasks if t.get("kind") == "notebook" and not _bound_notebook_name(cx, t.get("notebook_path"))]
+        shape = databricks_jobs.fabric_shape(struct, raw.get("jobParameters"))
+        unbound = [t["key"] for t in shape.tasks if not _bound_notebook_name(cx, databricks_jobs.code_path(t))]
         single = len(shape.tasks) == 1
         clash = [n for n in (databricks_jobs.task_activity_name(cx.act.name, t["key"], single) for t in shape.tasks)
                  if not single and n.lower() in cx.pc.names]
+        # which parameters a task's notebook reads is known only from its approved, deployed workload record
+        unknown = [t["key"] for t in shape.tasks if shape.parameters.get(t["key"])
+                   and (databricks_jobs.code_path(t) or "").lower() not in cx.pc.project.workloads]
         if shape.reasons:
             why = f"Fabric notebooks cannot run job {job_id}: " + "; ".join(shape.reasons)
         elif clash:
@@ -301,6 +336,9 @@ def convert_databricks_job(cx: ActivityBuilder) -> None:
         elif unbound:
             why = (f"the Fabric notebook of task(s) {', '.join(unbound)} of job {job_id} is not deployed and bound yet "
                    "(workloads-generate, -approve, -deploy, then notebook:<name> in the resolutions)")
+        elif unknown:
+            why = (f"task(s) {', '.join(unknown)} of job {job_id} pass parameters, and the notebook is not an approved, deployed "
+                   "workload of this project, so which parameters it reads is not known")
         else:
             return _databricks_job_as_fabric_notebooks(cx, shape, struct)
     _block(cx, "databricks_job", f"{_JOB_NOT_GENERATED}, and {why}.",
@@ -312,17 +350,21 @@ def convert_databricks_job(cx: ActivityBuilder) -> None:
 
 register(ConversionRule(
     name="databricks_job", adf_types=("DatabricksJob",), fabric_types=("TridentNotebook",),
-    variants=("job id", "job parameters", "job of notebook tasks migrated to Fabric notebooks"),
+    variants=("job id", "job parameters", "job of notebook and Python file tasks migrated to Fabric notebooks"),
     strategy=ConversionStrategy.manual, handler=convert_databricks_job, runtime_disposition="reuse_externally",
     property_rules=("not converted as a Databricks Job task: the Fabric Job task's JSON structure is undocumented",
-                    "jobId -> one Fabric Notebook activity per notebook task, only when the job's definition was read and "
-                    "each task's notebook was deployed and bound"),
-    io_rules=("none",), expression_rules=("none",),
+                    "jobId -> one Fabric Notebook activity per notebook or Python file task, only when the job's definition was "
+                    "read and each task's notebook was deployed and bound"),
+    io_rules=("none",), expression_rules=("jobParameters values converted like any expression",),
     dependency_rules=("a fail-fast placeholder keeps the dependency graph intact",
-                      "notebook tasks keep the job's dependencies (ALL_SUCCESS -> Succeeded, ALL_DONE -> Completed)"),
-    parameter_variable_rules=("job and task parameters are not mapped (the job is not migrated when it has any)",),
-    unsupported=("Job task settings (jobId, jobParameters)", "non-notebook tasks, Git-sourced notebooks, task libraries, "
-                 "condition tasks and other run_if values"),
+                      "tasks keep the job's dependencies (ALL_SUCCESS -> Succeeded, ALL_DONE -> Completed)"),
+    parameter_variable_rules=("job parameters -> the parameters of every notebook task's notebook that reads them (the activity's "
+                              "jobParameters value, else the job's default)",
+                              "notebook base parameters and Python file arguments (as argv_N) -> notebook parameters, from the job "
+                              "definition; a whole {{job.parameters.x}} value takes x's value"),
+    unsupported=("Job task settings (jobId, jobParameters)", "task types other than notebook and Python file, Git-sourced code, "
+                 "task libraries, condition tasks and other run_if values, other {{...}} value references, secret parameter "
+                 "values, a base parameter named like a job parameter"),
     manual_configuration=("recreate the Job task on the Fabric Azure Databricks activity, or migrate the job's notebooks",),
     validation_rules=("placeholder Fail activity present", "notebookId bound per task"),
 ))

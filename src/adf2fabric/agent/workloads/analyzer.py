@@ -67,6 +67,9 @@ class Analysis:
     languages: list[str] = field(default_factory=list)
     assigned_names: set[str] = field(default_factory=set)  # top-level Python names assigned (collision check)
     spark_conf_keys: list[str] = field(default_factory=list)
+    argv: bool = False  # a Python file task's code: sys.argv[N] are its arguments (parameters argv_N)
+    assign_counts: dict[str, int] = field(default_factory=dict)  # Python name -> how many places bind it (any scope, every cell)
+    self_assigned: set[str] = field(default_factory=set)  # `x = f(dbutils.widgets.get("x"))` candidates (see visit_Assign)
 
 
 class _Collector:
@@ -366,6 +369,16 @@ class _PyVisitor(ast.NodeVisitor):
         same = (isinstance(v, ast.Call) and _chain(v.func) == "dbutils.widgets.get" and len(v.args) == 1
                 and isinstance(v.args[0], ast.Constant) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name)
                 and node.targets[0].id == v.args[0].value)
+        # `x = int(dbutils.widgets.get("x"))`: the widget converted into a variable of its own name. Safe only when this is the
+        # code's single read of the widget and the only place the name is bound (checked at the end of `analyze`).
+        if not same and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
+            name = node.targets[0].id
+            reads = [n for n in ast.walk(v) if isinstance(n, ast.Call) and _chain(n.func) == "dbutils.widgets.get" and len(n.args) == 1
+                     and isinstance(n.args[0], ast.Constant) and n.args[0].value == name]
+            if len(reads) == 1:
+                self.c.a.self_assigned.add(name)
+                self.generic_visit(node)
+                return
         if not same:
             for t in node.targets:
                 if isinstance(t, ast.Name):
@@ -396,10 +409,48 @@ def _python_cell(c: _Collector, cell: Cell, platform: str) -> None:
         _fallback_python(c, cell, platform)
         return
     _PyVisitor(c, cell, platform).visit(tree)
+    for node in ast.walk(tree):  # every way a name gets bound: =, +=, for, with-as, del, imports, def/class, arguments
+        bound = (node.id if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)) else
+                 node.arg if isinstance(node, ast.arg) else
+                 (node.asname or node.name.split(".")[0]) if isinstance(node, ast.alias) else
+                 node.name if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) else
+                 node.name if isinstance(node, ast.ExceptHandler) and node.name else None)
+        if bound:
+            c.a.assign_counts[bound] = c.a.assign_counts.get(bound, 0) + 1
+    if c.a.argv:
+        _argv(c, cell, tree)
     for node in ast.walk(tree):  # string constants carry paths and hosts; comments are not visited
         if isinstance(node, ast.Constant) and isinstance(node.value, str) and node.value.strip():
             _scan_text(c, node.value, cell.start_line + node.lineno - 1, platform)
     _special_lines(c, cell, platform)
+
+
+def argv_index(node: ast.AST) -> Optional[int]:
+    """N for ``sys.argv[N]`` with a literal N >= 1 (a positional argument of a Python file task), else None."""
+    if isinstance(node, ast.Subscript) and _chain(node.value) == "sys.argv" and isinstance(node.slice, ast.Constant) \
+            and isinstance(node.slice.value, int) and not isinstance(node.slice.value, bool) and node.slice.value >= 1:
+        return node.slice.value
+    return None
+
+
+def _argv(c: _Collector, cell: Cell, tree: ast.AST) -> None:
+    """A Python file run by a job: ``sys.argv[N]`` is the task's argument N and becomes the parameter ``argv_N`` (declared like a
+    widget, so it lands in the parameter cell). Any other use of the argument list cannot be mapped and stays a finding."""
+    taken: set[int] = set()
+    for node in ast.walk(tree):
+        n = argv_index(node)
+        if n is not None:
+            c.a.widgets.setdefault(f"argv_{n}", None)
+            c.a.widgets_used.append(f"argv_{n}")
+            taken.add(id(node.value))
+    for node in ast.walk(tree):
+        line = cell.start_line + getattr(node, "lineno", 1) - 1
+        if isinstance(node, ast.Attribute) and _chain(node) == "sys.argv" and id(node) not in taken:
+            c.add("argv_other", K.contract, S.change, "The task's argument list is used other than as sys.argv[N] with a literal N, so its "
+                  "arguments cannot become notebook parameters.", line, "sys.argv", "Read each argument as sys.argv[N], or port the parsing by hand.")
+        elif isinstance(node, ast.ImportFrom) and node.module == "sys" and any(a.name == "argv" for a in node.names):
+            c.add("argv_other", K.contract, S.change, "'from sys import argv' hides the argument list from the conversion.", line,
+                  "from sys import argv", "Use sys.argv[N].")
 
 
 def _fallback_python(c: _Collector, cell: Cell, platform: str) -> None:
@@ -422,8 +473,10 @@ def _special_lines(c: _Collector, cell: Cell, platform: str) -> None:
 # =====================================================================================================================
 
 
-def analyze(cells: Iterable[Cell], platform: str) -> Analysis:
+def analyze(cells: Iterable[Cell], platform: str, argv: bool = False) -> Analysis:
+    """``argv``: the code is a Python file a job runs with positional arguments (see ``_argv``)."""
     c = _Collector()
+    c.a.argv = argv
     for cell in cells:
         if cell.source_type == "markdown" or cell.language == "markdown":
             continue
@@ -467,6 +520,9 @@ def analyze(cells: Iterable[Cell], platform: str) -> Analysis:
                         c.add("token_library", K.authentication, S.change, "TokenLibrary (Synapse linked-service tokens) is removed in Fabric.", cell.start_line + off, "TokenLibrary")
                     if "using Microsoft.Spark" in line:
                         c.add("dotnet_for_spark", K.language, S.blocker, ".NET for Spark is not supported in Fabric Spark.", cell.start_line + off, "Microsoft.Spark")
+    for name in c.a.self_assigned:  # `x = f(dbutils.widgets.get("x"))` stays a clash unless it is the only read and only assignment
+        if c.a.assign_counts.get(name, 0) != 1 or c.a.widgets_used.count(name) != 1 or c.a.syntax_errors:  # an unparsed cell may bind it
+            c.a.assigned_names.add(name)
     c.a.imports = sorted(set(c.a.imports))
     c.a.accounts = sorted(set(c.a.accounts))
     c.a.languages = sorted(set(c.a.languages))

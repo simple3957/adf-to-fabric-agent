@@ -29,7 +29,7 @@ Covered by the **compatibility catalog** (`agent/conversion/compatibility.py`), 
 
 ## 2. Activity types the converter has no rule for
 
-Any type outside the registry (a newer ADF activity, `SqlPoolStoredProcedure`, anything misspelled) becomes a blocker with a
+Any type outside the registry (a newer ADF activity, anything misspelled) becomes a blocker with a
 fail-fast placeholder (`no_conversion_rule`). Fix: add a handler plus a test, or rebuild the step by hand.
 
 ## 3. Expressions and parameters
@@ -68,7 +68,9 @@ results:
 - SQL queries are not linted for reserved-word aliases or dialect problems.
 - Parameterized linked services have no single address to turn into a Fabric connection; this is reported only through
   unsupported `linkedService()` expressions.
-- `SqlPoolStoredProcedure` and other Synapse-only activity types fall under "no rule".
+- Synapse-only activity types other than `SqlPoolStoredProcedure` fall under "no rule". `SqlPoolStoredProcedure` is
+  converted to a Fabric Stored procedure activity on a connection bound by pool name (`connection:sqlpool:<pool>`, see
+  [conversion.md](conversion.md)); Fabric lists Azure Synapse Analytics as a store for that activity.
 - **Azure Synapse Link** (replaced by Fabric Mirroring) is configured outside any ADF export, so it cannot be detected. ADF **change data capture** resources are detected and reported, but no Fabric Copy job is generated.
 
 ## Activities nested deeper than discovery reads

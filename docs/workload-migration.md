@@ -48,6 +48,8 @@ Code: `src/adf2fabric/agent/workloads/` (`source.py` retrieval, `databricks_jobs
 | Source | Fabric |
 |---|---|
 | `dbutils.widgets.text/dropdown/...` + `dbutils.widgets.get("x")` | a variable `x` in the notebook's parameter cell, default kept (a pipeline parameter named `x` overrides it) |
+| `x = int(dbutils.widgets.get("x"))` (any expression around the read) | `x = int(x)`, only when it is the code's single read of widget `x` and the only place `x` is bound (assignment, loop, argument, import ...); otherwise a later read would see the converted value, so it stays `widget_not_convertible` (since 2026-11-13) |
+| `sys.argv[N]` in a Python file task (literal N >= 1) | a variable `argv_N` in the parameter cell (default `""`); any other use of the argument list is `argv_other` |
 | `dbutils.notebook.exit(v)` | `notebookutils.notebook.exit(v)` |
 | `dbutils.fs.{ls,mkdirs,cp,mv,rm,put,head,append}` | `notebookutils.fs.*` (`mv` only with two arguments) |
 | `dbutils.secrets.get(scope, key)` | `notebookutils.credentials.getSecret("<vault URL>", key)` only with `--secret-map scope=url` |
@@ -139,16 +141,23 @@ Fail placeholder (`databricks_job`). With migration:
 
 1. **Read the job, only when allowed.** `workloads-assess` / `workloads-generate` with a Databricks credential
    (`--databricks-token-env NAME` or `--allow-az-tokens`) call `GET /api/2.2/jobs/get` for each literal `jobId` (every page of
-   tasks) and keep only the job's structure in `projects/<p>/databricks/jobs/<id>.json` (`agent/workloads/databricks_jobs.py`):
-   task keys and types, notebook paths, dependencies, `run_if`, and the NAMES of parameters and libraries. No parameter values, no
-   cluster or compute settings, no secrets. A job read once is reused from that file; without a credential nothing is called and the
-   job is `not_requested` / `missing_credential` with the permission it needs (*CAN VIEW on job &lt;id&gt;*). A `jobId` that is an
-   expression is `dynamic`, never guessed. `/Workspace/Shared/x` and `/Shared/x` are one notebook.
-2. **Notebook tasks become workloads.** When Fabric notebooks can run the whole job (below), each notebook task becomes an ordinary
-   `databricks_notebook` workload (code export, analysis, generation, approval, deploy, run evidence are unchanged), `used_by` the
-   Fabric activity that will run it. Its compute is `job_defined` in the compute plan: the job, not the linked service, sizes it,
-   so the size is reported as not available. Otherwise the job is ONE `databricks_job` entry with no artifact: `blocked` when it was
-   not read, `unsupported` with each reason when it was. Its notebooks are not half-migrated.
+   tasks) and keep the job's structure in `projects/<p>/databricks/jobs/<id>.json` (`agent/workloads/databricks_jobs.py`):
+   task keys and types, notebook and Python file paths, dependencies, `run_if`, library names, and the VALUES of job parameters
+   (defaults), notebook `base_parameters` and Python file arguments. Values are kept since 2026-11-13 (the user's decision: they cannot
+   be mapped without them). A value that references a Databricks secret (`{{secrets/...}}`) or looks like a key, token, SAS or
+   password (or is named like one) is never stored: it is listed under `withheld` and the job is not migrated. No cluster or compute
+   settings are kept. A job read once is reused from that file (a file written before 2026-11-13 has names only: a job with
+   parameters must be read again); without a credential nothing is called and the job is `not_requested` / `missing_credential`
+   with the permission it needs (*CAN VIEW on job &lt;id&gt;*). A `jobId` that is an expression is `dynamic`, never guessed.
+   `/Workspace/Shared/x` and `/Shared/x` are one notebook.
+2. **Notebook and Python file tasks become workloads.** When Fabric notebooks can run the whole job (below), each task becomes an
+   ordinary `databricks_notebook` workload (code export, analysis, generation, approval, deploy, run evidence are unchanged), `used_by`
+   the Fabric activity that will run it. A **Python file task** (`spark_python_task`, a `.py` file in the workspace) is exported as a
+   workspace file and becomes a notebook named after the file without `.py`; `sys.argv[N]` (a literal N >= 1) becomes the
+   parameter-cell variable `argv_N` (default `""`), and any other use of the argument list (`len(sys.argv)`, slices, a computed index,
+   `from sys import argv`) is a finding (`argv_other`), never a guess. Its compute is `job_defined` in the compute plan: the job, not
+   the linked service, sizes it, so the size is reported as not available. Otherwise the job is ONE `databricks_job` entry with no
+   artifact: `blocked` when it was not read, `unsupported` with each reason when it was. Its notebooks are not half-migrated.
 3. **Conversion.** `convert` replaces the activity only when the job's definition is in the project and every task's notebook is
    deployed and bound (`notebook:<name>`, as for a notebook activity). One task: a Fabric Notebook activity with the activity's own
    name. Several tasks: one Notebook activity per task named `<activity>_<task key>`, wired as the job wires them
@@ -156,11 +165,23 @@ Fail placeholder (`databricks_job`). With migration:
    that start the job, and what depended on the activity waits for the tasks that end it. If one of those names is already used in
    the pipeline, the job stays blocked (it is never renamed, because run evidence is matched by that name). Policy and state are
    copied to every task activity. A downstream expression that reads the job activity's output becomes a manual step.
+4. **Parameters.** Each Notebook activity gets `parameters` in the `{value, type}` shape a live run confirmed (2026-10-22, below):
+   * **job parameters** reach every notebook task by name (Databricks pushes them to tasks that take key-value parameters; the live
+     run of 2026-11-13 showed the value the ADF activity passed reaching the notebook's widget). The value is what the ADF
+     activity's `jobParameters` passes (an expression is converted like any other), else the job's default;
+   * **notebook base parameters** and **Python file arguments** (as `argv_1`, `argv_2` ...) come from the job's definition; a value
+     that is exactly `{{job.parameters.x}}` takes x's value as above;
+   * only parameters the generated notebook reads are passed (its approved, deployed workload record says which); one the task is
+     given explicitly but never reads is reported as not carried over. A literal that starts with `@` is escaped as `@@`, so
+     Fabric never reads it as an expression. A job whose tasks pass parameters stays blocked until each task's notebook is an
+     approved, deployed workload, because otherwise which parameters it reads is not known.
 
-**Fabric cannot run the job as notebooks** (each is a stated reason, and the placeholder stays) when it has: a non-notebook task
-(SQL, Python file, JAR, wheel, dbt, pipeline, run-job, condition, for-each ...), a notebook from Git, task `base_parameters`, job
-parameters, `jobParameters` on the activity, task libraries, a `run_if` other than `ALL_SUCCESS` / `ALL_DONE`, a dependency on a
-condition outcome or on a missing task, or a dependency cycle.
+**Fabric cannot run the job as notebooks** (each is a stated reason, and the placeholder stays) when it has: a task other than a
+notebook or a workspace Python file (SQL, JAR, wheel, dbt, pipeline, run-job, condition, for-each ...), code from Git or DBFS, a
+withheld (secret) value, a parameter value with any other `{{...}}` reference (or a reference inside a longer text), a base
+parameter named like a job parameter (which one wins is not mapped), `jobParameters` on the activity that is one expression or names
+a parameter the job does not define, task libraries, a `run_if` other than `ALL_SUCCESS` / `ALL_DONE`, a dependency on a condition
+outcome or on a missing task, or a dependency cycle.
 
 ## What Microsoft documents, and what is still unverified
 
@@ -196,6 +217,8 @@ Probe items left in the workspace for you to delete in the portal: notebook `zz_
 * Spark job code in storage is read only if you pass it with `--source` (the exact storage role is reported otherwise).
 * DBFS retrieval (`dbfs/read`) and the Databricks export call were exercised with fakes in tests until 2026-11-11, when those tests were removed; the export call matches the
   one proven live for notebooks, the DBFS call has not run against a real workspace.
-* Databricks Job activities: job and task parameters are not mapped, and only notebook tasks migrate (see
-  [Databricks Job activities](#databricks-job-activities)). The `jobs/get` call was tested with fakes until 2026-11-11 (those tests were removed); its first live use is noted
-  in [status-briefing.md](status-briefing.md) once it has run.
+* Databricks Job activities: only notebook and workspace Python file tasks migrate, and only the parameter forms listed above (see
+  [Databricks Job activities](#databricks-job-activities)). `jobs/get` and the workspace-file export were run against the real
+  workspace on 2026-11-13 (az login, Entra ID token), and a job converted with parameters ran in Fabric the same day with outputs
+  equal to Databricks ([status-briefing.md](status-briefing.md)). `verify` cannot compare such a job yet: it matches activities by
+  name, and the job's one ADF activity became one Fabric activity per task.

@@ -73,8 +73,9 @@ class SourceResolver:
                                detail=redact(str(exc)), action=(exc.actions[0] if exc.actions else "")))
 
     # -- Databricks notebook ---------------------------------------------------------------------------------------------
-    def databricks_notebook(self, host: Optional[str], path: Optional[str]) -> Code:
-        perm = f"Databricks workspace: CAN READ on notebook '{path}' (workspace/export)"
+    def databricks_notebook(self, host: Optional[str], path: Optional[str], file: bool = False) -> Code:
+        """A notebook's source, or (``file``) a Python workspace file's, which a job's Python file task runs."""
+        perm = f"Databricks workspace: CAN READ on {'file' if file else 'notebook'} '{path}' (workspace/export)"
         if not path or "@{" in path or path.startswith("@"):
             return Code(CodeSource(status=C.dynamic, location=path or "", detail="The notebook path is computed at run time.",
                                    action="List the notebooks this activity can run and migrate each."))
@@ -98,7 +99,8 @@ class SourceResolver:
                                    action="Set the environment variable that holds a Databricks token and pass its NAME."))
         try:
             validate_host(f"https://{host}")
-            raw, language = self._client(host, token).export_source(path)
+            client = self._client(host, token)
+            raw, language = client.export_file(path) if file else client.export_source(path)
         except DatabricksError as exc:
             return self._failure(exc, perm, path)
         text = raw.decode("utf-8", errors="replace")
