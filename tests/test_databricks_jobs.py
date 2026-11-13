@@ -7,6 +7,7 @@ Real Azure and Fabric calls are in ``tests/test_live.py`` (docs/testing.md).
 
 from __future__ import annotations
 
+import base64
 import json
 from datetime import datetime, timezone
 
@@ -358,3 +359,76 @@ def test_it_stays_a_clash_when_the_name_is_bound_elsewhere_or_the_widget_is_read
     cells, _ = notebook_format.load('min_amount = int(dbutils.widgets.get("min_amount"))\n' + extra, "nb.py")
     an = analyzer.analyze(cells, "databricks")
     assert "min_amount" in an.assigned_names
+
+
+# =====================================================================================================================
+# 7. a serverless job ENVIRONMENT's libraries -> one Fabric Environment per job environment, approved on its own (2026-11-13)
+# =====================================================================================================================
+
+WHEEL = "/Workspace/Shared/x/libs/mylib-0.1.0-py3-none-any.whl"
+
+
+def _env_job(*deps, key="libs"):
+    return _job(9, _py("t", "/Workspace/Shared/x/run.py", environment_key=key),
+                environments=[{"environment_key": key, "spec": {"client": "2", "dependencies": list(deps)}}], name="Lib Job")
+
+
+@pytest.mark.parametrize("dep,kind", [("humanize==4.9.0", "public"), ("pandas", "public"), ("requests[socks]>=2,<3", "public"),
+                                      (WHEEL, "custom"), ("/Volumes/c/s/v/x.whl", None), ("dbfs:/x.whl", None),
+                                      ("-r /Workspace/req.txt", None), ("git+https://h/r", None), ("/Workspace/../x.whl", None)])
+def test_only_pypi_requirements_and_workspace_wheels_are_migrated(dep, kind):
+    assert J.dependency_kind(dep) == kind
+
+
+def test_a_job_environment_is_kept_and_a_dependency_with_credentials_is_withheld():
+    s = J.structure(_env_job("humanize==4.9.0", WHEEL, "--index-url https://user:secretpw@pypi.example/simple"))
+    assert s["environments"] == {"libs": ["humanize==4.9.0", WHEEL]} and s["tasks"][0]["environment_key"] == "libs"
+    assert "secretpw" not in json.dumps(s) and s["withheld"] == ["environment 'libs' dependency 3"]
+    assert J.fabric_shape(J.structure(_env_job("humanize==4.9.0", WHEEL))).reasons == []
+    assert any("neither a PyPI requirement nor a .whl" in r for r in J.fabric_shape(J.structure(_env_job("/Volumes/c/s/v/x.whl"))).reasons)
+
+
+def test_each_job_environment_becomes_one_fabric_environment_with_the_wheel_read_and_the_packages_listed(tmp_path):
+    from adf2fabric.agent.workloads import environments as E
+
+    s = J.structure(_env_job("humanize==4.9.0", WHEEL))
+    envs = E.from_jobs({"9": s}, {"9:libs": ["databricks_notebook:/shared/x/run.py"]})
+    assert [(e.id, e.name, [lib.kind for lib in e.libraries]) for e in envs] == [("9:libs", "Lib_Job_libs", ["public", "custom"])]
+    e = envs[0]
+    E.generate(e, tmp_path, None)  # not read yet and no credential: said, never a blank library
+    assert e.definition_file is None and "has not been read from Databricks" in e.problems[0]
+    cached = tmp_path / "databricks" / "files" / WHEEL.lstrip("/")
+    cached.parent.mkdir(parents=True)
+    cached.write_bytes(b"PK-wheel-bytes")
+    e = E.from_jobs({"9": s}, {"9:libs": ["w"]})[0]
+    E.generate(e, tmp_path, None)
+    parts = {p["path"]: base64.b64decode(p["payload"]) for p in json.loads((tmp_path / e.definition_file).read_text())["parts"]}
+    assert parts == {"Libraries/CustomLibraries/mylib-0.1.0-py3-none-any.whl": b"PK-wheel-bytes",
+                     "Libraries/PublicLibraries/environment.yml": b"dependencies:\n  - pip:\n      - humanize==4.9.0\n"}
+    assert E.current(e, tmp_path) and e.sha256
+    assert E.attach({"metadata": {"language_info": {"name": "python"}}}, "env-id", "WS")["metadata"] == {
+        "language_info": {"name": "python"}, "dependencies": {"environment": {"environmentId": "env-id", "workspaceId": "ws"}}}
+
+
+def test_an_environment_approval_holds_only_for_the_same_definition(tmp_path):
+    from datetime import datetime, timezone
+
+    from adf2fabric.agent.workloads import environments as E
+
+    cached = tmp_path / "databricks" / "files" / WHEEL.lstrip("/")
+    cached.parent.mkdir(parents=True)
+    cached.write_bytes(b"v1")
+
+    def made():
+        e = E.from_jobs({"9": J.structure(_env_job("humanize==4.9.0", WHEEL))}, {"9:libs": ["w"]})[0]
+        E.generate(e, tmp_path, None)
+        return e
+
+    old = made()
+    E.approve(old, "Sathvik", True, "", datetime(2026, 11, 13, tzinfo=timezone.utc))
+    old.fabric_item_ids["ws"] = "env-1"
+    again = E.keep_decisions([made()], [old])[0]
+    assert again.approval.status == "approved" and again.fabric_item_ids == {"ws": "env-1"}
+    cached.write_bytes(b"v2")  # the wheel changed in Databricks
+    changed = E.keep_decisions([made()], [old])[0]
+    assert changed.approval.status == "pending" and changed.fabric_item_ids == {"ws": "env-1"}  # the item is there, the approval is not

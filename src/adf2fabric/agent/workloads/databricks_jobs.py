@@ -9,7 +9,8 @@ token or password is never stored: its name is listed under ``withheld`` and the
 or compute settings are kept. Conversion reads that file, never Databricks.
 
 Fabric runs the job as notebooks when every task is a notebook task or a Python file task from the workspace (the Python file
-becomes a notebook whose ``sys.argv[N]`` are parameter-cell variables ``argv_N``), no task installs libraries, every run condition
+becomes a notebook whose ``sys.argv[N]`` are parameter-cell variables ``argv_N``), no task installs cluster libraries (a serverless
+job ENVIRONMENT's PyPI requirements and workspace .whl files are fine: they become a Fabric Environment, ``environments.py``), every run condition
 maps to a Fabric dependency condition, and every parameter value is a literal or a whole ``{{job.parameters.<name>}}`` reference.
 Job parameters reach every notebook task by name, as Databricks pushes them to tasks that take key-value parameters (the live run
 of 2026-11-13 showed the value the ADF activity passed reaching the notebook); a Python file task gets only its own arguments.
@@ -32,7 +33,7 @@ _LIBRARY_FILES = ("jar", "whl", "egg", "requirements")
 _TASK_KINDS = ("notebook", "spark_python")  # the task types Fabric notebooks can run
 # what makes a parameter value a secret that is never written to the project
 _SECRET_VALUE = re.compile(r"\{\{\s*secrets/|dapi[0-9a-f]{32}|eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}|AccountKey=|SharedAccessSignature=|"
-                           r"(?:^|[?&])sig=|(?:password|pwd)\s*=", re.I)
+                           r"(?:^|[?&])sig=|(?:password|pwd)\s*=|://[^/\s:@]+:[^/\s@]+@", re.I)
 _SECRET_NAME = re.compile(r"(?i)(password|passwd|pwd|secret|token|apikey|api_key|accountkey|account_key|\bsas\b|credential)")
 _JOB_REF = re.compile(r"^\{\{\s*job\.parameters\.([A-Za-z0-9_.-]+)\s*\}\}$")
 _ANY_REF = re.compile(r"\{\{.*?\}\}")
@@ -41,6 +42,20 @@ _ANY_REF = re.compile(r"\{\{.*?\}\}")
 def is_secret(name: str, value: Any) -> bool:
     """A value that must never be stored: it references a Databricks secret, or looks like a key, token or password."""
     return isinstance(value, str) and bool(_SECRET_VALUE.search(value) or (_SECRET_NAME.search(name or "") and value and not _JOB_REF.match(value)))
+
+
+_PYPI = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*(\[[A-Za-z0-9,._ -]+\])?\s*((==|>=|<=|~=|!=|>|<)\s*[A-Za-z0-9.*+!_-]+\s*,?\s*)*$")
+
+
+def dependency_kind(dep: Any) -> Optional[str]:
+    """``public`` for a PyPI requirement (``humanize==4.9.0``), ``custom`` for a ``.whl`` file in the workspace
+    (``/Workspace/Shared/x.whl``), None for anything else (Volumes, DBFS, URLs, requirements files, pip options): never guessed."""
+    if not isinstance(dep, str) or not dep.strip():
+        return None
+    d = dep.strip()
+    if d.startswith("/Workspace/") and d.lower().endswith(".whl") and ".." not in d:
+        return "custom"
+    return "public" if _PYPI.match(d) else None
 
 
 def notebook_name(path: Any) -> str:
@@ -125,13 +140,23 @@ def structure(job: dict) -> dict:
             kept = [_keep(f"argument {i}", a, withheld, f"task '{key}' argument {i}") for i, a in enumerate(args, 1)]
             task["arguments"] = [a for a in kept if a is not None]
             task["argument_count"] = len(args)
+        if isinstance(t.get("environment_key"), str) and t["environment_key"]:
+            task["environment_key"] = t["environment_key"]
         tasks.append(task)
+    environments: dict[str, list[str]] = {}
+    for e in s.get("environments") or []:
+        if not isinstance(e, dict) or not isinstance(e.get("environment_key"), str):
+            continue
+        deps = (e.get("spec") or {}).get("dependencies") if isinstance(e.get("spec"), dict) else None
+        key = e["environment_key"]
+        environments[key] = [d for i, d in enumerate(deps if isinstance(deps, list) else [], 1)
+                             if _keep(f"dependency {i}", d, withheld, f"environment '{key}' dependency {i}") is not None]
     params = [p for p in s.get("parameters") or [] if isinstance(p, dict) and p.get("name")]
     job_params = {str(p["name"]): kept for p in params
                   if (kept := _keep(str(p["name"]), p.get("default"), withheld, f"job parameter '{p['name']}'")) is not None}
     return {"job_id": str(job.get("job_id") or ""), "name": str(s.get("name") or ""),
             "parameter_names": sorted(str(p["name"]) for p in params), "parameters": dict(sorted(job_params.items())),
-            "withheld": sorted(withheld), "tasks": tasks}
+            "withheld": sorted(withheld), "environments": dict(sorted(environments.items())), "tasks": tasks}
 
 
 # --- the project's copy ---------------------------------------------------------------------------------------------------------
@@ -258,6 +283,13 @@ def fabric_shape(struct: dict, activity_parameters: Any = None) -> FabricShape:
                 if got is not None:
                     params[f"argv_{i}"] = got
         shape.parameters[k] = params
+        env = t.get("environment_key")
+        if env and env not in (struct.get("environments") or {}):
+            shape.reasons.append(f"task '{k}' runs in environment '{env}', which the job's definition does not hold")
+        for dep in (struct.get("environments") or {}).get(env, []) if env else []:
+            if dependency_kind(dep) is None:
+                shape.reasons.append(f"task '{k}' environment '{env}' installs '{dep}', which is neither a PyPI requirement nor a .whl file "
+                                     "in the workspace; only those become Fabric Environment libraries")
         if t.get("libraries"):
             shape.reasons.append(f"task '{k}' installs libraries, which a Fabric notebook activity cannot")
         if t.get("run_if") not in RUN_IF_CONDITION:

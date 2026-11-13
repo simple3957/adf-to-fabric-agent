@@ -19,9 +19,10 @@ from typing import Any, Optional
 
 from adf2fabric.agent.deployment import notebook_deploy, sjd_deploy
 from adf2fabric.agent.deployment.fabric_deploy import DeployError, FabricClient
+from adf2fabric.agent.workloads import environments
 from adf2fabric.agent.workloads.engine import summarize
 from adf2fabric.project.store import ProjectStore
-from adf2fabric.project.workloads import Approval, ExecutionEvidence, WorkloadEntry, WorkloadManifest
+from adf2fabric.project.workloads import Approval, ExecutionEvidence, FabricEnvironment, WorkloadEntry, WorkloadManifest
 
 
 class LifecycleError(Exception):
@@ -38,9 +39,29 @@ def _find(m: WorkloadManifest, ident: str) -> WorkloadEntry:
     return hits[0]
 
 
+def _find_environment(m: WorkloadManifest, ident: str) -> Optional[FabricEnvironment]:
+    low = ident.lower()
+    hits = [e for e in m.environments if low in (e.id.lower(), e.name.lower())]
+    return hits[0] if len(hits) == 1 else None
+
+
 def approve(store: ProjectStore, project_id: str, ident: str, *, by: str, approve: bool = True, note: str = "",
-            now: Optional[datetime] = None) -> WorkloadEntry:
+            now: Optional[datetime] = None) -> Any:
+    """Approve (or reject) a workload's current artifact, or a generated Fabric Environment's current definition (approved on its own)."""
     m = store.load_workload_manifest(project_id)
+    env = _find_environment(m, ident)
+    if env is not None:
+        if approve and (env.problems or not env.definition_file):
+            raise LifecycleError(f"Environment '{env.name}' has no generated definition"
+                                 + (f" ({'; '.join(env.problems)})" if env.problems else " (run workloads-generate)") + ": there is nothing to approve.")
+        if approve and not environments.current(env, store.project_dir(project_id)):
+            raise LifecycleError(f"The definition of environment '{env.name}' changed since it was generated: run workloads-generate again.")
+        if not by.strip():
+            raise LifecycleError("Say who is approving (--by).")
+        environments.approve(env, by.strip(), approve, note, now or datetime.now(timezone.utc))
+        m.updated_at = now or datetime.now(timezone.utc)
+        store.save_workload_manifest(project_id, m)
+        return env
     w = _find(m, ident)
     if approve and w.artifact.kind == "none":
         raise LifecycleError(f"'{w.id}' has no generated artifact ({w.generation.reason}); there is nothing to approve.")
@@ -115,15 +136,29 @@ def create_notebook(store: ProjectStore, project_id: str, client: FabricClient, 
     if not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest() != w.artifact.sha256:
         raise LifecycleError("The generated notebook changed since it was generated; run workloads-generate again.")
     cells, moved = workspace_cells(store, project_id, client, workspace, w)
-    if moved:  # this workspace's copy: the same code, its OneLake paths pointed at this workspace's lakehouse
+    env = next((e for e in m.environments if e.id == w.fabric_environment), None) if w.fabric_environment else None
+    env_note, env_item = "", None
+    if w.fabric_environment and env is None:
+        raise LifecycleError(f"'{w.name}' uses job environment {w.fabric_environment}, which has no generated Fabric Environment: run workloads-generate.")
+    if env is not None:  # its libraries: the Environment is created and published first, then attached to the notebook
+        try:
+            env_note, env_item = environments.ensure(client, workspace, env, store.project_dir(project_id), apply=apply)
+        except DeployError as exc:
+            raise LifecycleError(f"'{w.name}' cannot be created: {getattr(exc, 'detail', None) or exc}") from None
+        store.save_workload_manifest(project_id, m)  # its id in this workspace is kept even if the notebook step fails
+    if moved or env_item:  # this workspace's copy: its OneLake paths pointed at this workspace's lakehouse, its environment attached
         nb = json.loads(path.read_text(encoding="utf-8"))
+        nb = {**nb, "cells": cells}
+        if env_item:
+            nb = environments.attach(nb, env_item, workspace)
         path = path.parent / "workspaces" / f"{workspace.lower()}.ipynb"
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps({**nb, "cells": cells}, indent=1), encoding="utf-8")
+        path.write_text(json.dumps(nb, indent=1), encoding="utf-8")
     r = notebook_deploy.deploy_notebook(client, workspace, w.artifact.display_name or w.name, notebook_deploy.build_definition(path), apply=apply)
     if not apply:
-        return w, ("Fabric would create a new notebook" if r.action == "create" else
-                   "A notebook with this name is already in the workspace: its content would be replaced by the generated notebook"), r.item_id
+        what = ("Fabric would create a new notebook" if r.action == "create" else
+                "A notebook with this name is already in the workspace: its content would be replaced by the generated notebook")
+        return w, what + (f"; environment '{env.name}': {env_note}" if env is not None else ""), r.item_id
     item_id = str(r.item_id).lower()
     at = now or datetime.now(timezone.utc)
     _record_item(w, workspace, item_id)
@@ -136,7 +171,8 @@ def create_notebook(store: ProjectStore, project_id: str, client: FabricClient, 
     if resolutions is not None:
         notebook_deploy.bind_resolutions(resolutions, w.name, item_id, workspace)
     return w, (("Created in Fabric" if r.action == "create" else "Content replaced in Fabric")
-               + (", reading this workspace's lakehouse" if moved else "") + ": its id is saved. Convert again to use it."), item_id
+               + (", reading this workspace's lakehouse" if moved else "")
+               + (f", with environment '{env.name}' ({env_note})" if env is not None else "") + ": its id is saved. Convert again to use it."), item_id
 
 
 def _bound_item(store: ProjectStore, project_id: str, pipeline: str, activity: str) -> Optional[str]:

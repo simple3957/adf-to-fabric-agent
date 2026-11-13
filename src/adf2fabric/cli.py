@@ -804,7 +804,11 @@ def _print_manifest(store, m) -> None:
     click.echo(f"  generated: {s.generated}   with open issues: {s.generated_with_open_issues}   not generated: {s.not_generated}   "
                f"approved: {s.approved}   verified executing in Fabric: {s.executed_in_fabric}")
     for w in m.workloads:
-        click.echo(f"  - {w.source_item}: {w.classification.value}; code {w.code.status.value}; {w.generation.status}; approval {w.approval.status}")
+        click.echo(f"  - {w.source_item}: {w.classification.value}; code {w.code.status.value}; {w.generation.status}; approval {w.approval.status}"
+                   + (f"; environment {w.fabric_environment}" if w.fabric_environment else ""))
+    for e in m.environments:  # approved on their own (workloads-approve --workload <name>)
+        state = "cannot be generated: " + "; ".join(e.problems) if e.problems else ("generated" if e.definition_file else "not generated")
+        click.echo(f"  - environment {e.name} ({len(e.libraries)} librar{'y' if len(e.libraries) == 1 else 'ies'}): {state}; approval {e.approval.status}")
     for note in m.notes:
         click.secho(f"  note: {note}", fg="yellow")
     click.echo(f"  manifest: {store.workload_manifest_path(m.project_id)}")
@@ -849,13 +853,14 @@ def workloads_generate(project_name, compute_sources, databricks_token_env, allo
 
 @cli.command(name="workloads-approve")
 @click.option("--project", "project_name", required=True)
-@click.option("--workload", "workload", required=True, help="Workload id, source item or name (see the manifest).")
+@click.option("--workload", "workload", required=True, help="Workload id, source item or name, or an Environment's name (see the manifest).")
 @click.option("--by", "by", required=True, help="Who is approving.")
 @click.option("--reject", is_flag=True, help="Record a rejection instead.")
 @click.option("--note", default="", help="Why (optional).")
 @_audited("workloads.approve")
 def workloads_approve(project_name: str, workload: str, by: str, reject: bool, note: str) -> None:
-    """Approve (or reject) a workload's CURRENT generated artifact for deployment to Fabric."""
+    """Approve (or reject) a workload's CURRENT generated artifact for deployment to Fabric, or a generated Fabric Environment
+    (give its name; it is approved on its own)."""
     from adf2fabric.agent.workloads.lifecycle import LifecycleError, approve
 
     store = ProjectStore(projects_root(load_config()))
@@ -865,7 +870,9 @@ def workloads_approve(project_name: str, workload: str, by: str, reject: bool, n
         click.secho(str(exc), fg="red", err=True)
         sys.exit(1)
     click.echo(f"{w.id}: {w.approval.status} by {w.approval.by}")
-    if w.unresolved and not reject:
+    if getattr(w, "libraries", None) is not None and hasattr(w, "environment_key"):  # an Environment: say what was approved
+        click.echo("  libraries: " + ", ".join(lib.spec for lib in w.libraries))
+    elif w.unresolved and not reject:
         click.secho(f"  note: {len(w.unresolved)} open issue(s) remain; approval accepts them. See the report.", fg="yellow")
 
 

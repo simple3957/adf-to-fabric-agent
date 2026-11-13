@@ -143,6 +143,16 @@ class SourceResolver:
         databricks_jobs.save(self.project_dir, job_id, struct)
         return struct, CodeSource(status=C.retrieved, location=location)
 
+    def databricks_workspace_file(self, host: str, path: str) -> bytes:
+        """The bytes of a workspace file a job environment installs (a .whl). Only when retrieval was offered; raises with what is missing."""
+        if not self.fetch:
+            raise DatabricksError("no_token", "Retrieval was not requested (it needs a Databricks credential).")
+        token = self.tokens("databricks")
+        if not token:
+            raise DatabricksError("no_token", "No Databricks token is available.")
+        validate_host(f"https://{host}")
+        return self._client(host, token).export_workspace_file(path)
+
     def _cached(self, path: str) -> Optional[tuple[str, str]]:
         base = self.project_dir / "databricks" / "notebooks"
         for ext in _EXT:

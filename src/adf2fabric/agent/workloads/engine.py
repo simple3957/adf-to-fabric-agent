@@ -25,7 +25,7 @@ from adf2fabric.agent.dependencies.access import TokenSource
 from adf2fabric.agent.deployment import sjd_deploy
 from adf2fabric.agent.deployment.fabric_deploy import DeployError
 from adf2fabric.agent.discovery.adf_semantic.pipeline_analysis import walk
-from adf2fabric.agent.workloads import analyzer, databricks_jobs, notebook_format, transform
+from adf2fabric.agent.workloads import analyzer, databricks_jobs, environments, notebook_format, transform
 from adf2fabric.agent.workloads.source import Code, SourceResolver
 from adf2fabric.project.compute import ComputeUse
 from adf2fabric.project.discovery import AdfActivity, AdfSemanticDiscovery
@@ -90,6 +90,8 @@ class _Spec:
     job_code: Optional[CodeSource] = None  # a Databricks job entry: how its definition was obtained
     job_reasons: list[str] = field(default_factory=list)  # a Databricks job entry: why Fabric notebooks cannot run it
     python_file: bool = False  # a Python file task of a Databricks job: its code becomes a notebook, sys.argv[N] -> argv_N
+    environment: Optional[str] = None  # a job task: the job environment ("<job id>:<key>") whose libraries it uses
+    environment_libraries: list[str] = field(default_factory=list)  # that environment's dependencies, as written
 
 
 def _literal_args(raw: Any) -> tuple[list[str], bool]:
@@ -138,6 +140,10 @@ def _job_specs(p: Any, a: AdfActivity, d: AdfSemanticDiscovery, read_job: Option
                                  passed=sorted(n for n in shape.parameters.get(t["key"], {}) if n not in shape.job_parameters),
                                  libraries=[], compute_id=cid, notebook_path=path,
                                  python_file=t.get("kind") == "spark_python"))
+                deps = (struct.get("environments") or {}).get(t.get("environment_key") or "", [])
+                if deps:
+                    out[-1].environment = environments.env_id(struct.get("job_id") or job_id or "", t["environment_key"])
+                    out[-1].environment_libraries = list(deps)
             return out
         reasons = shape.reasons
     name = (struct or {}).get("name") or item
@@ -271,17 +277,36 @@ def _resolve_libraries(spec: _Spec, an: Optional[analyzer.Analysis], env: Execut
             add(name, kind, origin, "environment_custom_library", "The file lives in DBFS, which Fabric cannot read: upload it to the Environment as a custom library.")
         else:
             add(name, kind, origin, "needs_review", "Not a library type this tool resolves for Fabric.")
+    for dep in spec.environment_libraries:  # the job environment's: they go to the Fabric Environment generated for it (environments.py)
+        kind = databricks_jobs.dependency_kind(dep)
+        add(dep, "pypi" if kind == "public" else "whl" if kind == "custom" else "local_file", "job_definition",
+            "in_generated_environment" if kind else "needs_review",
+            f"Installed by the Fabric Environment generated for job environment {spec.environment} (approved on its own)." if kind else
+            "Not a PyPI requirement or a workspace .whl: not migrated.")
     for lib in env.libraries:  # cluster-level libraries
         if (lib, "activity") not in seen and not any(l.name == lib for l in out):
             add(lib, "pypi", "cluster", "needs_review", "Installed on the source cluster; decide whether the Fabric Environment needs it.")
     if an is not None:
         for req in an.pip_requirements:
             add(req, "pypi", "pip_magic", "environment_public_library", "Installed inline with %pip; works per session in Fabric, or move it to the Environment.")
+        provided = {_dist(d) for d in spec.environment_libraries}
         for mod in analyzer.third_party_imports(an.imports):
+            if _dist(mod) in provided:
+                continue  # installed by the generated Environment
             add(mod, "pypi", "import", "needs_review", "Imported by the code. Confirm it is in the Fabric runtime's library list, or add it to the Environment.")
         for mod in sorted({i for i in an.imports if i in ("dlt", "dbruntime", "dbutils")}):
             add(mod, "databricks_only", "import", "not_available_in_fabric", "Exists only on Databricks clusters.")
     return sorted(out, key=lambda l: (l.origin, l.name))
+
+
+def _dist(text: str) -> str:
+    """The distribution a requirement, a wheel file or an import names, normalised (humanize==4.9.0 / my_lib-0.1.0-py3-none-any.whl /
+    my_lib -> humanize / my-lib). An import name that differs from its distribution's name is not matched (it stays for review)."""
+    base = text.strip().rsplit("/", 1)[-1]
+    base = re.split(r"[=<>!~\[ ]", base, maxsplit=1)[0]
+    if base.lower().endswith(".whl"):
+        base = base.split("-", 1)[0]
+    return re.sub(r"[-_.]+", "-", base).lower()
 
 
 def _parameters(spec: _Spec, an: Optional[analyzer.Analysis], tr: Optional[transform.Transformed]) -> list[ParameterContract]:
@@ -600,7 +625,8 @@ def build_manifest(store: ProjectStore, project_id: str, opts: Optional[Options]
         project_dir = store.project_dir(project_id)
         resolver = SourceResolver(project_dir, opts.tokens, opts.fetch, dict(opts.local_files), opts.client_factory)
         used_names: dict[str, str] = {}
-        for spec in _specs(d, plan, opts.pipelines, resolver.databricks_job):
+        specs_seen = _specs(d, plan, opts.pipelines, resolver.databricks_job)
+        for spec in specs_seen:
             entry = _assess(spec, d, plan, resolver, opts, project_dir, used_names, now)
             old = prior.get(entry.id)
             if old is not None and entry.code.status in _NOT_READ_THIS_RUN and old.code.status in _READ and old.artifact.kind != "none":
@@ -615,13 +641,36 @@ def build_manifest(store: ProjectStore, project_id: str, opts: Optional[Options]
                 if entry.artifact.sha256 is not None and entry.artifact.sha256 == old.artifact.sha256:
                     entry.approval, entry.artifact.fabric_item_id, entry.execution = old.approval, old.artifact.fabric_item_id, old.execution
             entries.append(entry)
+    envs: list = []
+    if plan is not None:
+        users: dict[str, list[str]] = {}
+        for spec in specs_seen:
+            if spec.environment:
+                users.setdefault(spec.environment, []).append(spec.id)
+        envs = environments.from_jobs(databricks_jobs.load_all(project_dir), users)
+        read = _file_reader(resolver, d, specs_seen) if opts.generate and opts.fetch else None
+        for e in envs:
+            if opts.generate:
+                environments.generate(e, project_dir, read)
+        envs = environments.keep_decisions(envs, previous.environments if previous else [])
+        by_spec = {u: e.id for e in envs for u in e.used_by}
+        for entry in entries:
+            entry.fabric_environment = by_spec.get(entry.id)
     manifest = WorkloadManifest(project_id=project_id, source_commit_sha=d.source_commit_sha, created_at=previous.created_at if previous else now,
-                                updated_at=now, workloads=sorted(entries, key=lambda e: e.id))
+                                updated_at=now, workloads=sorted(entries, key=lambda e: e.id), environments=sorted(envs, key=lambda e: e.id))
     manifest.summary = summarize(manifest)
     manifest.notes.extend(notes)
     if plan is None:
         manifest.notes.append("The estate has no Databricks or Synapse Spark activity, so there are no workloads.")
     return manifest
+
+
+def _file_reader(resolver: SourceResolver, d: AdfSemanticDiscovery, specs: list[_Spec]) -> Optional[Callable[[str], bytes]]:
+    """Reads a workspace file (a job environment's .whl) from the Databricks workspace the jobs run in, only as authorised."""
+    host = next((_workspace_host(d, s.activity.linked_service_refs[0]) for s in specs if s.environment and s.activity.linked_service_refs), None)
+    if not host:
+        return None
+    return lambda path: resolver.databricks_workspace_file(host, path)
 
 
 def _sources(opts: Options) -> ComputeSources:

@@ -180,8 +180,36 @@ Fail placeholder (`databricks_job`). With migration:
 notebook or a workspace Python file (SQL, JAR, wheel, dbt, pipeline, run-job, condition, for-each ...), code from Git or DBFS, a
 withheld (secret) value, a parameter value with any other `{{...}}` reference (or a reference inside a longer text), a base
 parameter named like a job parameter (which one wins is not mapped), `jobParameters` on the activity that is one expression or names
-a parameter the job does not define, task libraries, a `run_if` other than `ALL_SUCCESS` / `ALL_DONE`, a dependency on a condition
-outcome or on a missing task, or a dependency cycle.
+a parameter the job does not define, task (cluster) libraries, a job environment dependency that is not a PyPI requirement or a
+workspace `.whl` (Volumes, DBFS, URLs, requirements files, pip options), a `run_if` other than `ALL_SUCCESS` / `ALL_DONE`, a
+dependency on a condition outcome or on a missing task, or a dependency cycle.
+
+### Libraries of a job environment (Fabric Environments)
+
+A serverless Databricks job installs packages through a job **environment** (`environments[].spec.dependencies`), which a task
+names with `environment_key` (`agent/workloads/environments.py`, since 2026-11-13):
+
+1. **Read.** `jobs/get` keeps each environment's dependencies (a dependency with credentials in it, for example
+   `--index-url https://user:pw@...`, is withheld like a secret value). Only PyPI requirements (`humanize==4.9.0`) and `.whl` files
+   in the workspace (`/Workspace/...`) are migrated.
+2. **One Fabric Environment per job environment** (the user's decision), named `<job name>_<environment key>`, recorded in the
+   workload manifest under `environments`. `workloads-generate` with a Databricks credential reads each wheel (workspace export,
+   kept in `projects/<p>/databricks/files/`) and writes the definition `workloads/environments/<name>/definition.json`:
+   `Libraries/CustomLibraries/<file>.whl` and `Libraries/PublicLibraries/environment.yml` (`dependencies: - pip: [...]`), hashed.
+   The task's notebook lists those libraries as `in_generated_environment` (nothing for a person to upload).
+3. **Approved on its own** (the user's decision): `adf2fabric workloads-approve --workload <environment name> --by <name>`. The
+   approval holds only for that definition's hash: a changed wheel or package list needs approving again.
+4. **Deploy** (the Deploy step, `lifecycle.create_notebook`) creates the Environment in the workspace before the notebook that uses
+   it, publishes it (`staging/publish?beta=false`, waits for `Success`; about 5 minutes live), records its id per workspace, and
+   attaches it to the notebook's copy for that workspace with `metadata.dependencies.environment {environmentId, workspaceId}`.
+   An unapproved or changed Environment stops the notebook with the reason; an Environment of that name already in the workspace
+   that this project did not create is never changed (bind it, or rename or remove it). Nothing is deleted.
+
+**Checked live (fabric-demo, 2026-11-13).** Microsoft documents the Environment definition parts and publish call, but not the notebook
+key that attaches an Environment. A probe (items `zz_env_probe`, `zz_env_probe_nb`, `zz_env_probe_pl`, left for you to delete) created
+an Environment with a wheel and a PyPI package, published it, created a notebook with `metadata.dependencies.environment`, read the
+definition back (Fabric keeps it, and shows it in the `# META` block of its .py format) and ran the notebook from a pipeline: it
+imported both libraries (exit value `high|low|1,234,567`).
 
 ## What Microsoft documents, and what is still unverified
 

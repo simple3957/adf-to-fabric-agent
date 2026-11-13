@@ -237,6 +237,7 @@ class WorkloadEntry(_Strict):
     generation: GenerationEvidence = Field(default_factory=GenerationEvidence)
     execution: ExecutionEvidence = Field(default_factory=ExecutionEvidence)
     approval: Approval = Field(default_factory=Approval)
+    fabric_environment: Optional[str] = None  # the FabricEnvironment (id) its libraries come from: a Databricks job environment
 
 
 class WorkloadSummary(_Strict):
@@ -250,6 +251,35 @@ class WorkloadSummary(_Strict):
     approved: int = 0
 
 
+class EnvironmentLibrary(_Strict):
+    """One library a Databricks job environment installs: a PyPI requirement (``public``) or a wheel file in the workspace (``custom``)."""
+
+    kind: str  # public | custom
+    spec: str  # the requirement as written (public) or the workspace path of the file (custom)
+    file: Optional[str] = None  # custom: project-relative path of the copy read from Databricks
+    sha256: Optional[str] = None  # custom: hash of that copy
+
+
+class FabricEnvironment(_Strict):
+    """A Fabric Environment generated from one Databricks job environment (job + environment_key), approved on its own.
+
+    Its definition (wheel files + environment.yml) is hashed; an approval holds only for that hash. Deploy creates and publishes it in a
+    workspace before the notebooks that use it, never changes one that is already there (it must be bound), and records its id there."""
+
+    id: str  # "<job id>:<environment key>"
+    name: str  # Fabric display name
+    job_id: str
+    environment_key: str
+    used_by: list[str] = Field(default_factory=list)  # workload ids of the tasks that run in it
+    libraries: list[EnvironmentLibrary] = Field(default_factory=list)
+    problems: list[str] = Field(default_factory=list)  # why it cannot be generated (each a sentence); empty = it can
+    definition_file: Optional[str] = None  # project-relative path of the REST definition (parts), once generated
+    sha256: Optional[str] = None
+    approval: Approval = Field(default_factory=Approval)
+    fabric_item_ids: dict[str, str] = Field(default_factory=dict)  # workspace id (lower) -> environment id
+    published: dict[str, str] = Field(default_factory=dict)  # workspace id (lower) -> publish state read after the last publish
+
+
 class WorkloadManifest(_Strict):
     schema_version: str = WORKLOAD_SCHEMA_VERSION
     project_id: str
@@ -258,4 +288,5 @@ class WorkloadManifest(_Strict):
     updated_at: datetime
     summary: WorkloadSummary = Field(default_factory=WorkloadSummary)
     workloads: list[WorkloadEntry] = Field(default_factory=list)  # sorted by id
+    environments: list[FabricEnvironment] = Field(default_factory=list)  # sorted by id
     notes: list[str] = Field(default_factory=list)

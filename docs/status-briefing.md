@@ -20,6 +20,11 @@ outputs equal the Databricks run's row for row (4 rows; 3 product totals). `veri
 two Fabric ones); it now compares the job activity with its task activities together and reports `matches` (status and runs;
 a Databricks Job activity has no counts, so the outputs were compared by hand).
 
+Also on 2026-11-13, `PL_DatabricksJob_Lib_Test`: a serverless job whose environment installs a custom wheel and a PyPI package. The
+tool read the wheel from Databricks, generated the Fabric Environment `ADF_Migration_Lib_Job_libs` (approved separately by a person),
+and Deploy created and published it (about 5 minutes), then created the notebook attached to it. The Fabric run matches ADF and its
+output equals Databricks row for row (the wheel's bands and `humanize`'s text). The read-back does not list Environments yet.
+
 ## Where each area stands
 
 | Area | Status | What is missing |
@@ -31,7 +36,7 @@ a Databricks Job activity has no counts, so the outputs were compared by hand).
 | Triggers | Partial | Schedule and tumbling window convert (created disabled); event and custom-event triggers are manual |
 | Connections | Partial | Auto-create for SQL/Synapse, ADLS Gen2, Blob, REST, Databricks; about 50 other types get a verdict only; OAuth and gateway are manual |
 | Storage | Partial | ADLS Gen2 shortcuts and CSV/Parquet repointing; other stores, `wasbs://` and computed paths stay as written |
-| Spark workloads | Built, CLI only | Generate, approve, deploy, record-run for Databricks notebooks, and for the notebook and Python file tasks of a Databricks Job activity (job read with `jobs/get`, live 2026-11-13; job parameters, base parameters and Python arguments mapped to notebook parameters, run live in Fabric 2026-11-13 with outputs equal to Databricks; other task types stay blocked); no custom jar/wheel libraries |
+| Spark workloads | Built, CLI only | Generate, approve, deploy, record-run for Databricks notebooks, and for the notebook and Python file tasks of a Databricks Job activity (job read with `jobs/get`, live 2026-11-13; job parameters, base parameters and Python arguments mapped to notebook parameters, run live in Fabric 2026-11-13 with outputs equal to Databricks; other task types stay blocked); a job environment's PyPI packages and workspace wheels become a Fabric Environment (live 2026-11-13); cluster (task) libraries, JARs, Volumes/DBFS files are not migrated |
 | Compute (pools, environments) | Built | `compute-deploy` creation not tested (its fake-only test was removed 2026-11-11; provisioning created the same items live) |
 | Provisioning | Partial live | Pool and environment live; workspace, capacity, roles, lakehouse, ARM capacity never run live, and their fake-only tests were removed 2026-11-11 |
 | Run and compare (`verify`) | Done, live | Compares by activity facts; needs a baseline run |
