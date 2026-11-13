@@ -163,3 +163,46 @@ def test_the_handover_gives_a_reproduced_failure_its_own_level():
 
     assert handover._FROM_VERDICT["same_failure"] == "source_also_fails" and "source_also_fails" in handover._RANK
     assert handover._RANK["run_failed"] < handover._RANK["source_also_fails"] < handover._RANK["differs"]  # still needs a person, ahead of "results differ"
+
+
+# a Databricks job activity that conversion split into one Notebook activity per task (found live on 2026-11-13: the run was
+# reported no_baseline because the ADF run's one activity and the Fabric run's two had no name in common)
+SPLIT = {"Run_Param_Job": ["Run_Param_Job_notebook_task", "Run_Param_Job_python_task"]}
+
+
+def _judged(fabric_runs, base_runs, split=SPLIT):
+    v = V.Verification("PL", "failed")
+    v.activities = V.summarize(fabric_runs)
+    return V._judge(v, V.summarize(base_runs), split=split)
+
+
+def test_an_adf_activity_split_by_conversion_is_compared_with_all_its_parts():
+    v = _judged([act("Run_Param_Job_notebook_task", "TridentNotebook"), act("Run_Param_Job_python_task", "TridentNotebook")],
+                [act("Run_Param_Job", "DatabricksJob")])
+    assert v.verdict == "matches" and v.matched == 2 and not v.baseline_only and not v.fabric_only
+    assert "compared with all of them together" in v.detail
+    assert set(v.activities) == {"Run_Param_Job_notebook_task", "Run_Param_Job_python_task"}  # each part's own figures are kept
+
+
+def test_a_split_activity_differs_when_any_part_failed_and_is_never_merged_when_a_part_did_not_run():
+    v = _judged([act("Run_Param_Job_notebook_task", "TridentNotebook"), act("Run_Param_Job_python_task", "TridentNotebook", "Failed")],
+                [act("Run_Param_Job", "DatabricksJob")])
+    assert v.verdict == "differs" and v.differences[0]["fact"] == "status" and v.differences[0]["fabric"] == "Failed"
+    v = _judged([act("Run_Param_Job_notebook_task", "TridentNotebook")], [act("Run_Param_Job", "DatabricksJob")])
+    assert v.verdict == "no_baseline"  # one part missing: nothing is merged, nothing is claimed
+    v = _judged([act("Run_Param_Job_notebook_task", "TridentNotebook"), act("Run_Param_Job_python_task", "TridentNotebook")],
+                [act("Run_Param_Job", "DatabricksJob")], split=None)
+    assert v.verdict == "no_baseline"  # without the conversion's map nothing is paired by guess
+
+
+def test_the_split_map_comes_from_activities_converted_to_more_than_one_primary_activity():
+    from adf2fabric.project.conversion import (ActivityConversion, ConversionStatus, ConversionStrategy, FabricComponent,
+                                               PipelineConversion)
+
+    def a(name, *parts):
+        return ActivityConversion(source_activity_id=name, source_name=name, strategy=ConversionStrategy.composite,
+                                  status=ConversionStatus.converted,
+                                  components=[FabricComponent(name=p, fabric_type="TridentNotebook", role="primary") for p in parts])
+
+    p = PipelineConversion.model_construct(source_pipeline="PL", activities=[a("Job", "Job_a", "Job_b"), a("Copy", "Copy"), a("One", "One_x")])
+    assert V.splits([p]) == {"PL": {"Job": ["Job_a", "Job_b"]}}

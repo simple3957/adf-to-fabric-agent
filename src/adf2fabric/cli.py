@@ -2118,6 +2118,7 @@ def verify_cmd(project_name: str, workspace_id: str, pipelines: tuple[str, ...],
     from adf2fabric.agent.deployment.fabric_deploy import FABRIC_SCOPE, DeployError, FabricClient
     from adf2fabric.agent.deployment.verify import AdfRuns, Factory, load_record, render_report, save_record, verify_all
     from adf2fabric.agent.deployment.verify import callers as verify_callers
+    from adf2fabric.agent.deployment.verify import splits as verify_splits
     from adf2fabric.agent.deployment.verify import record_path as verify_record_path
     from adf2fabric.connections.providers.azure_cli import AzureCliProvider, ProviderError
     from adf2fabric.connectivity._azure import CredentialUnavailable, build_credential
@@ -2150,7 +2151,7 @@ def verify_cmd(project_name: str, workspace_id: str, pipelines: tuple[str, ...],
                    f"  workspace: {workspace_id}")
         results = verify_all(lambda: FabricClient(fabric_token), workspace_id, names, start=apply_, adf=adf,
                              previous=previous, called=called, timeout_seconds=timeout_seconds,
-                             baseline="fabric" if no_adf else "adf" if use_adf else "")
+                             baseline="fabric" if no_adf else "adf" if use_adf else "", splits=verify_splits(conv.pipelines))
         for n, v in zip(names, results):
             colour = {"matches": "green", "partial": "yellow", "differs": "yellow", "no_baseline": None, "failed": "red",
                       "not_run": None}[v.verdict]

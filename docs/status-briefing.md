@@ -16,8 +16,9 @@ On 2026-11-13, project `adf2fabricv1`, workspace `fabric-demo`: the Databricks j
 `run_date` passed by the ADF activity, a notebook task with base parameter `min_amount`, then a Python file task with two arguments)
 was read with `jobs/get` (az login, Entra ID token), its two tasks generated as notebooks, approved by a person, created in the
 workspace by the Deploy step and converted to two Notebook activities with their parameters. The Fabric run completed and both
-outputs equal the Databricks run's row for row (4 rows; 3 product totals). `verify` reports `no_baseline` for it: the ADF run has one
-activity (`Run_Param_Job`) and the Fabric run two, so nothing matches by name; the proof was the outputs, compared by hand.
+outputs equal the Databricks run's row for row (4 rows; 3 product totals). `verify` first reported `no_baseline` (one ADF activity,
+two Fabric ones); it now compares the job activity with its task activities together and reports `matches` (status and runs;
+a Databricks Job activity has no counts, so the outputs were compared by hand).
 
 ## Where each area stands
 
@@ -31,7 +32,6 @@ activity (`Run_Param_Job`) and the Fabric run two, so nothing matches by name; t
 | Connections | Partial | Auto-create for SQL/Synapse, ADLS Gen2, Blob, REST, Databricks; about 50 other types get a verdict only; OAuth and gateway are manual |
 | Storage | Partial | ADLS Gen2 shortcuts and CSV/Parquet repointing; other stores, `wasbs://` and computed paths stay as written |
 | Spark workloads | Built, CLI only | Generate, approve, deploy, record-run for Databricks notebooks, and for the notebook and Python file tasks of a Databricks Job activity (job read with `jobs/get`, live 2026-11-13; job parameters, base parameters and Python arguments mapped to notebook parameters, run live in Fabric 2026-11-13 with outputs equal to Databricks; other task types stay blocked); no custom jar/wheel libraries |
-| Run and compare of a split Databricks job | Gap | `verify` matches activities by name, so a job activity converted to several task activities reports `no_baseline` |
 | Compute (pools, environments) | Built | `compute-deploy` creation not tested (its fake-only test was removed 2026-11-11; provisioning created the same items live) |
 | Provisioning | Partial live | Pool and environment live; workspace, capacity, roles, lakehouse, ARM capacity never run live, and their fake-only tests were removed 2026-11-11 |
 | Run and compare (`verify`) | Done, live | Compares by activity facts; needs a baseline run |

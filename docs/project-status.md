@@ -351,6 +351,11 @@ For the run check, each pipeline is run in Fabric and compared, step by step, wi
 On the sample, that was 132 checks across the 10 pipelines, with 0 differences. Only counts and fingerprints are kept, never the data
 itself. A run made before the latest deployment is out of date and must be repeated.
 
+Steps are matched by name. A step that conversion turned into several steps (a Databricks Job activity becomes one Notebook activity
+per task) is compared with all of them together: it succeeded only if every part did, and their counts are added. This pairing comes
+from the conversion record, never from a guess, and is used only when every part ran (since 2026-11-13; before that such a pipeline
+showed "no baseline"). An ADF Databricks Job step reports no row counts, so this proves status only: check its output as well.
+
 #### When there is no ADF run to compare with
 
 A new client may never have run a pipeline in ADF, or its runs may not have moved any data. Two options cover this, and neither needs the

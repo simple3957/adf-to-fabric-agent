@@ -121,6 +121,7 @@ def _write_storage_map(c: Container, pid: str, lakehouse: str) -> None:
 def _verify(c: Container, session: Session, pid: str, options: dict, log: Log) -> dict[str, Any]:
     """Compare Fabric runs with ADF. By default read-only (the latest finished runs); with ``run`` (authorised, confirmed and audited by the
     route) it STARTS a real run of each named pipeline and waits for it."""
+    from adf2fabric.agent.deployment.verify import splits as verify_splits
     from adf2fabric.agent.deployment.verify import (AdfRuns, Factory, callers, load_record, record_path, render_report,
                                                     save_record, verify_all)
 
@@ -155,7 +156,8 @@ def _verify(c: Container, session: Session, pid: str, options: dict, log: Log) -
             log(f"Starting real runs of {len(names)} pipeline(s) in Fabric")
         # a fresh token for every pipeline: started runs are waited for one after another and can outlast a single token
         results = verify_all(lambda: FabricClient(c.fabric_token(session)), workspace, names, start=start, adf=adf, previous=previous,
-                             called=called, timeout_seconds=int(options.get("run_timeout") or 1800), log=log)
+                             called=called, timeout_seconds=int(options.get("run_timeout") or 1800), log=log,
+                             splits=verify_splits(conv.pipelines))
     except DeployError as exc:
         raise StageError(str(exc)) from None
     record = save_record(path, results)

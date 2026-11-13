@@ -95,6 +95,26 @@ def summarize(runs: list[ActivityRun]) -> dict[str, dict]:
     return out
 
 
+def merge_split(fabric: dict[str, dict], base: dict[str, dict], split: Optional[dict[str, list[str]]]) -> tuple[dict[str, dict], list[str]]:
+    """The Fabric side as the baseline names it: an ADF activity that conversion turned into several Fabric activities (a
+    Databricks job's tasks) is compared with all of them together. It ran once and Succeeded only when every part did; their
+    numbers are added. Only when the ADF name itself is not in the Fabric run, and every part ran. Returns (merged, notes)."""
+    out, notes = dict(fabric), []
+    for name, parts in (split or {}).items():
+        if name in out or name not in base or len(parts) < 2 or not all(p in out for p in parts):
+            continue
+        got = [out.pop(p) for p in parts]
+        status = "Succeeded" if all(g["status"] == "Succeeded" for g in got) else next(g["status"] for g in got if g["status"] != "Succeeded")
+        metrics_: dict[str, Any] = {}
+        for g in got:
+            for k, v in g["metrics"].items():
+                metrics_[k] = sorted((metrics_.get(k) or []) + list(v)) if k.endswith("#") else metrics_.get(k, 0) + v
+        out[name] = {"type": base[name].get("type"), "runs": 1 if all(g["runs"] == 1 for g in got) else max(g["runs"] for g in got),
+                     "status": status, "metrics": metrics_}
+        notes.append(f"'{name}' was converted to {len(parts)} activities ({', '.join(parts)}): compared with all of them together.")
+    return out, notes
+
+
 def compare(fabric: dict[str, dict], base: dict[str, dict]) -> tuple[list[dict], int]:
     """(differences, number of facts that matched). Only activities and facts present on both sides are compared."""
     diffs, matched = [], 0
@@ -282,13 +302,13 @@ class Verification:
 def verify_pipeline(client: FabricClient, workspace: str, pipeline: str, *, start: bool,
                     adf: Optional[AdfRuns] = None, previous: Optional[dict] = None, timeout_seconds: int = 1800,
                     runner: Callable[..., RunResult] = run_pipeline, called_by: Optional[list[str]] = None,
-                    ids: Optional[dict[str, str]] = None) -> Verification:
+                    ids: Optional[dict[str, str]] = None, split: Optional[dict[str, list[str]]] = None) -> Verification:
     """Run (``start``) or read the latest run of one pipeline in Fabric and compare it with the best baseline there is.
 
     Nothing raised here stops the caller's loop: a pipeline that is not deployed, or a Fabric or ADF call that fails, is
     reported on that pipeline's own verdict."""
     if called_by:
-        return _verify_batch(client, workspace, pipeline, called_by, adf, previous, ids)
+        return _verify_batch(client, workspace, pipeline, called_by, adf, previous, ids, split)
     try:
         if start:
             run = runner(client, workspace, pipeline, wait=True, timeout_seconds=timeout_seconds)
@@ -323,16 +343,18 @@ def verify_pipeline(client: FabricClient, workspace: str, pipeline: str, *, star
         v.verdict = "no_baseline"
         v.detail = v.detail or "No successful ADF run in the last 45 days and no earlier Fabric run: this run is the baseline."
         return v
-    return _judge(v, base)
+    return _judge(v, base, split=split if v.baseline == "adf" else None)  # an earlier Fabric run already has the same parts
 
 
-def _judge(v: Verification, base: dict[str, dict], how: str = "") -> Verification:
-    """The verdict from comparing ``v.activities`` with ``base``; ``how`` says what was compared (for a batch)."""
-    v.differences, v.matched = compare(v.activities, base)
+def _judge(v: Verification, base: dict[str, dict], how: str = "", split: Optional[dict[str, list[str]]] = None) -> Verification:
+    """The verdict from comparing ``v.activities`` with ``base``; ``how`` says what was compared (for a batch). ``v.activities``
+    keeps each Fabric activity's own figures; an ADF activity split by conversion is compared with its parts (``merge_split``)."""
+    fabric, merged = merge_split(v.activities, base, split)
+    v.differences, v.matched = compare(fabric, base)
     v.baseline_activities = base
-    v.baseline_only = sorted(set(base) - set(v.activities), key=str.lower)
-    v.fabric_only = sorted(set(v.activities) - set(base), key=str.lower)
-    notes = [how] if how else []
+    v.baseline_only = sorted(set(base) - set(fabric), key=str.lower)
+    v.fabric_only = sorted(set(fabric) - set(base), key=str.lower)
+    notes = ([how] if how else []) + merged
     if v.differences:
         v.verdict = "differs"
     elif not v.matched:
@@ -352,7 +374,8 @@ def _judge(v: Verification, base: dict[str, dict], how: str = "") -> Verificatio
 def verify_all(make_client: Callable[[], FabricClient], workspace: str, names: list[str], *, start: bool,
                adf: Optional[AdfRuns] = None, previous: Optional[dict[str, dict]] = None,
                called: Optional[dict[str, list[str]]] = None, timeout_seconds: int = 1800, workers: int = 10,
-               log: Callable[[str], None] = lambda _m: None, baseline: str = "") -> list[Verification]:
+               log: Callable[[str], None] = lambda _m: None, baseline: str = "",
+               splits: Optional[dict[str, dict[str, list[str]]]] = None) -> list[Verification]:
     """Verify ``names`` and return the results in the same order.
 
     ``baseline`` is a person's choice for these pipelines: "fabric" compares them with earlier Fabric runs only and is remembered in the
@@ -382,7 +405,7 @@ def verify_all(make_client: Callable[[], FabricClient], workspace: str, names: l
         choice = "" if choice == "adf" else choice
         v = verify_pipeline(make_client(), workspace, name, start=start, adf=adf.clone() if adf and choice != "fabric" else None,
                             previous=previous.get(name), timeout_seconds=timeout_seconds,
-                            called_by=called.get(name), ids=ids)
+                            called_by=called.get(name), ids=ids, split=(splits or {}).get(name))
         v.baseline_choice = choice
         v.workspace = workspace.lower()
         prev = previous.get(name) or {}
@@ -402,7 +425,8 @@ def verify_all(make_client: Callable[[], FabricClient], workspace: str, names: l
 
 
 def _verify_batch(client: FabricClient, workspace: str, pipeline: str, called_by: list[str], adf: Optional[AdfRuns],
-                  previous: Optional[dict], ids: Optional[dict[str, str]] = None) -> Verification:
+                  previous: Optional[dict], ids: Optional[dict[str, str]] = None,
+                  split: Optional[dict[str, list[str]]] = None) -> Verification:
     """A pipeline another one calls (often once per item, with different parameters) is compared as a batch: every run
     that started together, merged. Comparing one run with one run would pair different items. It is never started on its
     own here (it needs its parent's parameters): run the parent."""
@@ -457,7 +481,7 @@ def _verify_batch(client: FabricClient, workspace: str, pipeline: str, called_by
     if base is None:
         v.verdict, v.detail = "no_baseline", v.detail or f"Nothing to compare {batch} with yet."
         return v
-    return _judge(v, base, f"Compared as {batch}.")
+    return _judge(v, base, f"Compared as {batch}.", split=split if v.baseline == "adf" else None)
 
 
 _TARGET_FAILED = re.compile(r"Operation on target\s+(\S.*?)\s+failed:\s*(.*)", re.S | re.I)
@@ -568,6 +592,18 @@ def callers(conversion_dir: Path, pipelines: list) -> dict[str, list[str]]:
                     children.append(child)
         for child in children:
             out.setdefault(child, []).append(p.source_pipeline)
+    return out
+
+
+def splits(pipelines: list) -> dict[str, dict[str, list[str]]]:
+    """Pipeline -> {ADF activity: the Fabric activities conversion turned it into}, for activities that became more than one
+    primary activity (``pipelines`` = PipelineConversion), so a run can be compared with the ADF run activity for activity."""
+    out: dict[str, dict[str, list[str]]] = {}
+    for p in pipelines:
+        for a in getattr(p, "activities", None) or []:
+            parts = [c.name for c in a.components if c.role == "primary"]
+            if len(parts) > 1 and a.source_name not in parts:
+                out.setdefault(p.source_pipeline, {})[a.source_name] = parts
     return out
 
 

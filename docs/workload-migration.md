@@ -220,5 +220,5 @@ Probe items left in the workspace for you to delete in the portal: notebook `zz_
 * Databricks Job activities: only notebook and workspace Python file tasks migrate, and only the parameter forms listed above (see
   [Databricks Job activities](#databricks-job-activities)). `jobs/get` and the workspace-file export were run against the real
   workspace on 2026-11-13 (az login, Entra ID token), and a job converted with parameters ran in Fabric the same day with outputs
-  equal to Databricks ([status-briefing.md](status-briefing.md)). `verify` cannot compare such a job yet: it matches activities by
-  name, and the job's one ADF activity became one Fabric activity per task.
+  equal to Databricks ([status-briefing.md](status-briefing.md)). `verify` compares the job's one ADF activity with its task
+  activities together (status and runs only: the ADF activity reports no counts).
