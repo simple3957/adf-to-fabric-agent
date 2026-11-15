@@ -25,7 +25,7 @@ from adf2fabric.agent.dependencies.access import TokenSource
 from adf2fabric.agent.deployment import sjd_deploy
 from adf2fabric.agent.deployment.fabric_deploy import DeployError
 from adf2fabric.agent.discovery.adf_semantic.pipeline_analysis import walk
-from adf2fabric.agent.workloads import analyzer, databricks_jobs, environments, notebook_format, transform
+from adf2fabric.agent.workloads import analyzer, databricks_jobs, dataflow, environments, notebook_format, transform
 from adf2fabric.agent.workloads.source import Code, SourceResolver
 from adf2fabric.project.compute import ComputeUse
 from adf2fabric.project.discovery import AdfActivity, AdfSemanticDiscovery
@@ -160,6 +160,13 @@ def _specs(d: AdfSemanticDiscovery, plan: Any, selected: Optional[set[str]], rea
         for a in walk(p.activities):
             raw = a.raw_properties
             t = a.type
+            if t == "ExecuteDataFlow":  # a mapping data flow runs as the Fabric notebook it is translated into
+                df = _ref(raw.get("dataflow"))
+                if df:
+                    wid = f"{W.adf_dataflow.value}:{df.lower()}"
+                    spec = specs.setdefault(wid, _Spec(wid, W.adf_dataflow, df, df, a, p.name))
+                    spec.used_by.append(f"{p.name}/{a.name}")
+                continue
             if t == "DatabricksJob":
                 for js in _job_specs(p, a, d, read_job, cid_of.get((p.name, a.name), "")):
                     spec = specs.setdefault(js.id, js)
@@ -212,6 +219,8 @@ def _specs(d: AdfSemanticDiscovery, plan: Any, selected: Optional[set[str]], rea
 
 
 def _environment(spec: _Spec, d: AdfSemanticDiscovery, plan: Any) -> ExecutionEnvironment:
+    if spec.kind is W.adf_dataflow:  # ADF's own Spark runs a data flow; in Fabric it is a notebook on the workspace's runtime
+        return ExecutionEnvironment(platform="adf_dataflow")
     use: Optional[ComputeUse] = next((u for u in plan.inventory if u.id == spec.compute_id), None)
     platform = "databricks" if spec.kind.value.startswith("databricks") else "synapse"
     env = ExecutionEnvironment(platform=platform)
@@ -617,6 +626,8 @@ def build_manifest(store: ProjectStore, project_id: str, opts: Optional[Options]
     now = now or datetime.now(timezone.utc)
     d = store.load_adf_semantic_discovery(project_id)
     plan = build_compute_plan(d, opts.pipelines, _sources(opts))
+    if plan is None and any(a.type == "ExecuteDataFlow" for p in d.pipelines for a in walk(p.activities)):
+        plan = _NoCompute()  # data flows only: nothing to size, but each one is still translated
     previous = store.load_workload_manifest(project_id) if store.has_workload_manifest(project_id) else None
     prior = {w.id: w for w in previous.workloads} if previous else {}
     entries: list[WorkloadEntry] = []
@@ -673,6 +684,57 @@ def _file_reader(resolver: SourceResolver, d: AdfSemanticDiscovery, specs: list[
     return lambda path: resolver.databricks_workspace_file(host, path)
 
 
+@dataclass
+class _NoCompute:
+    """The compute plan of an estate whose only Spark is ADF's own (data flows): nothing to size."""
+
+    targets: list = field(default_factory=list)
+    inventory: list = field(default_factory=list)
+    gaps: list = field(default_factory=list)
+
+
+def _dataflow_file(project_dir: Path, name: str) -> Optional[Path]:
+    src = project_dir / "source"
+    hits = sorted(src.glob(f"**/dataflow/{name}.json")) if src.is_dir() else []
+    return hits[0] if hits else None
+
+
+def _assess_dataflow(spec: _Spec, d: AdfSemanticDiscovery, project_dir: Path, opts: Options):
+    """(code, analysis, notebook, findings) for a mapping data flow: its script, translated by fixed rules (dataflow.py). A step the rules
+    do not map is a finding (and a cell that raises), never a guess; the flow is never left without a notebook because of it."""
+    loc = f"dataflow/{spec.source_item}.json"
+    path = _dataflow_file(project_dir, spec.source_item)
+    if path is None:
+        return Code(CodeSource(status=C.not_found, location=loc, detail="The data flow is not in the imported source.",
+                               action="Import the source again with its dataflow/ folder (or the ARM template that holds it).")), None, None, []
+    raw = json.loads(path.read_text(encoding="utf-8-sig"))
+    props = raw.get("properties") or {}
+    tp = props.get("typeProperties") or {}
+    text = dataflow.script_text(tp) or ""
+    source = CodeSource(status=C.in_project, location=loc, language="dataflow_script", sha256=hashlib.sha256(text.encode()).hexdigest(),
+                        lines=text.count("\n") + 1 if text else 0)
+    if props.get("type") != "MappingDataFlow":
+        return Code(source, text), None, None, [_finding("dataflow_type", F.source, S.blocker, f"A {props.get('type')} is not a mapping data flow; "
+                                                         "only mapping data flows are translated.", "Use Dataflow Gen2 (Power Query) for a wrangling data flow.")]
+    datasets = {x.name.lower(): x.model_dump() for x in d.datasets}
+    endpoints = {x.name.lower(): x.endpoint for x in d.linked_services if getattr(x, "endpoint", None)}
+    try:
+        dtr = dataflow.translate(text, dataflow.nodes_of(tp), datasets, endpoints)
+    except dataflow.ScriptError as exc:
+        return Code(source, text), None, None, [_finding("unreadable_notebook", F.source, S.blocker, f"The data flow script cannot be read: {exc}.")]
+    findings = [_finding("dataflow_untranslated", F.api, S.change, f"Data flow step {u} is not translated by the fixed rules.",
+                         "Draft it with a model (assist) or write it by hand; until then its notebook cell raises NotImplementedError.", u.split(" ")[0])
+                for u in dtr.untranslated]
+    findings += [_finding("dataflow_review", F.contract, S.review, n, "Check it against the data flow.") for n in dtr.notes]
+    code_cells = [c for c in dtr.cells if c["cell_type"] == "code"]
+    an = analyzer.analyze([notebook_format.Cell(i, "python", "".join(c["source"]), 1) for i, c in enumerate(code_cells)], "databricks")
+    findings += an.findings
+    tr = transform.Transformed(cells=dtr.cells, parameters=list(dtr.parameters), source_parameters={n for n, _ in dtr.parameters})
+    if opts.storage_routes:
+        _route_storage(tr, findings, opts.storage_routes)
+    return Code(source, text), an, tr, findings
+
+
 def _sources(opts: Options) -> ComputeSources:
     from adf2fabric.agent.conversion.compute_plan import load_sources
 
@@ -705,7 +767,11 @@ def _assess(spec: _Spec, d: AdfSemanticDiscovery, plan: Any, resolver: SourceRes
     # 1. the code
     if spec.kind is W.databricks_job:
         return _assess_job(spec, env, d)
-    if spec.kind is W.databricks_notebook:
+    cells = None
+    if spec.kind is W.adf_dataflow:
+        code, an, tr, fs = _assess_dataflow(spec, d, project_dir, opts)
+        findings += fs
+    elif spec.kind is W.databricks_notebook:
         code = resolver.databricks_notebook(env.workspace, spec.notebook_path or _text(raw.get("notebookPath")), file=spec.python_file)
     elif spec.kind is W.databricks_python:
         code = resolver.databricks_python(env.workspace, _text(raw.get("pythonFile")))
@@ -717,8 +783,9 @@ def _assess(spec: _Spec, d: AdfSemanticDiscovery, plan: Any, resolver: SourceRes
     else:
         code = resolver.synapse_artifact("sparkJobDefinition", _ref(raw.get("sparkJob")))
     # 2. analysis
-    cells = None
-    if spec.kind in (W.databricks_notebook, W.synapse_notebook):
+    if spec.kind is W.adf_dataflow:
+        pass  # translated above
+    elif spec.kind in (W.databricks_notebook, W.synapse_notebook):
         an, tr, fs, cells = _assess_notebook(spec, code, env, opts)
         findings += fs
         if spec.kind is W.synapse_notebook and code.data is not None:
@@ -742,7 +809,8 @@ def _assess(spec: _Spec, d: AdfSemanticDiscovery, plan: Any, resolver: SourceRes
     if spec.kind is W.databricks_jar and jar_uri is None:
         findings.append(_finding("jar_not_uploaded", F.source, S.change, "The JAR must be uploaded to OneLake/ADLS: a Fabric Spark job definition stores a reference to it.",
                                  "Upload it and pass --artifact <main class>=<abfss URI>."))
-    findings += _runtime_findings(env, spec.kind is W.databricks_jar)
+    if spec.kind is not W.adf_dataflow:
+        findings += _runtime_findings(env, spec.kind is W.databricks_jar)
     libs = _resolve_libraries(spec, an, env)
     params = _parameters(spec, an, tr)
     outputs = _outputs(spec, d)
@@ -861,7 +929,7 @@ def _generate(entry: WorkloadEntry, spec: _Spec, code: Code, tr: Optional[transf
     used_names[display.lower()] = entry.id
     base = f"workloads/artifacts/{slug}"
     try:
-        if spec.kind in (W.databricks_notebook, W.synapse_notebook) and tr is not None and an is not None:
+        if spec.kind in (W.databricks_notebook, W.synapse_notebook, W.adf_dataflow) and tr is not None and an is not None:
             ipynb = transform.to_ipynb(tr.cells)
             rel, sha = _write(project_dir, f"{base}/{display}.ipynb", json.dumps(ipynb, indent=1, ensure_ascii=False).encode("utf-8"))
             entry.artifact = GeneratedArtifact(kind="fabric_notebook", file=rel, sha256=sha, display_name=display,

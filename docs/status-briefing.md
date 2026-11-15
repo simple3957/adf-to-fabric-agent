@@ -32,7 +32,7 @@ output equals Databricks row for row (the wheel's bands and `humanize`'s text). 
 | Discovery (Git, ZIP, live ARM, `adf_publish`) | Done | Sovereign-cloud storage suffixes are public-cloud only, and the endpoints are untested |
 | Activities | Done for about 35 types | SSIS, U-SQL, AzureML classic blocked on purpose; `SqlPoolStoredProcedure` converts to a Fabric Stored procedure (connection bound by pool name), other Synapse-only types have no rule |
 | Datasets | Done | Inlined as `datasetSettings` |
-| Data flows | Scaffold | `ExecuteDataFlow` becomes a Dataflow Gen2 refresh; the flow itself is not read or converted |
+| Data flows | Built 2026-11-15, not yet run in Fabric | A mapping data flow's script is translated to a PySpark notebook by fixed rules and run from a Notebook activity; untranslated steps (pivot, alter row, column patterns ...) raise and are listed, a model draft for them is not built yet; wrangling data flows still become a Dataflow Gen2 refresh |
 | Triggers | Partial | Schedule and tumbling window convert (created disabled); event and custom-event triggers are manual |
 | Connections | Partial | Auto-create for SQL/Synapse, ADLS Gen2, Blob, REST, Databricks; about 50 other types get a verdict only; OAuth and gateway are manual |
 | Storage | Partial | ADLS Gen2 shortcuts and CSV/Parquet repointing; other stores, `wasbs://` and computed paths stay as written |

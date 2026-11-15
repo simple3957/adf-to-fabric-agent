@@ -133,3 +133,34 @@ def test_the_deploy_read_back_lists_what_is_really_in_the_workspace(live, tmp_pa
         assert validation_summary(store, live["pid"], workspace=live["ws"])["readback"]["current"]
     finally:
         shutil.rmtree(tmp_path / live["pid"], onexc=lambda f, p, e: (os.chmod(p, stat.S_IWRITE), f(p)))
+
+
+def test_the_fabric_package_of_the_real_project_refers_only_to_its_own_items(live, tmp_path):
+    """The Fabric Git-format package, built from a copy of the real project (nothing read from or written to Fabric): every reference
+    a pipeline or notebook makes to another item is that item's logicalId in the package, and every workspace id is all-zero."""
+    import re
+    import shutil
+    import stat
+
+    from adf2fabric.agent.deployment import fabric_package as FP
+
+    src = live["store"].project_dir(live["pid"])
+    shutil.copytree(src, tmp_path / live["pid"], ignore=shutil.ignore_patterns(".git"))
+    store = ProjectStore(tmp_path)
+    try:
+        res = FP.build(store, live["pid"])
+        lids = {i.logical_id for i in res.items}
+        assert res.items and (res.root / "parameter.yml").is_file() and (res.root / "README.md").is_file()
+        for item in res.items:
+            plat = json.loads((res.root / item.folder / ".platform").read_text(encoding="utf-8"))
+            assert plat["metadata"]["type"] == item.kind and plat["config"]["logicalId"] == item.logical_id
+        for f in res.root.glob("*.DataPipeline/pipeline-content.json"):
+            text = f.read_text(encoding="utf-8")
+            for key, value in re.findall(r'"(notebookId|pipelineId|workspaceId)": "([^"]+)"', text):
+                assert (value == FP.ZERO) if key == "workspaceId" else (value in lids), f"{f.parent.name} {key} {value}"
+            assert "<item:" not in text and "<connection:" not in text
+        for f in res.root.glob("*.Notebook/notebook-content.py"):
+            for value in re.findall(r'"environmentId": "([^"]+)"', f.read_text(encoding="utf-8")):
+                assert value in lids, f.parent.name
+    finally:
+        shutil.rmtree(tmp_path / live["pid"], onexc=lambda f, p, e: (os.chmod(p, stat.S_IWRITE), f(p)))

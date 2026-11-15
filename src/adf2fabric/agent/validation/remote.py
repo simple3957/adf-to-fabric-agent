@@ -121,6 +121,26 @@ def _api_references(inp: Inputs, c: Collector, items: dict, conns: dict, fab: Fa
               f"{it.get('type', 'Item')} '{it.get('displayName', i)}' is in the workspace." if it else f"Item {i} is not in the workspace.",
               stage=Stage.api, component=f"{(it or {}).get('type', 'item')}:{(it or {}).get('displayName', i)}", evidence=[f"used by {', '.join(users[:3])}"],
               required=False)
+    # the Fabric Environments this project created here for its notebooks' libraries (agent/workloads/environments.py): there, and published
+    for env in (inp.workloads.environments if inp.workloads is not None else []):
+        eid = (env.fabric_item_ids or {}).get((workspace or "").lower())
+        if not eid:
+            continue
+        it = items.get(eid.lower())
+        state = ""
+        if it:
+            try:
+                r = fab.request("GET", f"workspaces/{workspace}/environments/{eid}")
+                state = str((((r.body or {}).get("properties") or {}).get("publishDetails") or {}).get("state") or "") if r.status == 200 else ""
+            except ProvisionError:
+                state = ""
+        result = R.PASS if it and state == "Success" else R.FAIL if not it else R.BLOCKED
+        c.add("deployment.environment_present", K.deployment, result,
+              (f"Environment '{env.name}' is in the workspace and published." if result is R.PASS else
+               f"Environment '{env.name}' ({eid}) is not in the workspace." if not it else
+               f"Environment '{env.name}' is in the workspace, but its publish state is '{state or 'not readable'}', so its libraries may not load."),
+              stage=Stage.api, component=f"Environment:{env.name}", evidence=[f"used by {', '.join(env.used_by[:3])}"], required=False,
+              remediation="" if result is R.PASS else "Publish it in Fabric (or deploy again), then read back.")
     for i, users in sorted(ids_conn.items()):
         cn = conns.get(i)
         c.add("deployment.connection_present", K.deployment, R.PASS if cn else R.FAIL,

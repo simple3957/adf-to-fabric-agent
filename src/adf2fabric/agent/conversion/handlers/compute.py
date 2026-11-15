@@ -334,8 +334,18 @@ def convert_databricks_job(cx: ActivityBuilder) -> None:
             why = (f"the activity name(s) {', '.join(clash)} its tasks would get are already used in the pipeline, and the "
                    "notebooks' run evidence is matched by that name")
         elif unbound:
-            why = (f"the Fabric notebook of task(s) {', '.join(unbound)} of job {job_id} is not deployed and bound yet "
-                   "(workloads-generate, -approve, -deploy, then notebook:<name> in the resolutions)")
+            # not a missing feature: the job DOES run as Fabric notebooks once they are in this workspace. Say that, and list each notebook
+            # as an item this workspace needs (the Convert step offers to create a generated one there, and Deploy creates approved ones).
+            for t in shape.tasks:
+                if t["key"] in unbound:
+                    cx.item("notebook", databricks_jobs.notebook_name(databricks_jobs.code_path(t)),
+                            f"The Fabric notebook that runs task '{t['key']}' of Databricks job {job_id}; it is not in this workspace yet.")
+            return _block(cx, "databricks_job_notebooks_pending",
+                          f"job {job_id} runs as Fabric notebooks, but the notebook of task(s) {', '.join(unbound)} is not in this Fabric "
+                          "workspace yet (notebook ids are kept per workspace).",
+                          "Deploy creates the generated, approved notebooks in this workspace first and converts again; or create or bind "
+                          "them on the Convert / Deploy step, then convert again.",
+                          disposition="replace")
         elif unknown:
             why = (f"task(s) {', '.join(unknown)} of job {job_id} pass parameters, and the notebook is not an approved, deployed "
                    "workload of this project, so which parameters it reads is not known")
@@ -613,9 +623,71 @@ def convert_spark_job(cx: ActivityBuilder) -> None:
     cx.summary = f"SparkJob '{a.name}' -> Fabric Spark job definition activity (scaffold) for '{job}'."
 
 
+def _dataflow_parameter(cx: ActivityBuilder, name: str, v: Any) -> Any:
+    """A data flow parameter the activity passes, as the notebook activity takes it: a pipeline expression stays an expression; a data
+    flow literal ('text', 12, true) becomes its plain value. Anything else (a data flow expression) is not translated: None."""
+    if isinstance(v, dict) and v.get("type") == "Expression" and isinstance(v.get("value"), str):
+        text = v["value"].strip()
+        if text.startswith("@"):
+            return cx.tree(v, f"typeProperties.dataflow.parameters.{name}", f"typeProperties.parameters.{name}.value")
+        m = re.fullmatch(r"'((?:[^'\\]|\\.)*)'|(-?\d+(?:\.\d+)?)[lL]?|(true|false)", text)
+        if m:
+            return m.group(1) if m.group(1) is not None else (m.group(2) or m.group(3))
+        return None
+    return v if isinstance(v, (str, int, float, bool)) else None
+
+
 def convert_dataflow(cx: ActivityBuilder) -> None:
     a, raw = cx.act, cx.act.raw_properties
     df = a.configuration.get("dataflow") or _ref(raw.get("dataflow")) or "dataflow"
+    if a.type == "ExecuteDataFlow":
+        return _dataflow_as_notebook(cx, df)
+    return _dataflow_gen2(cx, df)
+
+
+def _dataflow_as_notebook(cx: ActivityBuilder, df: str) -> None:
+    """A mapping data flow runs as the Fabric notebook its script was translated into (agent/workloads/dataflow.py), once a person has
+    approved it and it is in this workspace; until then that notebook is an item the workspace needs and Deploy creates it."""
+    a, raw = cx.act, cx.act.raw_properties
+    entry = cx.pc.project.workloads.get(df.lower())
+    bound = _bound_notebook_name(cx, df)
+    if not bound:
+        cx.item("notebook", df, f"The Fabric notebook translated from data flow '{df}'; it is not in this workspace yet.")
+        return _block(cx, "dataflow_notebook_pending",
+                      f"data flow '{df}' runs as the Fabric notebook translated from its script, which is not in this Fabric workspace yet.",
+                      "Translate it (workloads-generate), have a person approve the notebook (workloads-approve), then Deploy: it creates the "
+                      "notebook in this workspace first and converts again.", disposition="replace")
+    tp: dict[str, Any] = {"notebookId": cx.item("notebook", df, f"The Fabric notebook translated from data flow '{df}'."),
+                          "workspaceId": cx.workspace()}
+    dfraw = raw.get("dataflow") if isinstance(raw.get("dataflow"), dict) else {}
+    read = {p.name for p in (entry.parameters if entry is not None else []) if p.mapped}
+    params: dict[str, Any] = {}
+    for k, v in (dfraw.get("parameters") or {}).items():
+        value = _dataflow_parameter(cx, k, v)
+        if k not in read:
+            cx.dropped(f"typeProperties.dataflow.parameters.{k}", "the translated notebook has no parameter of that name")
+        elif value is None:
+            cx.manual("dataflow_parameter_expression", f"Data flow parameter '{k}' is passed as a data flow expression, which is not translated.",
+                      f"Pass '{k}' as a pipeline expression or a literal on the Notebook activity.")
+        else:
+            params[k] = {"value": value, "type": "string"}
+            cx.mapping(f"typeProperties.dataflow.parameters.{k}", f"typeProperties.parameters.{k}", "dataflow_parameter_to_parameter")
+    if params:
+        tp["parameters"] = params
+    for key in raw:
+        if key != "dataflow":
+            cx.dropped(f"typeProperties.{key}", "the data flow's own Spark compute, staging and trace settings do not apply to a Fabric "
+                       "notebook (its compute is the workspace's Spark runtime or Environment)")
+    name = cx.add(cx.envelope(a.name, "TridentNotebook", tp))
+    cx.mapping("typeProperties.dataflow.referenceName", "typeProperties.notebookId", "dataflow_translated_to_notebook")
+    cx.cover(Op.transform, name)
+    cx.strategy = ConversionStrategy.alternative
+    cx.disposition = "replace"
+    cx.summary = f"ExecuteDataFlow '{a.name}' -> Fabric Notebook activity running the notebook translated from data flow '{df}'."
+
+
+def _dataflow_gen2(cx: ActivityBuilder, df: str) -> None:
+    a, raw = cx.act, cx.act.raw_properties
     params = {}
     dfraw = raw.get("dataflow") if isinstance(raw.get("dataflow"), dict) else {}
     for k, v in (dfraw.get("parameters") or {}).items():
@@ -678,10 +750,12 @@ for _rule in (
         manual_configuration=("create the Spark job definition", "bind its id"),
         validation_rules=("sparkJobDefinitionId and workspaceId present",)),
     ConversionRule(
-        name="dataflow", adf_types=("ExecuteDataFlow", "ExecuteWranglingDataflow"), fabric_types=("RefreshDataFlow",),
-        variants=("mapping data flow", "wrangling data flow"), strategy=ConversionStrategy.alternative,
+        name="dataflow", adf_types=("ExecuteDataFlow", "ExecuteWranglingDataflow"), fabric_types=("TridentNotebook", "RefreshDataFlow"),
+        variants=("mapping data flow (translated to a notebook)", "wrangling data flow"), strategy=ConversionStrategy.alternative,
         handler=convert_dataflow, runtime_disposition="replace",
-        property_rules=("dataflow parameters carried", "data flow reference -> dataflowId placeholder"),
+        property_rules=("mapping data flow -> Notebook activity running the notebook translated from its script (once approved and in "
+                        "the workspace)", "data flow parameters -> notebook parameters (pipeline expressions and literals)",
+                        "wrangling data flow -> Dataflow Gen2 refresh, dataflowId placeholder"),
         io_rules=("none",), expression_rules=("parameter expressions converted",),
         dependency_rules=("dependsOn mapped 1:1",), parameter_variable_rules=("unchanged",),
         unsupported=("Spark compute / staging / trace settings of mapping data flows",),

@@ -34,12 +34,12 @@ Learning activity.
 Do: re-author the Power Query in a Dataflow Gen2 item, then bind the Dataflow item id the generated activity asks for.
 
 ### activity.mapping_dataflow
-`ExecuteDataFlow` (Mapping Data Flow). **preview**, difference (emitted). Runs in Fabric as Mapping Data Flow transforms in
-Dataflow Gen2. Not supported there: flowlets, the Data Flow library, user-defined functions, managed virtual networks;
-execution only through a pipeline Dataflow activity; not full parity. The data flow definition is a separate ADF artifact,
-not part of the pipeline JSON, so the converter cannot check it.
-Do: check the data flow for flowlets, UDFs and library use first; then use the built-in upgrade (Dataflow Gen2 with MDF
-transforms) or re-implement as a notebook or Power Query. Bind the resulting item id.
+`ExecuteDataFlow` (Mapping Data Flow). **preview**, difference (emitted). Since 2026-11-15 the tool translates the data flow's
+script into a Fabric notebook by fixed rules (agent/workloads/dataflow.py) and runs it from a Notebook activity once a person
+approves it; steps it cannot map are named and raise. Microsoft's own route, Mapping Data Flow transforms in Dataflow Gen2, is
+in preview and does not support flowlets, the Data Flow library, user-defined functions or managed virtual networks.
+Do: generate and approve the data flow's notebook (workloads-generate / workloads-approve), then Deploy; review any step listed
+as not translated.
 
 ### activity.synapse_spark
 `SynapseNotebook`, `SparkJob`. **not_available** as ADF activities in Fabric (listed only; the converter emits a Fabric

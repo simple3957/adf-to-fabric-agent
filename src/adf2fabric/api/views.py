@@ -377,7 +377,9 @@ def provisioning(store: ProjectStore, pid: str, roots: tuple[Path, ...] = ()) ->
 READBACK_STATE = {("deployment.definition_matches", "PASS"): "In Fabric, same as generated", ("deployment.definition_matches", "FAIL"): "In Fabric, differs",
                   ("deployment.definition_matches", "BLOCKED"): "Could not be read", ("deployment.pipeline_deployed", "FAIL"): "Not in Fabric",
                   ("deployment.item_present", "PASS"): "In Fabric", ("deployment.item_present", "FAIL"): "Not in Fabric",
-                  ("deployment.connection_present", "PASS"): "Exists", ("deployment.connection_present", "FAIL"): "Not found"}
+                  ("deployment.connection_present", "PASS"): "Exists", ("deployment.connection_present", "FAIL"): "Not found",
+                  ("deployment.environment_present", "PASS"): "In Fabric, published", ("deployment.environment_present", "FAIL"): "Not in Fabric",
+                  ("deployment.environment_present", "BLOCKED"): "In Fabric, not published"}
 
 
 def _readback_rows(rep: Any) -> list[dict[str, str]]:

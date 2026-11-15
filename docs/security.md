@@ -114,6 +114,7 @@ These are exposed over HTTP, each with its own permission (the route-by-role tes
 | Route | Permission |
 |---|---|
 | `GET .../inventory`, `waves`, `compatibility`, `validation`, `report`, `provisioning` | `reports:view` |
+| `GET .../package` (the Fabric package as a ZIP; it holds the pipelines' connection ids, never a credential; audited `package.build`) | `reports:view` |
 | `POST .../provisioning/plan` (read-only) | `plans:generate` + `azure:use` |
 | `POST .../provisioning/approve` | `provision:approve` (not held by analysts or operators) |
 | `POST .../provisioning/apply` | `migration:execute`; `apply: true` also needs `confirm: true` and a finished dry run of the same, approved, unchanged plan |

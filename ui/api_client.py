@@ -337,6 +337,10 @@ class ApiClient:
     def brief_note(self, pid: str, text: str) -> dict:
         return self._post(f"/projects/{pid}/brief/notes", {"text": text})
 
+    def fabric_package(self, pid: str) -> dict:
+        """The Fabric Git-format package: {zip (base64), file_name, items, left_out, parameters}."""
+        return self._get(f"/projects/{pid}/package")
+
     def brief_markdown(self, pid: str) -> str:
         return self._get(f"/projects/{pid}/brief/markdown")["markdown"]
 

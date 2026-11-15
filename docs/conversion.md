@@ -47,7 +47,8 @@ unsupported properties, manual configuration, validation rules and runtime dispo
 | Synapse SQL pool stored procedure (`SqlPoolStoredProcedure`) | Fabric Stored procedure on a connection bound by name (`connection:sqlpool:<pool>`); the pool itself does not move | B |
 | Web, WebHook | same (URL split into connection + `relativeUrl`; dynamic URL -> manual) | B |
 | AzureFunction, Databricks notebook, HDInsight Hive/Pig, Custom (Batch), Azure ML pipeline, Kusto | same Fabric activity, runtime reused (Databricks: the linked service's cluster is copied to the activity, under the ADF names Fabric stores it with) | B |
-| Synapse notebook, Spark job, Mapping/Wrangling data flow | Notebook / Spark job definition / Dataflow Gen2 **scaffold** (item must be migrated) | D |
+| Synapse notebook, Spark job, Wrangling data flow | Notebook / Spark job definition / Dataflow Gen2 **scaffold** (item must be migrated) | D |
+| Mapping data flow (Execute data flow) | Notebook activity running the notebook translated from the data flow's script (fixed rules; [workload-migration.md](workload-migration.md#mapping-data-flows)), once approved and in the workspace | C |
 | SSIS, U-SQL, ML Studio classic, Databricks JAR/Python/Job, HDInsight MapReduce/Streaming/Spark, unknown types | blocked + documented alternatives (Databricks Job: Fabric has the task type but documents only its portal settings) | E |
 | Databricks Job whose notebook and Python file tasks were migrated (opt-in) | one Fabric Notebook activity per task, wired as the job's tasks, with job parameters, base parameters and Python arguments (`argv_N`) passed as notebook parameters; only when the job's definition was read and every task's notebook is deployed and bound, else the blocked row above ([workload-migration.md](workload-migration.md#databricks-job-activities)) | C |
 

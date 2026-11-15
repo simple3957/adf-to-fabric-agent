@@ -690,16 +690,48 @@ def test_a_bound_notebook_with_parameters_or_libraries_is_not_swapped_blindly():
     assert find(content, "Dbx")["type"] == "DatabricksNotebook"  # parameter mapping is not guessed
 
 
-def test_mapping_data_flow_becomes_a_dataflow_scaffold_with_alternatives():
-    df = act("Df", "ExecuteDataFlow", {"dataflow": {"referenceName": "MDF1", "type": "DataFlowReference",
-                                                    "parameters": {"p": expr("@pipeline().parameters.x")}},
-                                       "compute": {"coreCount": 8, "computeType": "General"}})
-    _, content, a = one(df, parameters=["x"])
-    c = find(content, "Df")
-    assert c["type"] == "RefreshDataFlow" and c["typeProperties"]["dataflowId"] == "<item:dataflow:MDF1>"
-    assert c["typeProperties"]["parameters"]["p"]["value"] == "@pipeline().parameters.x"
-    assert a.strategy is St.alternative and a.status is S.manual_required
-    assert any("Dataflow Gen2" in x for x in a.alternatives + a.manual_steps)
+def _df_activity():
+    return act("Df", "ExecuteDataFlow", {"dataflow": {"referenceName": "MDF1", "type": "DataFlowReference",
+                                                      "parameters": {"p": expr("@pipeline().parameters.x"), "q": expr("'west'")}},
+                                         "compute": {"coreCount": 8, "computeType": "General"}})
+
+
+def test_a_mapping_data_flow_waits_for_its_translated_notebook_and_lists_it_as_needed():
+    """Since 2026-11-15 a mapping data flow is translated to a Fabric notebook (agent/workloads/dataflow.py); until that notebook is in
+    the workspace the activity is a stand-in that names it, so Convert lists it and Deploy creates it."""
+    rec, content, a = one(_df_activity(), parameters=["x"])
+    assert find(content, "Df")["type"] == "Fail" and "dataflow_notebook_pending" in codes(a)
+    assert "notebook:MDF1" in {q.name for q in rec.prerequisites if q.kind == "workspace_item"}
+
+
+def test_a_mapping_data_flow_whose_notebook_is_in_the_workspace_runs_it_with_its_parameters():
+    from adf2fabric.project.workloads import (Classification, CodeSource, CodeStatus, ExecutionEnvironment, ParameterContract,
+                                              WorkloadEntry, WorkloadKind)
+
+    from tests.conversion_support import semantic
+    from adf2fabric.agent.conversion.agent import build_project_context
+    from adf2fabric.agent.conversion.context import Resolutions
+    from adf2fabric.agent.conversion.engine import ConversionEngine
+
+    d = semantic([pipe(_df_activity(), parameters=["x"])])
+    ctx = build_project_context(d, Resolutions([{"type": "ItemToId", "key": "notebook:MDF1", "value": NB_ID},
+                                                {"type": "WorkspaceId", "key": "*", "value": WS_ID}]))
+    ctx.workloads = {"mdf1": WorkloadEntry(
+        id="adf_dataflow:mdf1", kind=WorkloadKind.adf_dataflow, name="MDF1", source_item="MDF1", environment=ExecutionEnvironment(platform="adf_dataflow"),
+        code=CodeSource(status=CodeStatus.in_project, location="dataflow/MDF1.json"), classification=Classification.directly_convertible,
+        parameters=[ParameterContract(name=n, passed_by_pipeline=True, declared_in_code=True, mapped=True) for n in ("p", "q")])}
+    rec, content = ConversionEngine(ctx).convert_pipeline(d.pipelines[0])
+    c, a = find(content, "Df"), by_name(rec)["Df"]
+    assert c["type"] == "TridentNotebook" and c["typeProperties"]["notebookId"] == NB_ID
+    assert c["typeProperties"]["parameters"] == {"p": {"value": {"value": "@pipeline().parameters.x", "type": "Expression"}, "type": "string"},
+                                                 "q": {"value": "west", "type": "string"}}  # a pipeline expression stays one; a data flow literal is its value
+    assert a.status is not S.blocked and a.strategy is St.alternative
+
+
+def test_a_wrangling_data_flow_still_becomes_a_dataflow_gen2_refresh():
+    w = act("Wr", "ExecuteWranglingDataflow", {"dataflow": {"referenceName": "PQ1", "type": "DataFlowReference"}})
+    _, content, a = one(w)
+    assert find(content, "Wr")["type"] == "RefreshDataFlow" and find(content, "Wr")["typeProperties"]["dataflowId"] == "<item:dataflow:PQ1>"
 
 
 def test_ssis_and_usql_are_blocked_with_documented_alternatives():

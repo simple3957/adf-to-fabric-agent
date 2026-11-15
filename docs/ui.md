@@ -13,7 +13,7 @@ authorised by the server (see [security.md](security.md)).
 | 4 | Connect | connection cards, tests, apply | every linked service has a verdict |
 | 5 | Plan target | `/provisioning` plan, approve, dry run, apply, verify | a current plan exists; apply only after approval and a dry run |
 | 6 | Convert | `convert` stage | pipelines generated |
-| 7 | Deploy | `deploy_dry_run`, `deploy_apply` | dry run done; apply confirmed |
+| 7 | Deploy | `deploy_dry_run`, `deploy_apply`; `GET /package` (Fabric package ZIP, [fabric-package.md](fabric-package.md)) | dry run done; apply confirmed |
 | 8 | Validate | `validate` stage | a validation result exists |
 | 9 | Report | `GET /report` | always readable; "verified" only if the backend says so |
 
@@ -58,6 +58,10 @@ the existing nine steps and flows.
   is ready, what it waits for and its state) and *Explorer* (search and filter by type or wave, pick an object to see what it needs
   and what needs it). Built on the server from the resolved references (`GET /projects/{id}/waves`, `reports:view`); it needs
   'Resolve dependencies' first and says so.
+* **Consult questions as cards** (since 2026-11-15, `ui/panels_consult.py`, styles `st-key-qcard-*` in `ui/theme.py`). Each question
+  is a card: its topic and icon, what the answer changes ("Drives the run", "Agent stops for a person", "Recorded in the brief"), the question, and the
+  recommendation with its reason. The answers are tiles (the radio's own inputs, styled, so saving still goes through the form):
+  the chosen one is outlined, each says what it means underneath, and the recommended one is marked ⭐. The whole tile chooses it.
 * **Options cards on the steps that have real choices.** Each says where its defaults come from (the approved consultation brief,
   or the tool's own), and a choice made there is for that run only and beats the brief:
   * *Conversion*: which pipelines, keep connections or repoint to a lakehouse (name checked as you type), apply the safe

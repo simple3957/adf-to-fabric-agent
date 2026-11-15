@@ -537,6 +537,36 @@ def deploy(api: ApiClient, pid: str, dest: dict, conversion: dict | None, result
     explain_for_step(api, pid, "deploy")
     panels_results.results(api, pid, key="dep-res")
     _notebooks(api, pid)
+    _package(api, pid)
+
+
+def _package(api: ApiClient, pid: str) -> None:
+    """The migration as a Fabric Git-format package a client deploys themselves (fabric-cicd or Git sync): built from the project's
+    records, nothing read from or written to Fabric."""
+    import base64
+
+    st.markdown("#### Fabric package: deploy it yourself")
+    st.caption("Every complete pipeline, the approved notebooks it runs and their Environments, in Fabric's source-control format, with a "
+               "parameter.yml for the connections and paths that differ per workspace. A client deploys it with Microsoft's fabric-cicd or a "
+               "Git-connected workspace, without this tool or the Fabric CLI. Building it changes nothing in Fabric.")
+    if st.button("Build the package", key="pkg-build", disabled=not can("reports:view")):
+        st.session_state.setdefault("pkg", {})[pid] = call(api.fabric_package, pid)
+    got = (st.session_state.get("pkg") or {}).get(pid)
+    if not got:
+        return
+    kinds: dict[str, int] = {}
+    for i in got["items"]:
+        kinds[i["kind"]] = kinds.get(i["kind"], 0) + 1
+    st.markdown(theme.badge(" · ".join(f"{n} {k}" for k, n in sorted(kinds.items())) or "Nothing to package", "info" if kinds else "warning"),
+                unsafe_allow_html=True)
+    if got["left_out"]:
+        with st.expander(f"{len(got['left_out'])} left out: not complete, so not packaged"):
+            for x in got["left_out"]:
+                st.caption(x)
+    if got["parameters"]:
+        st.caption("Set per target in parameter.yml: " + "; ".join(got["parameters"]))
+    st.download_button("Download the package (ZIP)", base64.b64decode(got["zip"]), file_name=got["file_name"], mime="application/zip",
+                       key="pkg-dl", type="primary")
     _compare(api, pid)
 
 

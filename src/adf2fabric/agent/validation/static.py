@@ -323,18 +323,46 @@ def _parameters(inp: Inputs, c: Collector, sdata: dict, tp: TargetPipeline) -> N
           remediation="Re-run conversion; a dropped parameter changes what callers can pass." if problems else "")
 
 
+def _job_splits(inp: Inputs, s: dict[str, ActView], t: dict[str, ActView]) -> dict[str, list[str]]:
+    """Source DatabricksJob activities that the generated pipeline runs as one Notebook activity per task: source name (lower) -> the task
+    activities (lower). Worked out from the Databricks job's own definition in the project (``databricks/jobs/<id>.json``), never from the
+    conversion record, and only when every task's activity is there as a Notebook activity and the job activity itself is not."""
+    from adf2fabric.agent.workloads import databricks_jobs
+
+    out: dict[str, list[str]] = {}
+    project_dir = inp.source_dir.parent if inp.source_dir is not None else None
+    for low, a in s.items():
+        if a.type != "DatabricksJob" or low in t or project_dir is None:
+            continue
+        job_id = databricks_jobs.job_id_of(a.type_properties)
+        struct = databricks_jobs.load(project_dir, job_id) if job_id else None
+        keys = [str(x.get("key") or "") for x in (struct or {}).get("tasks") or []]
+        if len(keys) < 2:
+            continue  # one task keeps the activity's own name
+        parts = [databricks_jobs.task_activity_name(a.name, k, False).lower() for k in keys]
+        if all(x in t and t[x].type == "TridentNotebook" for x in parts):
+            out[low] = parts
+    return out
+
+
 def _graph(inp: Inputs, c: Collector, tp: TargetPipeline, s_acts: list[ActView], t_acts: list[ActView]) -> None:
     comp = f"pipeline:{tp.name}"
     s = {a.name.lower(): a for a in s_acts}
     t = {a.name.lower(): a for a in t_acts}
-    missing = sorted(set(s) - set(t))
-    extra = sorted(set(t) - set(s))
+    splits = _job_splits(inp, s, t)
+    part_of = {x: src for src, parts in splits.items() for x in parts}
+    missing = sorted(set(s) - set(t) - set(splits))
+    extra = sorted(set(t) - set(s) - set(part_of))
     placeholders = [a for a in t_acts if _is_placeholder(a)]
     ph_names = {a.name.lower() for a in placeholders}
     for low, a in s.items():
         cid = f"pipeline:{tp.name}/activity:{a.name}"
         ta = t.get(low)
-        if ta is None:
+        if low in splits:
+            c.comp(cid, "activity", S.transformed, _desc(a), None, [f"~ runs as {len(splits[low])} Notebook activities: "
+                                                                   + ", ".join(t[x].name for x in splits[low])],
+                   note="one Notebook activity per task of the Databricks job (read from the job's definition)")
+        elif ta is None:
             c.comp(cid, "activity", S.missing, _desc(a), note="absent from the generated pipeline")
         elif low in ph_names:
             c.comp(cid, "activity", S.missing, _desc(a), "Fail (placeholder)", note=ta.type_properties.get("message", "not converted")[:200])
@@ -366,8 +394,14 @@ def _graph(inp: Inputs, c: Collector, tp: TargetPipeline, s_acts: list[ActView],
     # nesting and dependency equivalence, on the activities both sides have
     both = sorted(set(s) & set(t))
     nest = [f"{s[n].name}: parent {s[n].parent} -> {t[n].parent}" for n in both if (s[n].parent or "").lower() != (t[n].parent or "").lower()]
-    edges_s = {(p, n, s[n].depends[p]) for n in both for p in s[n].depends}
-    edges_t = {(p, n, t[n].depends[p]) for n in both for p in t[n].depends}
+    nest += [f"{s[n].name}: parent {s[n].parent} -> {t[x].parent} ({t[x].name})" for n, parts in splits.items() for x in parts
+             if (s[n].parent or "").lower() != (t[x].parent or "").lower()]
+    kept = set(both) | set(splits)
+    edges_s = {(p, n, s[n].depends[p]) for n in kept for p in s[n].depends}
+    # a job's task activities stand for the job: their edges are read as the job's, and the edges between its own tasks (the job's
+    # internal order, from its definition) are left out
+    edges_t = {(part_of.get(p, p), part_of.get(n, n), t[n].depends[p]) for n in set(both) | set(part_of) for p in t[n].depends
+               if part_of.get(p, p) != part_of.get(n, n)}
     lost, added = sorted(edges_s - edges_t), sorted(edges_t - edges_s)
     evid = nest + [f"dependency lost: {p} -> {n} {list(cond)}" for p, n, cond in lost] + [f"dependency added: {p} -> {n} {list(cond)}" for p, n, cond in added]
     c.add("activity_graph.dependencies", K.activity_graph, R.FAIL if evid else R.PASS,
@@ -553,7 +587,14 @@ def connections_and_secrets(inp: Inputs, c: Collector) -> None:
         states: list[str] = []
         for pname, aname in sorted(set(used)):
             tp = inp.paired.get(pname.lower())
-            ta = next((a for a in views.pipeline_activities(tp.content) if a.name.lower() == aname.lower()), None) if tp and tp.content else None
+            t_acts = {a.name.lower(): a for a in views.pipeline_activities(tp.content)} if tp and tp.content else {}
+            ta = t_acts.get(aname.lower())
+            src = inp.src.names("pipeline").get(pname.lower())
+            s_acts = {a.name.lower(): a for a in views.pipeline_activities(src.data)} if src is not None and src.data else {}
+            if ta is None and aname.lower() in _job_splits(inp, s_acts, t_acts):
+                # the Databricks job runs as Fabric notebooks: its linked service is no longer used by the generated pipeline
+                states.append(f"{pname}/{aname}: runs as Fabric notebooks (no connection needed)")
+                continue
             if ta is None or _is_placeholder(ta):
                 states.append(f"{pname}/{aname}: not converted")
                 continue

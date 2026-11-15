@@ -1941,6 +1941,34 @@ def fetch_databricks_notebooks_cmd(project_name: str, linked_service: str | None
         sys.exit(2)
 
 
+@cli.command(name="package")
+@click.option("--project", "project_name", required=True, help="Project name (`convert` must have run).")
+@click.option("--out", "out_dir", default=None, type=click.Path(file_okay=False), help="Folder to write (default: projects/<p>/package/; replaced).")
+def package_cmd(project_name: str, out_dir: Optional[str]) -> None:
+    """Write the migration as a Fabric Git-format package a client deploys without this tool or the Fabric CLI (fabric-cicd or Git sync).
+
+    Complete pipelines, the approved generated notebooks they run and the approved Environments those use, referring to each other by
+    logicalId; connections and OneLake paths are listed in parameter.yml. Nothing is read from or written to Fabric."""
+    from adf2fabric.agent.deployment import fabric_package
+
+    store = ProjectStore(projects_root(load_config()))
+    try:
+        res = fabric_package.build(store, project_name, Path(out_dir) if out_dir else None)
+    except (ProjectNotFoundError, FileNotFoundError) as exc:
+        click.secho(f"Package failed: {exc}", fg="red", err=True)
+        sys.exit(1)
+    click.echo(f"FABRIC PACKAGE  {res.root}")
+    for kind in ("DataPipeline", "Notebook", "Environment"):
+        names = [i.name for i in res.items if i.kind == kind]
+        if names:
+            click.echo(f"  {kind} ({len(names)}): {', '.join(names)}")
+    for x in res.left_out:
+        click.secho(f"  left out: {x}", fg="yellow")
+    for x in res.parameters:
+        click.echo(f"  set in parameter.yml: {x}")
+    click.echo("  deploy: see README.md in the package (fabric-cicd: pip install -e \".[package]\")")
+
+
 @cli.command(name="deploy-notebook")
 @click.option("--workspace-id", "workspace_id", required=True, help="Target Fabric workspace id (GUID).")
 @click.option("--file", "file_path", required=True, type=click.Path(exists=True, dir_okay=False),

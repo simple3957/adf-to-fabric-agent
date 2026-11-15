@@ -607,6 +607,29 @@ def create_app(settings: Optional[Settings] = None, live: Optional[Container] = 
             raise HTTPException(404, "This project has not been converted yet.")
         return {"markdown": render(ctx.c.store, slug)}
 
+    @app.get("/projects/{pid}/package")
+    def fabric_package(pid: str, ctx: Ctx = Depends(), _: Principal = need(P.reports_view)):
+        """The migration as a Fabric Git-format package (ZIP, base64) a client deploys themselves (fabric-cicd or Git sync), what is in it,
+        what was left out and why, and what parameter.yml asks the deployer to set. Built from the project's own records: Fabric is not read."""
+        import base64
+        import io
+        import zipfile
+
+        from adf2fabric.agent.deployment import fabric_package as FP
+
+        slug = ctx.project(pid)
+        if not ctx.c.store.has_conversion(slug):
+            raise HTTPException(404, "This project has not been converted yet.")
+        res = FP.build(ctx.c.store, slug)
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+            for f in sorted(res.root.rglob("*")):
+                if f.is_file():
+                    z.write(f, f.relative_to(res.root).as_posix())
+        ctx.audit("package.build", resource="project", resource_id=slug, items=len(res.items), left_out=len(res.left_out))
+        return {"zip": base64.b64encode(buf.getvalue()).decode("ascii"), "file_name": f"{slug}-fabric-package.zip",
+                "items": [{"kind": i.kind, "name": i.name} for i in res.items], "left_out": res.left_out, "parameters": res.parameters}
+
     @app.get("/projects/{pid}/linked-services")
     def linked_services(pid: str, ctx: Ctx = Depends(), _: Principal = need(P.projects_view)):
         slug = ctx.project(pid)

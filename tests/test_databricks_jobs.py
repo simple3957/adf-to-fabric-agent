@@ -228,14 +228,14 @@ def test_a_multi_task_job_is_wired_as_the_job_wires_its_tasks():
 
 @pytest.mark.parametrize("jobs,bound,needle", [
     ({}, ("NB_A",), "has not been read (workloads-assess"),
-    ({"7": _job(7, _task("only", "/Shared/NB_A"))}, (), "not deployed and bound yet"),
+    ({"7": _job(7, _task("only", "/Shared/NB_A"))}, (), "is not in this Fabric workspace yet"),
     ({"7": _job(7, _task("only", "/Shared/NB_A"), _task("q", kind="sql"))}, ("NB_A",), "task 'q' is a sql task"),
     ({"7": _job(7, _task("only", "/Shared/NB_A", nb={"base_parameters": {"d": "1"}}))}, ("NB_A",), "is not an approved, deployed workload"),
 ])
 def test_anything_short_of_that_stays_a_fail_placeholder_with_the_reason(jobs, bound, needle):
     rec, content = _convert(pipe(_jact("Job")), jobs, _bound(*bound))
     a = by_name(rec)["Job"]
-    assert find(content, "Job")["type"] == "Fail" and a.status is S.blocked and "databricks_job" in codes(a)
+    assert find(content, "Job")["type"] == "Fail" and a.status is S.blocked and codes(a) & {"databricks_job", "databricks_job_notebooks_pending"}
     assert any(needle in (w.message or "") for w in a.warnings), [w.message for w in a.warnings]
 
 
@@ -432,3 +432,34 @@ def test_an_environment_approval_holds_only_for_the_same_definition(tmp_path):
     cached.write_bytes(b"v2")  # the wheel changed in Databricks
     changed = E.keep_decisions([made()], [old])[0]
     assert changed.approval.status == "pending" and changed.fabric_item_ids == {"ws": "env-1"}  # the item is there, the approval is not
+
+
+def test_static_validation_reads_a_split_job_from_the_jobs_own_definition(tmp_path):
+    """Found live on 2026-11-13: static validation called a job run as one Notebook activity per task '1 missing, 2 extra' and its
+    linked service 'not converted'. The pairing comes from the job's definition in the project, never from the conversion record."""
+    from adf2fabric.agent.validation.static import Inputs, _job_splits
+    from adf2fabric.agent.validation.views import ActView
+
+    (tmp_path / "source").mkdir()
+    J.save(tmp_path, "7", J.structure(_job(7, _task("a"), _task("b", deps=["a"]))))
+    inp = Inputs(project_id="p", src=None, tgt=None, paired={}, unpaired=[], source_dir=tmp_path / "source")
+
+    def view(name, kind, **tp):
+        return ActView(name=name, type=kind, parent=None, depends={}, type_properties=tp, policy={}, raw={})
+
+    s = {"job": view("Job", "DatabricksJob", jobId="7")}
+    both = {"job_a": view("Job_a", "TridentNotebook"), "job_b": view("Job_b", "TridentNotebook")}
+    assert _job_splits(inp, s, both) == {"job": ["job_a", "job_b"]}
+    assert _job_splits(inp, s, {"job_a": both["job_a"]}) == {}  # a task's activity is missing: nothing is paired
+    assert _job_splits(inp, s, {**both, "job": view("Job", "Fail")}) == {}  # the job activity itself is there (a placeholder)
+    assert _job_splits(inp, {"job": view("Job", "DatabricksJob", jobId="8")}, both) == {}  # its definition was never read
+
+
+def test_a_job_whose_notebooks_are_not_in_this_workspace_says_so_and_lists_them_as_needed():
+    """Found on 2026-11-15: converting for another workspace said 'A Databricks job has no Fabric equivalent' and listed nothing to set.
+    The job does run as Fabric notebooks; only this workspace lacks them, so each is an item to create or bind here."""
+    rec, content = _convert(pipe(_jact("Job")), {"7": _job(7, _task("a", "/Shared/NB_A"), _task("b", "/Shared/NB_B", deps=["a"]))}, _bound())
+    a = by_name(rec)["Job"]
+    assert find(content, "Job")["type"] == "Fail" and "databricks_job_notebooks_pending" in codes(a) and "databricks_job" not in codes(a)
+    needed = {q.name for q in a.prerequisites if q.kind == "workspace_item"}
+    assert {"notebook:NB_A", "notebook:NB_B"} <= needed

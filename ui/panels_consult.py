@@ -25,6 +25,8 @@ def _plain(text: object) -> str:
 
 
 EFFECT_TONE = {"run": "info", "gate": "warning", "record": "neutral"}
+TOPIC_ICON = {"scope": "🎯", "target": "🏗️", "storage": "🗂️", "compute": "⚙️", "pipelines": "🔁", "connections": "🔌", "security": "🔐",
+              "validation": "🧪", "context": "📝"}
 SOURCE_TEXT = {"config": "From the configuration", "person": "Answered", "recommendation": "Recommendation (not yet accepted)", "open": "Open"}
 STATE_TONE = {"draft": "neutral", "submitted": "info", "approved": "success"}
 
@@ -93,19 +95,18 @@ def _simple(api: ApiClient, pid: str, brief: dict) -> None:
                 "workspace, choose it on **Connections** (and Test connection) first, then Save settings here.")
     for x in brief["conflicts"]:
         st.error(x)
+    titles = {t["id"]: t["title"] for t in brief.get("topics") or []}
     with st.form("consult-simple", border=False):
         chosen: dict[str, object] = {}
         for q in brief["questions"]:
-            st.markdown(f"**{theme.esc(q['text'])}**")
-            rec = q.get("recommendation")
-            if q["source"] == "config":
-                st.info(f"{_plain(q['label'])} (read from the configuration)")
-                continue
-            if rec:
-                st.caption(f"💡 {_plain(rec['label'])}: {rec['reason']}")
-            if q.get("problem"):
-                st.error(f"The saved answer is no longer valid and is ignored: {q['problem']}")
-            chosen[q["id"]] = _widget(q, f"consult-q-{q['id']}", preselect=True)
+            with _card(q, titles.get(q.get("topic"), "")):
+                if q["source"] == "config":
+                    st.info(f"{_plain(q['label'])} (read from the configuration)")
+                    continue
+                _recommendation(q)
+                if q.get("problem"):
+                    st.error(f"The saved answer is no longer valid and is ignored: {q['problem']}")
+                chosen[q["id"]] = _widget(q, f"consult-q-{q['id']}", preselect=True)
         save = st.form_submit_button("Save settings", type="primary", disabled=not editable)
     if save:
         values = {qid: v for qid, v in chosen.items() if v not in (None, "", [])}
@@ -143,9 +144,29 @@ def _actions(api: ApiClient, pid: str, brief: dict) -> None:
         d.download_button("Download brief (Markdown)", md.encode("utf-8"), file_name=f"{pid}-migration-brief.md", mime="text/markdown", key="consult-md")
 
 
+def _card(q: dict, topic_title: str = ""):
+    """One question as a card: its topic, what the answer changes and the question. The caller adds the recommendation and the answers."""
+    box = st.container(key=f"qcard-{q['id'].replace('.', '-')}")
+    with box:
+        effect = theme.badge(q["effect_label"], EFFECT_TONE.get(q.get("effect"), "neutral")) if q.get("effect_label") else ""
+        required = " " + theme.badge("Required", "neutral") if q.get("required") and q.get("effect") != "run" else ""
+        topic = f'<span class="ma-q-topic">{theme.esc(topic_title)}</span>' if topic_title else ""
+        theme.html_block(f'<div class="ma-q-head"><span class="ma-q-icon">{TOPIC_ICON.get(q.get("topic"), "❔")}</span>{topic}{effect}{required}</div>'
+                         f'<div class="ma-q-title">{theme.esc(q["text"])}</div>')
+    return box
+
+
+def _recommendation(q: dict) -> None:
+    rec = q.get("recommendation")
+    if rec:
+        theme.html_block(f'<div class="ma-q-rec"><span>💡</span><span><b>Recommended: {theme.esc(rec["label"])}</b> · {theme.esc(rec["reason"])}</span></div>')
+
+
 def _widget(q: dict, key: str, preselect: bool = False):
     opts = [o["value"] for o in q["options"]]
-    labels = {o["value"]: o["label"] + (f" — {o['description']}" if o.get("description") else "") for o in q["options"]}
+    rec = (q.get("recommendation") or {}).get("value")
+    labels = {o["value"]: o["label"] for o in q["options"]}
+    captions = [" · ".join(x for x in (o.get("description") or "", "⭐ Recommended" if o["value"] == rec else "") if x) for o in q["options"]]
     # The full consultation never pre-selects a recommendation (saving a form must not accept what nobody chose); the simple one does, because
     # its whole point is that the recommended settings are the starting point.
     current = q["value"] if (q["source"] == "person" or (preselect and q["source"] in ("recommendation", "person"))) else None
@@ -153,30 +174,29 @@ def _widget(q: dict, key: str, preselect: bool = False):
         return st.text_input(q["text"], value=current or "", key=key, placeholder=q.get("placeholder") or "", label_visibility="collapsed")
     if q["kind"] == "multi":
         default = [v for v in (current or []) if v in opts]
-        return st.multiselect(q["text"], opts, default=default, format_func=lambda v: labels.get(v, v), key=key, label_visibility="collapsed")
+        full = {o["value"]: o["label"] + (f" — {o['description']}" if o.get("description") else "") for o in q["options"]}
+        return st.multiselect(q["text"], opts, default=default, format_func=lambda v: full.get(v, v), key=key, label_visibility="collapsed")
     index = opts.index(current) if current in opts else None
-    return st.radio(q["text"], opts, index=index, format_func=lambda v: labels.get(v, v), key=key, label_visibility="collapsed")
+    # each answer is a tile (theme.py: st-key-qcard-*): its label, and under it what it means and whether it is the recommendation
+    return st.radio(q["text"], opts, index=index, format_func=lambda v: _plain(labels.get(v, v)), key=key, label_visibility="collapsed",
+                    captions=[_plain(c) for c in captions])
 
 
 def _topic_form(api: ApiClient, pid: str, topic: str, items: list[dict], editable: bool) -> None:
     with st.form(f"consult-form-{topic}", border=False):
         chosen: dict[str, object] = {}
-        for q in items:
-            st.markdown(f"**{theme.esc(q['text'])}** " + theme.badge(q["effect_label"], EFFECT_TONE.get(q["effect"], "neutral"))
-                        + ("" if not q["required"] else " " + theme.badge("Required", "neutral")), unsafe_allow_html=True)
-            st.caption(q["help"])
-            if q["source"] == "config":
-                st.info(f"{_plain(q['label'])} — read from the configuration, not asked. {q['recommendation']['reason'] if q.get('recommendation') else ''}")
-                continue
-            if q.get("problem"):
-                st.error(f"The saved answer is no longer valid and is ignored: {q['problem']}")
-            rec = q.get("recommendation")
-            if rec:
-                st.caption(f"💡 Recommended: **{_plain(rec['label'])}** — {rec['reason']}")
-            st.caption(f"{SOURCE_TEXT.get(q['source'], q['source'])}" + (f": {_plain(q['label'])}" if q["source"] == "person" else "")
-                       + f" · Changes: {q['applies_to']}")
-            chosen[q["id"]] = _widget(q, f"consult-q-{q['id']}")
-            st.divider()
+        for q in items:  # the topic is the expander around these cards, so each card shows only its question
+            with _card(q):
+                st.caption(q["help"])
+                if q["source"] == "config":
+                    st.info(f"{_plain(q['label'])} — read from the configuration, not asked. {q['recommendation']['reason'] if q.get('recommendation') else ''}")
+                    continue
+                if q.get("problem"):
+                    st.error(f"The saved answer is no longer valid and is ignored: {q['problem']}")
+                _recommendation(q)
+                st.caption(f"{SOURCE_TEXT.get(q['source'], q['source'])}" + (f": {_plain(q['label'])}" if q["source"] == "person" else "")
+                           + f" · Changes: {q['applies_to']}")
+                chosen[q["id"]] = _widget(q, f"consult-q-{q['id']}")
         save = st.form_submit_button("Save answers", type="primary", disabled=not editable)
     if save:
         by_id = {q["id"]: q for q in items}

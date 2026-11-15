@@ -147,7 +147,8 @@ def test_deprecated_and_preview_activities_are_flagged_with_alternatives_without
     assert any("Dataflow Gen2" in x for x in by["Wr"].alternatives)
     md_issue = next(i for i in by["Md"].warnings if i.code == "compat_activity_mapping_dataflow")
     assert "flowlets" in md_issue.message and "preview" in md_issue.message
-    assert by["Md"].status is S.manual_required  # still needs the user to re-author / upgrade it
+    # since 2026-11-15 the data flow runs as its translated notebook: a stand-in names that notebook until it is in the workspace
+    assert by["Md"].status is S.blocked and "dataflow_notebook_pending" in {i.code for i in by["Md"].warnings}
 
 
 def test_blocked_by_handler_components_get_no_duplicate_compat_issue():

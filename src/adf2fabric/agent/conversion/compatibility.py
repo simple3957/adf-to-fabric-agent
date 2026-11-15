@@ -72,13 +72,13 @@ _ACTIVITIES: tuple[CompatEntry, ...] = (
     CompatEntry(
         id="activity.mapping_dataflow", kind="activity", types=("executedataflow",),
         status=PREVIEW, impact=Impact.difference, source_url=MDF_URL,
-        summary="Mapping Data Flows run in Fabric as Mapping Data Flow transforms in Dataflow Gen2, which is in public "
-                "preview. Not supported there: flowlets, the Data Flow library, user-defined functions and managed "
-                "virtual networks; execution is only through a pipeline Dataflow activity; not all capabilities have "
-                "parity. The data flow itself is not part of the pipeline JSON.",
+        summary="This tool translates the data flow's script into a Fabric notebook (fixed rules; steps it cannot map are "
+                "named and raise), run from a Notebook activity once a person approves it. Microsoft's own route, Mapping Data "
+                "Flow transforms in Dataflow Gen2, is in public preview and does not support flowlets, the Data Flow library, "
+                "user-defined functions or managed virtual networks.",
         alternatives=("Use the built-in Mapping Data Flow upgrade (Dataflow Gen2 with MDF transforms) and check the "
                       "documented limitations first.",
-                      "Re-implement the transformation as a Fabric notebook (Spark) or Power Query in Dataflow Gen2.")),
+                      "Re-author the transformation as Power Query in Dataflow Gen2.")),
     CompatEntry(
         id="activity.ssis", kind="activity", types=("executessispackage",),
         status=NOT_AVAILABLE, impact=Impact.blocker, emit=False, source_url=COMPARE_URL,

@@ -43,7 +43,9 @@ references resolve; generated pipelines hold no unbound placeholders and resolve
 first and fills in its id, so it is reported as `child_pipelines` (since 2026-11-10; it used to BLOCK the whole validation); 3 target schema (documented Fabric schema, schedules); 4 parameters, variables and expressions (global
 parameters normalise to `gp_<name>`; dropped expressions fail, rewritten ones are listed; a dataset parameter the dataset never
 reads is ignored); 5 activity count, nesting and dependency-graph equivalence (conditions included; a placeholder `Fail` stand-in is
-BLOCKED, never matched); 6 linked services, datasets, connections and secrets (plaintext secrets in generated files fail without
+BLOCKED, never matched; a Databricks Job activity run as one Notebook activity per task is paired with those tasks from the job's
+own definition in the project, never from the conversion record, only when every task's activity is there, and its linked service
+is then no longer needed (since 2026-11-13)); 6 linked services, datasets, connections and secrets (plaintext secrets in generated files fail without
 printing the value; each used linked service must be bound); 7 compute (a generated Fabric notebook / job must have a migration
 record, no open issues and an approval; provisioning verification); 8 execution semantics (retry/timeout, ForEach, Switch, Copy
 types, triggers); 9 deployment; 10 runtime.

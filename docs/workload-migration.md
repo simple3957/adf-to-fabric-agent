@@ -165,6 +165,9 @@ Fail placeholder (`databricks_job`). With migration:
    that start the job, and what depended on the activity waits for the tasks that end it. If one of those names is already used in
    the pipeline, the job stays blocked (it is never renamed, because run evidence is matched by that name). Policy and state are
    copied to every task activity. A downstream expression that reads the job activity's output becomes a manual step.
+   When the only thing missing is the task notebooks in the workspace chosen for this conversion (notebook ids are kept per
+   workspace), the finding is `databricks_job_notebooks_pending` (since 2026-11-15; it used to read "a Databricks job has no Fabric
+   equivalent"): each notebook is listed as an item this workspace needs, and Deploy creates the approved ones there first.
 4. **Parameters.** Each Notebook activity gets `parameters` in the `{value, type}` shape a live run confirmed (2026-10-22, below):
    * **job parameters** reach every notebook task by name (Databricks pushes them to tasks that take key-value parameters; the live
      run of 2026-11-13 showed the value the ADF activity passed reaching the notebook's widget). The value is what the ADF
@@ -210,6 +213,35 @@ key that attaches an Environment. A probe (items `zz_env_probe`, `zz_env_probe_n
 an Environment with a wheel and a PyPI package, published it, created a notebook with `metadata.dependencies.environment`, read the
 definition back (Fabric keeps it, and shows it in the `# META` block of its .py format) and ran the notebook from a pipeline: it
 imported both libraries (exit value `high|low|1,234,567`).
+
+## Mapping data flows
+
+Since 2026-11-15 an ADF *Execute data flow* activity is a workload like a notebook (kind `adf_dataflow`, one per data flow), even in an
+estate with no other Spark: the data flow's script (`typeProperties.script` / `scriptLines`, read from the imported source; nothing
+is fetched) is translated to a PySpark notebook by fixed rules (`agent/workloads/dataflow.py`, the user's decision: fixed rules, and
+a model draft only for what they cannot map).
+
+* **Sources and sinks** read and write the dataset each one names (`typeProperties.sources|sinks`): DelimitedText (header, delimiter,
+  quote, escape, encoding from the dataset), Parquet, Json, on ADLS Gen2 or Blob at the dataset's literal location; a source's declared
+  `output(...)` columns become its schema; a wildcard path is kept; a sink with `truncate: true` overwrites, otherwise appends. The
+  paths then go through the storage map's OneLake shortcuts like any generated notebook.
+* **Transformations:** filter, derive, select (`mapColumn`), aggregate (`groupBy`), join (inner, left, right, outer, cross), lookup (a
+  left join; a lookup that keeps one match per row is a review item), exists (semi / anti join), union (by name), conditional split
+  (first match unless `disjoint: true`, the last output takes what matched none), sort, window (`over`, `asc` / `desc`), surrogate key.
+* **Expressions:** about 70 functions (`iif`, `case`, `isNull`, `toString` / `toInteger` / `toDate` ..., string, date, math and
+  aggregate functions), operators including `===` (null-safe) and string `+`; `$name` parameters become the notebook's parameter
+  cell (with the defaults the `parameters{}` block declares).
+* **Not mapped, never guessed:** any other transformation (pivot, unpivot, alter row, flatten, rank, assert, parse, flowlets ...),
+  column patterns (`each`, `match`, `$$`), an unknown function, an inline dataset, a sink with row-level writes. Each such step is a
+  finding (`dataflow_untranslated`) and its cell raises `NotImplementedError` naming it, so the flow still has a notebook; drafting
+  those steps with a model (approved by a person) is the next step to build.
+
+The notebook is approved by a person and created in the workspace by Deploy, like any generated notebook. Conversion then runs it
+from the pipeline: the *Execute data flow* activity becomes a Notebook activity (`notebook:<data flow>`), and the parameters it
+passes become notebook parameters (a pipeline expression stays an expression; a data flow literal such as `'west'` becomes its
+value; another data flow expression is a manual step). Until the notebook is in the workspace the activity is a stand-in that
+names it (`dataflow_notebook_pending`), so the Convert step lists it. Wrangling (Power Query) data flows still become a Dataflow
+Gen2 refresh. The data flow's own compute, staging and trace settings do not apply to a notebook and are reported as dropped.
 
 ## What Microsoft documents, and what is still unverified
 

@@ -193,6 +193,32 @@ code { background: var(--surface-3); color: var(--em); }
 .ma-needbar.wait { background: var(--surface-3); border-color: var(--border); color: var(--muted); }
 .st-key-overview { background: var(--surface); border:1px solid var(--border); border-radius:20px; padding: 22px 26px; margin-bottom: 18px; box-shadow: 0 2px 8px var(--shadow); }
 .ma-ovrow { display:flex; gap:10px; align-items:baseline; padding: 3px 0; font-size:14.5px; }
+/* consult: one card per question, its answers as tiles (the radio's own inputs, styled; the choice is still a form field) */
+[class*="st-key-qcard-"] { background: var(--surface); border:1px solid var(--border); border-radius:16px; padding:16px 18px 12px; margin: 0 0 14px;
+  box-shadow: 0 2px 8px var(--shadow); }
+[class*="st-key-qcard-"]:hover { border-color: var(--border-strong); }
+.ma-q-head { display:flex; align-items:center; gap:10px; margin-bottom:4px; }
+.ma-q-icon { width:32px; height:32px; flex:none; border-radius:10px; display:grid; place-items:center; font-size:16px; background: var(--em-soft); }
+.ma-q-topic { font-size:11px; text-transform:uppercase; letter-spacing:.12em; color: var(--em); font-weight:700; }
+.ma-q-head .ma-badge { margin-left:auto; }
+.ma-q-title { font-family: var(--head); font-weight:700; font-size:16.5px; margin: 2px 0 6px; color: var(--text); }
+.ma-q-rec { display:flex; gap:8px; align-items:flex-start; font-size:13.5px; color: var(--muted); background: var(--surface-2); border:1px solid var(--border);
+  border-radius:10px; padding:8px 12px; margin: 4px 0 10px; }
+.ma-q-rec b { color: var(--text); }
+[class*="st-key-qcard-"] [data-testid="stElementContainer"]:has([data-testid="stRadio"]),
+[class*="st-key-qcard-"] [data-testid="stRadio"], [class*="st-key-qcard-"] [data-testid="stRadio"] > div { width:100% !important; }
+[class*="st-key-qcard-"] [data-testid="stRadioGroup"] { display:grid !important; width:100%; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap:10px; }
+[class*="st-key-qcard-"] [data-testid="stRadioGroup"] > div { position:relative; margin:0; padding:12px 14px; border-radius:12px; border:1px solid var(--border-strong);
+  background: var(--surface-2); transition: border-color .12s, background .12s, box-shadow .12s; }
+[class*="st-key-qcard-"] [data-testid="stRadioGroup"] > div:hover { border-color: var(--em); }
+[class*="st-key-qcard-"] [data-testid="stRadioGroup"] > div[data-selected="true"] { border:2px solid var(--em); padding:11px 13px; background: var(--em-soft);
+  box-shadow: 0 6px 16px rgba(47,111,236,.12); }
+/* the whole tile chooses the answer, not only its label text */
+[class*="st-key-qcard-"] [data-testid="stRadioOption"] { position:static; cursor:pointer; }
+[class*="st-key-qcard-"] [data-testid="stRadioOption"]::after { content:""; position:absolute; inset:0; border-radius:12px; }
+[class*="st-key-qcard-"] [data-testid="stRadioOption"] [data-testid="stMarkdownContainer"] p { font-weight:650; font-size:14.5px; color: var(--text); }
+[class*="st-key-qcard-"] [data-testid="stRadioCaption"] { padding-left: 28px; }
+[class*="st-key-qcard-"] [data-testid="stRadioCaption"] p { font-size:12.5px; color: var(--muted); line-height:1.4; }
 @keyframes ma-spin { to { transform: rotate(360deg); } }
 @keyframes ma-bar { 0% { background-position: -40% 0; } 100% { background-position: 140% 0; } }
 @media (prefers-reduced-motion: reduce) { .stApp[data-test-script-state="running"]::before, .stApp[data-test-script-state="running"]::after { animation-duration: 3s; } }
