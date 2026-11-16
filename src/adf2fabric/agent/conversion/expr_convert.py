@@ -8,7 +8,9 @@ rule ever rewrites one; every other difference is reported, never papered over:
     ------------------------------------  ----------------------------------------------------
     pipeline().Pipeline                   -> pipeline().PipelineName   (ADF: name; Fabric: ID)
     pipeline().DataFactory                kept, DIFFERENCE reported    (ADF: factory name; Fabric: workspace ID)
-    pipeline().globalParameters.X         -> pipeline().parameters.gp_X (global parameters do not exist)
+    pipeline().globalParameters.X         -> pipeline().libraryVariables.gp_X (String/Int/Bool with a literal value: the
+                                             factory's Variable Library, variable_library.py), else
+                                             pipeline().parameters.gp_X (global parameters do not exist)
     dataset().P                           -> the argument/default passed to the dataset (inlining)
     pipeline().TriggerType, trigger*(),   UNSUPPORTED (no documented Fabric equivalent), kept verbatim
       linkedService().P
@@ -62,6 +64,7 @@ class ExprEnv:
     activity_rename: dict[str, str] = field(default_factory=dict)  # lowercase source name -> component
     used_globals: set[str] = field(default_factory=set)  # original names of global parameters used
     existing_params: set[str] = field(default_factory=set)  # lowercase pipeline parameter names
+    library: dict[str, str] = field(default_factory=dict)  # global (lower) -> pipeline type, for those the Variable Library holds
 
 
 @dataclass
@@ -80,6 +83,16 @@ def is_expression(v: Any) -> bool:
 
 def expr_obj(text: str) -> dict:
     return {"value": text, "type": "Expression"}
+
+
+# ADF global parameter type -> the library variable type, and the type a pipeline reads it as (Microsoft: "Number types aren't supported
+# in pipelines"; Boolean -> Bool, Integer -> Int). Float, Array, Object and SecureString have no pipeline-readable library type.
+LIBRARY_TYPES = {"string": ("String", "String"), "int": ("Integer", "Int"), "bool": ("Boolean", "Bool")}
+
+
+def library_alias(name: str) -> str:
+    """The name a pipeline gives its reference to library variable ``name`` (``pipeline().libraryVariables.<alias>``)."""
+    return GLOBAL_PARAM_PREFIX + name
 
 
 def global_param_name(name: str, existing: set[str]) -> str:
@@ -213,6 +226,15 @@ class _Transformer:
                 self._unsupported("unsupported_trigger_type",
                                   "pipeline().TriggerType is not a documented Fabric system variable.",
                                   "Pass the trigger kind as a pipeline parameter from the schedule/trigger.")
+            elif low == "globalparameters" and len(segs) > 1 and segs[1][0] == "prop" and str(segs[1][1]).lower() in self.env.library:
+                gname = str(segs[1][1])
+                alias = library_alias(gname)
+                self.env.used_globals.add(gname)
+                self.changes.append(f"pipeline().globalParameters.{gname} -> pipeline().libraryVariables.{alias} (the factory's Variable Library)")
+                self._issue("global_parameter_library",
+                            f"Global parameter '{gname}' is read from the Variable Library, which holds the factory's global parameters.",
+                            Impact.none, "Set per-environment values as value sets of the Variable Library.")
+                segs = [("prop", "libraryVariables", segs[0][2]), ("prop", alias, segs[1][2]), *segs[2:]]
             elif low == "globalparameters" and len(segs) > 1 and segs[1][0] == "prop":
                 gname = str(segs[1][1])
                 target = global_param_name(gname, self.env.existing_params)

@@ -28,6 +28,7 @@ from adf2fabric.agent.conversion.fabric_schema import (
     FABRIC_FUNCTIONS,
     FABRIC_PIPELINE_SYSTEM,
     ON_INACTIVE_MARK_AS,
+    LIBRARY_VARIABLE_TYPES,
     PIPELINE_PROPERTY_KEYS,
     POLICY_KEYS,
     RETRY_INTERVAL_MAX,
@@ -47,6 +48,7 @@ _NESTED = ("activities", "ifTrueActivities", "ifFalseActivities", "defaultActivi
 class Validation:
     issues: list[tuple[Optional[str], ConversionIssue]] = field(default_factory=list)  # (component, issue)
     unbound: dict[str, set[str]] = field(default_factory=dict)  # component -> placeholder tokens
+    library: set[str] = field(default_factory=set)  # lowercase aliases declared in properties.libraryVariables
 
     def error(self, component: Optional[str], code: str, message: str, action: str = "", path: str = "") -> None:
         self.issues.append((component, ConversionIssue(
@@ -150,6 +152,12 @@ def validate_content(content: dict) -> Validation:
 
     params = {k.lower() for k in (props.get("parameters") or {})}
     variables = {k.lower() for k in (props.get("variables") or {})}
+    lib = props.get("libraryVariables") or {}
+    for alias, ref in (lib.items() if isinstance(lib, dict) else []):
+        if not (isinstance(ref, dict) and ref.get("libraryName") and ref.get("variableName") and ref.get("type") in LIBRARY_VARIABLE_TYPES):
+            v.error(None, "invalid_library_variable", f"libraryVariables '{alias}' needs libraryName, variableName and a type "
+                    f"a pipeline can read ({', '.join(LIBRARY_VARIABLE_TYPES)}).")
+        v.library.add(str(alias).lower())
     all_names = {n.lower() for n in names}
     _scope(v, activities, params, variables, all_names, in_loop=False)
     return v
@@ -323,6 +331,11 @@ def _expressions(v: Validation, name: str, tp: dict, params: set[str], variables
             elif r.kind in ("dataset_parameter", "linked_service_parameter", "trigger"):
                 v.error(name, "unsupported_reference", f"Expression at {path} uses {r.kind.replace('_', ' ')}, which "
                         "has no documented Fabric equivalent.", path=path)
+            elif r.kind == "pipeline_property" and (r.name or "").lower() == "libraryvariables":
+                alias = (r.path or "").lstrip(".").split(".")[0].split("[")[0].lower()
+                if alias not in v.library:
+                    v.error(name, "undeclared_library_variable", f"Expression at {path} reads library variable '{alias}', which "
+                            "the pipeline does not declare under properties.libraryVariables.", path=path)
             elif r.kind in ("pipeline_system", "pipeline_property") and r.name                     and r.name.lower() not in FABRIC_PIPELINE_SYSTEM and r.name.lower() != "parameters":
                 v.error(name, "unsupported_system_variable",
                         f"pipeline().{r.name} is not a documented Fabric system variable.", path=path)

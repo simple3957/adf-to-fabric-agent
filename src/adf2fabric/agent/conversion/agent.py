@@ -67,9 +67,15 @@ def build_project_context(d: AdfSemanticDiscovery, resolutions: Resolutions) -> 
                     if low not in mine:
                         mine[low] = orig
                         changed = True
-    globals_needed = {k: sorted(v.values(), key=str.lower) for k, v in direct.items()}
     gp = {g.name.lower(): g for f in d.factory for g in f.global_parameters}
+    from adf2fabric.agent.conversion import variable_library
+
+    library = {k: kinds[1] for k, g in gp.items() if (kinds := variable_library.eligible(g))}
+    # a global the Variable Library holds is read by each pipeline itself; only the others are passed down as gp_ parameters
+    globals_needed = {k: sorted((o for low, o in v.items() if low not in library), key=str.lower) for k, v in direct.items()}
+    factory = next((f.name for f in d.factory if f.name), "factory")
     return ProjectContext(
+        library_name=variable_library.library_name(factory) if library else None, library=library,
         datasets={x.name.lower(): x for x in d.datasets},
         linked_services={x.name.lower(): x for x in d.linked_services},
         pipelines=pipelines, global_params=gp, triggers=list(d.triggers), resolutions=resolutions,
@@ -176,6 +182,17 @@ class ConversionAgent:
             record.artifact_path = rel
             converted.append(record)
             contents[p.name] = content
+
+        from adf2fabric.agent.conversion import variable_library
+
+        lib_dir = self.store.project_dir(pid) / "conversion" / variable_library.FOLDER
+        if lib_dir.exists():  # a library from an earlier conversion must not be deployed for pipelines that no longer read it
+            import shutil
+
+            shutil.rmtree(lib_dir)
+        if ctx.library_name and variable_library.referenced(contents.values()):
+            for part, text in variable_library.definition(ctx.global_params.values()).items():
+                self.store.write_conversion_file(pid, f"{variable_library.FOLDER}/{ctx.library_name}.VariableLibrary/{part}", text)
 
         written: dict[str, str] = {}  # trigger name -> relative file (one file per trigger, shared by its pipelines)
         for record in converted:

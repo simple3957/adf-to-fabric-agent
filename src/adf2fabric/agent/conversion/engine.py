@@ -30,7 +30,7 @@ from adf2fabric.agent.conversion.context import (
     ProjectContext,
     strip_nested,
 )
-from adf2fabric.agent.conversion.expr_convert import global_param_name
+from adf2fabric.agent.conversion.expr_convert import global_param_name, library_alias
 from adf2fabric.agent.conversion.handlers._common import downgrade_if_not_direct, has_masked_secret
 from adf2fabric.agent.conversion import compatibility as compat
 from adf2fabric.agent.conversion.triggers import build_schedules
@@ -419,7 +419,11 @@ class ConversionEngine:
                 notes.append(f"Parameter '{prm.name}' is a SecureString; Fabric's documentation does not describe "
                              "secure pipeline parameters - verify how it is stored.")
         added: list[str] = []
+        library_vars: dict[str, Any] = {}
         needed = sorted({*self.project.globals_needed.get(p.name.lower(), []), *pc.used_globals})
+        for g in [x for x in needed if x.lower() in self.project.library]:  # read from the factory's Variable Library
+            library_vars[library_alias(g)] = {"type": self.project.library[g.lower()], "variableName": g, "libraryName": self.project.library_name}
+        needed = [x for x in needed if x.lower() not in self.project.library]
         for g in needed:
             gp = self.project.global_params.get(g.lower())
             target = global_param_name(g, pc.param_names)
@@ -451,6 +455,10 @@ class ConversionEngine:
             props["parameters"] = parameters
         if variables:
             props["variables"] = variables
+        if library_vars:
+            props["libraryVariables"] = library_vars
+            notes.append(f"Global parameters {', '.join(sorted(v['variableName'] for v in library_vars.values()))} are read from the "
+                         f"Variable Library '{self.project.library_name}' (created by deploy before the pipelines).")
         if p.annotations:
             props["annotations"] = list(p.annotations)
         if p.concurrency is not None:

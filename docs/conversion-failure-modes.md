@@ -35,7 +35,7 @@ fail-fast placeholder (`no_conversion_rule`). Fix: add a handler plus a test, or
 ## 3. Expressions and parameters
 
 Unsupported functions, accessors, system variables and dataset references stay **verbatim** and the activity becomes
-`manual_required` (`expression_not_converted`). Global parameters become `gp_*` pipeline parameters. Fabric has no
+`manual_required` (`expression_not_converted`). Global parameters are read from the factory's Variable Library, or (Float, Array, Object, SecureString, an expression value) become `gp_*` pipeline parameters. Fabric has no
 `true()` function and `pipeline().Pipeline` is an id there; these are handled in the expression converter.
 
 ## 4. Structure and limits

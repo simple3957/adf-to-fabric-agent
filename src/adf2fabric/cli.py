@@ -1750,7 +1750,11 @@ def deploy_cmd(project_name: str, workspace_id: str, pipelines: tuple[str, ...],
         credential, _ = build_credential(credential_from(auth, **auth_env))
         from adf2fabric.agent.deployment.fabric_deploy import FABRIC_SCOPE
         client = FabricClient(credential.get_token(FABRIC_SCOPE).token)
-        results = [] if schedules_only else deploy(client, workspace_id, items, apply=apply_, allow_unbound=allow_unbound)
+        from adf2fabric.agent.conversion import variable_library
+
+        lib_results: list = []
+        results = [] if schedules_only else deploy(client, workspace_id, items, apply=apply_, allow_unbound=allow_unbound,
+                                                   libraries=variable_library.load(base), library_results=lib_results)
         if results:  # the same record the API stage keeps: where each pipeline was last deployed, which the Report and the UI read
             from adf2fabric.agent.deployment import record as deploy_record
 
@@ -1775,7 +1779,9 @@ def deploy_cmd(project_name: str, workspace_id: str, pipelines: tuple[str, ...],
     else:
         click.echo(("DEPLOY TO FABRIC" if apply_ else "DEPLOY TO FABRIC (dry run - nothing changed; add --apply)")
                    + f"  workspace: {workspace_id}")
-    colours = {"create": "green", "update": "yellow", "refused": "red", "failed": "red"}
+    colours = {"create": "green", "update": "yellow", "refused": "red", "failed": "red", "use": "green"}
+    for lr in ([] if schedules_only else lib_results):
+        click.secho(f"  - Variable Library {lr.name}: {lr.action}{f' [{lr.item_id}]' if lr.item_id else ''} - {lr.detail}", fg=colours[lr.action])
     for r in results:
         click.secho(f"  - {r.name}: {r.action}{f' [{r.item_id}]' if r.item_id else ''} - {r.detail}", fg=colours[r.action])
         if r.children:
@@ -1958,7 +1964,7 @@ def package_cmd(project_name: str, out_dir: Optional[str]) -> None:
         click.secho(f"Package failed: {exc}", fg="red", err=True)
         sys.exit(1)
     click.echo(f"FABRIC PACKAGE  {res.root}")
-    for kind in ("DataPipeline", "Notebook", "Environment"):
+    for kind in ("VariableLibrary", "DataPipeline", "Notebook", "Environment"):
         names = [i.name for i in res.items if i.kind == kind]
         if names:
             click.echo(f"  {kind} ({len(names)}): {', '.join(names)}")

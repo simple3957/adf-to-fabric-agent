@@ -20,6 +20,7 @@ capacity. Their deployable form is the item-definition format Fabric's Git integ
 | Every complete pipeline | `<name>.DataPipeline` | `pipeline-content.json`, `.platform` |
 | Every approved generated notebook those pipelines run | `<name>.Notebook` | `notebook-content.py` (Fabric's source format, as Fabric itself returns it: `# Fabric notebook source`, `# PARAMETERS CELL` / `# CELL` / `# MARKDOWN` markers, a `# META` block for the attached Environment), `.platform` |
 | Every approved Environment those notebooks use | `<name>.Environment` | `Libraries/CustomLibraries/<wheel>`, `Libraries/PublicLibraries/environment.yml`, `.platform` |
+| The Variable Library of the factory's global parameters, when a packaged pipeline reads it ([conversion.md](conversion.md#global-parameters-the-factorys-variable-library)) | `<factory>_globals.VariableLibrary` | `variables.json` (the factory's values), `settings.json`, `.platform`; pipelines name it, so no id is rewritten. Set the target's values after deploying; fabric-cicd overwrites a library of the same name |
 | What differs per target | `parameter.yml` | fabric-cicd `find_replace` entries: every Fabric connection id the pipelines use, every OneLake path that names a workspace and lakehouse |
 | How to deploy, what was left out | `README.md` | |
 
@@ -48,11 +49,11 @@ whose Environment is not generated and approved. Connections and credentials nev
    from azure.identity import AzureCliCredential
    from fabric_cicd import FabricWorkspace, publish_all_items
    ws = FabricWorkspace(workspace_id="<target workspace id>", repository_directory="<the package folder>", environment="TARGET",
-                        item_type_in_scope=["Environment", "Notebook", "DataPipeline"], token_credential=AzureCliCredential())
+                        item_type_in_scope=["VariableLibrary", "Environment", "Notebook", "DataPipeline"], token_credential=AzureCliCredential())
    publish_all_items(ws)
    ```
 
-   It creates the items in dependency order (Environments, which it also publishes, then notebooks, then pipelines, children first),
+   It creates the items in dependency order (Variable Libraries, Environments, which it also publishes, then notebooks, then pipelines, children first),
    replacing logicalIds with the new items' ids.
 3. Or commit the folder to the branch of a Git-connected workspace and update the workspace from Git; then publish each Environment in
    Fabric (a Git sync only stages its libraries).

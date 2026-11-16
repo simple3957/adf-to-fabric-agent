@@ -533,6 +533,9 @@ def deploy(api: ApiClient, pid: str, dest: dict, conversion: dict | None, result
                     else theme.badge("Dry run: nothing was changed in Fabric", "info"), unsafe_allow_html=True)
         st.dataframe([{"pipeline": x["name"], "action": x["action"], "detail": x.get("detail") or "", "children": ", ".join(x.get("children") or [])}
                       for x in result.get("results", [])], hide_index=True)
+        if result.get("libraries"):  # the Variable Library holding the factory's global parameters, handled before the pipelines
+            st.dataframe([{"variable library": x["name"], "action": x["action"], "detail": x.get("detail") or ""}
+                          for x in result["libraries"]], hide_index=True)
     readback(api, pid, result)
     explain_for_step(api, pid, "deploy")
     panels_results.results(api, pid, key="dep-res")
@@ -546,7 +549,7 @@ def _package(api: ApiClient, pid: str) -> None:
     import base64
 
     st.markdown("#### Fabric package: deploy it yourself")
-    st.caption("Every complete pipeline, the approved notebooks it runs and their Environments, in Fabric's source-control format, with a "
+    st.caption("Every complete pipeline, the approved notebooks it runs, their Environments and the Variable Library of global parameters, in Fabric's source-control format, with a "
                "parameter.yml for the connections and paths that differ per workspace. A client deploys it with Microsoft's fabric-cicd or a "
                "Git-connected workspace, without this tool or the Fabric CLI. Building it changes nothing in Fabric.")
     if st.button("Build the package", key="pkg-build", disabled=not can("reports:view")):

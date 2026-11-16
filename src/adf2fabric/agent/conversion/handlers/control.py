@@ -264,9 +264,10 @@ register(ConversionRule(
     property_rules=("pipeline reference -> pipelineId (+ workspaceId)", "parameters carried",
                     "waitOnCompletion made explicit"),
     io_rules=("child pipeline name -> Fabric pipeline item id placeholder",),
-    expression_rules=("parameter expressions converted; gp_ parameters appended for the child's global parameters",),
+    expression_rules=("parameter expressions converted; gp_ parameters appended for the child's global parameters the Variable "
+                      "Library cannot hold (the others each pipeline reads from the library itself)",),
     dependency_rules=("dependsOn mapped 1:1",),
-    parameter_variable_rules=("global parameters are passed down as gp_ pipeline parameters",),
+    parameter_variable_rules=("global parameters the Variable Library cannot hold are passed down as gp_ pipeline parameters",),
     unsupported=("any property outside parameters/waitOnCompletion/pipeline",),
     manual_configuration=("a Fabric connection for Invoke pipeline", "the child pipeline item ids and workspace id",
                          "confirm the invoke operation type in the UI"),

@@ -770,15 +770,23 @@ def triggers_and_globals(inp: Inputs, c: Collector) -> None:
                   remediation="Recreate it by hand (for event triggers, a Fabric Activator rule).")
             c.comp(comp, "trigger", S.missing, note=f"{ttype} is not converted")
     used_gp: set[str] = set()
+    from_library: set[str] = set()
     for tp in inp.tgt.pipelines:
-        for k in ((tp.content or {}).get("properties") or {}).get("parameters", {}) or {}:
+        tprops = (tp.content or {}).get("properties") or {}
+        for k in tprops.get("parameters", {}) or {}:
             if k.startswith("gp_"):
                 used_gp.add(k[3:].lower())
+        for ref in (tprops.get("libraryVariables") or {}).values():
+            if isinstance(ref, dict) and ref.get("variableName"):
+                from_library.add(str(ref["variableName"]).lower())
     for f in inp.src.of("factory"):
         for g in ((f.data or {}).get("properties") or {}).get("globalParameters", {}) or {}:
             referenced = any(f"globalparameters.{g.lower()}" in str(pf.data).lower() for pf in inp.src.of("pipeline") if pf.data)
-            c.comp(f"global_parameter:{g}", "global_parameter", S.matched if g.lower() in used_gp else (S.missing if referenced else S.not_applicable),
-                   note="became pipeline parameter gp_" + g if g.lower() in used_gp else ("referenced but not carried" if referenced else "not referenced by any pipeline"))
+            carried = g.lower() in used_gp or g.lower() in from_library
+            note = ("read from the Variable Library" + (" (and passed as pipeline parameter gp_" + g + ")" if g.lower() in used_gp else "")
+                    if g.lower() in from_library else "became pipeline parameter gp_" + g if carried
+                    else ("referenced but not carried" if referenced else "not referenced by any pipeline"))
+            c.comp(f"global_parameter:{g}", "global_parameter", S.matched if carried else (S.missing if referenced else S.not_applicable), note=note)
 
 
 def compute(inp: Inputs, c: Collector) -> None:

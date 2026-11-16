@@ -55,12 +55,36 @@ unsupported properties, manual configuration, validation rules and runtime dispo
 ## Expressions
 
 Fabric's expression language is nearly identical, so expressions pass through **verbatim** unless a named
-rule fires: `pipeline().Pipeline` -> `PipelineName` (ADF: name, Fabric: ID); `globalParameters.X` ->
-`pipeline().parameters.gp_X` (global parameters do not exist; defaults are carried and passed down to child
-pipelines); `dataset().P` -> the activity's argument or the dataset default (datasets are inlined).
+rule fires: `pipeline().Pipeline` -> `PipelineName` (ADF: name, Fabric: ID); `globalParameters.X` -> the factory's
+Variable Library (see below) or `pipeline().parameters.gp_X`; `dataset().P` -> the activity's argument or the dataset default (datasets are inlined).
 `pipeline().DataFactory` is kept but flagged (workspace ID in Fabric). `TriggerType`, `trigger*()`,
 `linkedService()` and any function outside Fabric's documented list are **unsupported**: kept as written,
 flagged, never replaced by a "similar" function.
+
+## Global parameters: the factory's Variable Library
+
+Fabric has no global parameters; Microsoft's guidance moves them to a **Variable Library**
+(`agent/conversion/variable_library.py`, since 2026-11-16). One library per factory, `<factory>_globals`, holds every global
+parameter a pipeline can read from it: **String**, **Int** (library type Integer) and **Bool** (Boolean) with a literal value. Each
+pipeline that reads one declares it and reads it itself; nothing is passed to child pipelines:
+
+```json
+"libraryVariables": {"gp_env": {"type": "String", "variableName": "env", "libraryName": "adf2fabricv1_globals"}}
+...  "@concat(pipeline().libraryVariables.gp_env, '-x')"
+```
+
+The definition (`variables.json`, `settings.json`) is written to `conversion/variable-library/<name>.VariableLibrary/`. The shape is
+what Fabric's getDefinition returned for a pipeline set up that way, and a run of that probe pipeline returned the library's values
+(live, 2026-11-16). Then the converted `PL_GlobalParams_Test` was deployed and run twice. In one workspace, deploy created the library;
+in another, it used the library that was already there. Both runs returned the ADF baseline (`dev-50000`, `true`). It is not on the DataPipeline definition page, so `libraryVariables` is listed in `fabric_schema.INFERRED`.
+
+The others keep the earlier rule: a `gp_<name>` pipeline parameter with the factory's value as its default, passed down to child
+pipelines. These are Float (Microsoft: Number types are not supported in pipelines), Array, Object, SecureString (never written
+into an item definition) and an expression value.
+
+`deploy` creates the library before the pipelines. If a library of that name already exists, deploy reads it and uses it when it
+has every variable the pipelines read with the same type; its values are the workspace's own and are never changed. If a variable
+is missing or has another type, the pipelines that read it are refused. The package carries the library folder too.
 
 ## Binding connections and items
 

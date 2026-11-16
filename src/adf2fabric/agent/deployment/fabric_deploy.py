@@ -305,15 +305,129 @@ class FabricClient:
                           {"definition": _definition(content)})
         self._finish(resp, f"Updating '{name}'")
 
+    # -- other items (Variable Library): List Items / Create Item / Get Item Definition --------------------------------------------
+    def list_items(self, workspace: str, item_type: str) -> dict[str, str]:
+        found: dict[str, str] = {}
+        url = f"{FABRIC_API}/workspaces/{workspace}/items?type={item_type}"
+        token: Optional[str] = None
+        while True:
+            resp = self._call("GET", url + (f"&continuationToken={token}" if token else ""))
+            if resp.status_code != 200:
+                raise DeployError(f"Listing {item_type} items failed (HTTP {resp.status_code}): {_error_text(resp)}")
+            data = resp.json()
+            for it in data.get("value", []):
+                found[it["displayName"].lower()] = it["id"]
+            token = data.get("continuationToken")
+            if not token:
+                return found
+
+    def create_item(self, workspace: str, name: str, item_type: str, parts: dict[str, str]) -> None:
+        body = {"displayName": name, "type": item_type, "definition": {"parts": [
+            {"path": k, "payload": base64.b64encode(v.encode("utf-8")).decode("ascii"), "payloadType": "InlineBase64"} for k, v in parts.items()]}}
+        self._finish(self._call("POST", f"{FABRIC_API}/workspaces/{workspace}/items", body), f"Creating '{name}'")
+
+    def get_definition(self, workspace: str, item_id: str, what: str) -> dict[str, str]:
+        """path -> text of an item's definition parts."""
+        resp = self._call("POST", f"{FABRIC_API}/workspaces/{workspace}/items/{item_id}/getDefinition")
+        body = self._finish(resp, f"Reading {what}") or {}
+        if "operation" in body:
+            res = self._call("GET", body["operation"] + "/result")
+            if res.status_code != 200:
+                raise DeployError(f"Reading {what} failed (HTTP {res.status_code}): {_error_text(res)}")
+            body = res.json()
+        return {pt["path"]: base64.b64decode(pt.get("payload") or "").decode("utf-8", "replace")
+                for pt in (body.get("definition") or {}).get("parts", [])}
+
+
+@dataclass
+class LibraryResult:
+    name: str
+    action: str  # create | use | refused | failed
+    item_id: Optional[str] = None
+    detail: str = ""
+
+
+def library_needs(items: list[DeployItem]) -> dict[str, dict[str, str]]:
+    """library name (lower) -> {variable name (lower): pipeline type} read by the given pipelines."""
+    out: dict[str, dict[str, str]] = {}
+    for i in items:
+        for ref in ((i.content or {}).get("properties") or {}).get("libraryVariables", {}).values():
+            if isinstance(ref, dict) and ref.get("libraryName") and ref.get("variableName"):
+                out.setdefault(str(ref["libraryName"]).lower(), {})[str(ref["variableName"]).lower()] = str(ref.get("type", ""))
+    return out
+
+
+_READ_AS = {"String": "String", "Integer": "Int", "Boolean": "Bool"}  # library variable type -> the type a pipeline reads
+
+
+def deploy_libraries(client: FabricClient, workspace: str, items: list[DeployItem], libraries: dict[str, dict[str, str]],
+                     *, apply: bool) -> tuple[list[LibraryResult], dict[str, str]]:
+    """Create each Variable Library the pipelines read, before them.
+
+    An existing library of that name is read and used when it has every variable the pipelines read, with the same type; its values
+    are the workspace's own and are never changed. Otherwise the pipelines that read it are refused. Returns the results and, per
+    library name (lower), why its pipelines cannot be pushed."""
+    needs = library_needs(items)
+    if not needs:
+        return [], {}
+    by_low = {k.lower(): (k, v) for k, v in libraries.items()}
+    existing = client.list_items(workspace, "VariableLibrary")
+    results: list[LibraryResult] = []
+    broken: dict[str, str] = {}
+    for low, wanted in sorted(needs.items()):
+        name, parts = by_low.get(low, (low, None))
+        item_id = existing.get(low)
+        if item_id:
+            try:
+                have = json.loads(client.get_definition(workspace, item_id, f"Variable Library '{name}'").get("variables.json") or "{}")
+            except (DeployError, ValueError) as exc:
+                broken[low] = f"Variable Library '{name}' exists but could not be read: {exc}"
+                results.append(LibraryResult(name, "refused", item_id, broken[low]))
+                continue
+            types = {str(v.get("name", "")).lower(): _READ_AS.get(str(v.get("type"))) for v in have.get("variables", []) if isinstance(v, dict)}
+            bad = [f"{v} ({'missing' if v not in types else 'type ' + str(types[v]) + ' instead of ' + t})"
+                   for v, t in sorted(wanted.items()) if types.get(v) != t]
+            if bad:
+                broken[low] = (f"Variable Library '{name}' already exists in the workspace without what the pipelines read: {', '.join(bad)}; "
+                               "it is never modified - add the variables there, or remove it so Deploy creates it")
+                results.append(LibraryResult(name, "refused", item_id, broken[low]))
+            else:
+                results.append(LibraryResult(name, "use", item_id, "already in the workspace with every variable the pipelines read; "
+                                             "its values are the workspace's own and were not changed"))
+            continue
+        if parts is None:
+            broken[low] = f"Variable Library '{name}' is neither in the workspace nor in the conversion output; run convert again"
+            results.append(LibraryResult(name, "refused", None, broken[low]))
+            continue
+        if not apply:
+            results.append(LibraryResult(name, "create", None, "dry run: nothing was changed"))
+            continue
+        try:
+            client.create_item(workspace, name, "VariableLibrary", parts)
+            item_id = client.list_items(workspace, "VariableLibrary").get(low)
+            if not item_id:
+                raise DeployError(f"'{name}' was created but Fabric did not list it")
+            results.append(LibraryResult(name, "create", item_id, "done"))
+        except DeployError as exc:
+            broken[low] = f"Variable Library '{name}' could not be created: {exc}"
+            results.append(LibraryResult(name, "failed", None, broken[low]))
+    return results, broken
+
 
 def deploy(client: FabricClient, workspace: str, items: list[DeployItem], *, apply: bool,
-           allow_unbound: bool = False) -> list[DeployResult]:
+           allow_unbound: bool = False, libraries: Optional[dict[str, dict[str, str]]] = None,
+           library_results: Optional[list[LibraryResult]] = None) -> list[DeployResult]:
     """Plan (apply=False) or perform (apply=True) the deployment, children first.
 
-    Per-item failures do not stop the rest, but a pipeline whose child failed or is unavailable is refused.
+    Per-item failures do not stop the rest, but a pipeline whose child failed or is unavailable is refused. The Variable Libraries
+    the pipelines read (``libraries``: name -> definition parts, from the conversion) are handled first, and their outcomes are
+    appended to ``library_results``.
     """
     if not _GUID.match(workspace or ""):
         raise DeployError("The workspace id must be a GUID (Fabric workspace settings > About).")
+    lib_results, lib_broken = deploy_libraries(client, workspace, items, libraries or {}, apply=apply)
+    if library_results is not None:
+        library_results.extend(lib_results)
     existing = client.list_pipelines(workspace)  # name(lower) -> id
     ids = dict(existing)
     ordered, cyclic = order_children_first(items)
@@ -338,6 +452,7 @@ def deploy(client: FabricClient, workspace: str, items: list[DeployItem], *, app
         resolved = DeployItem(item.name, resolve_tokens(item.content, workspace, stand_in), item.origin,
                                item.structural_valid)
         problems += preflight(resolved, allow_unbound)
+        problems += [lib_broken[low] for low in sorted(library_needs([item])) if low in lib_broken]
         problems += missing_shortcuts(client, lakehouse_shortcuts(resolved.content), shortcut_cache)
         if problems:
             unavailable.add(item.name.lower())

@@ -41,7 +41,7 @@ Cross-cutting:
 ## Conversion model
 
 1. A handler registry maps each ADF activity type to a Fabric activity (`handlers/`: control, data, sql_web, compute).
-2. Expressions are rewritten (`expr_convert.py`); global parameters become `pipeline().parameters.gp_<name>`.
+2. Expressions are rewritten (`expr_convert.py`); global parameters are read from the factory's Variable Library (`pipeline().libraryVariables.gp_<name>`; String/Int/Bool with a literal value, `variable_library.py`) or else become `pipeline().parameters.gp_<name>`.
 3. Dataset and linked-service references are resolved and inlined as `datasetSettings`.
 4. Anything not convertible becomes a blocker with a reason. Output is validated (`validation.py`) before deploy.
 

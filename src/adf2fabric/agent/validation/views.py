@@ -24,6 +24,7 @@ SOURCE_FOLDERS = {"pipeline": "pipeline", "dataset": "dataset", "linkedService":
                   "integrationRuntime": "integration_runtime", "dataflow": "dataflow", "factory": "factory"}
 _NESTED_LISTS = ("activities", "ifTrueActivities", "ifFalseActivities", "defaultActivities")
 _GP = re.compile(r"pipeline\(\)\.globalParameters\.([A-Za-z_]\w*)")
+_LV = re.compile(r"pipeline\(\)\.libraryVariables\.(gp_[A-Za-z_]\w*)")
 
 
 @dataclass
@@ -169,8 +170,10 @@ def own_properties(a: dict) -> dict:
 
 
 def normalise_expression(text: str) -> str:
-    """Remove differences Fabric requires so equal meaning compares equal: global parameters become pipeline parameters gp_<name>."""
+    """Remove differences Fabric requires so equal meaning compares equal: a global parameter becomes pipeline parameter gp_<name>
+    or the library variable reference gp_<name> (the factory's Variable Library); both compare as pipeline().parameters.gp_<name>."""
     out = _GP.sub(lambda m: f"pipeline().parameters.gp_{m.group(1)}", text)
+    out = _LV.sub(lambda m: f"pipeline().parameters.{m.group(1)}", out)
     return re.sub(r"\s+", " ", out).strip()
 
 

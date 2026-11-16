@@ -41,7 +41,7 @@ while any real change to the file still blocks it.
 references resolve; generated pipelines hold no unbound placeholders and resolve their dependencies, parameters, variables and
 `activity()` reads; a child pipeline this conversion also generated, `<item:pipeline:X>`, is not unbound: deploy publishes children
 first and fills in its id, so it is reported as `child_pipelines` (since 2026-11-10; it used to BLOCK the whole validation); 3 target schema (documented Fabric schema, schedules); 4 parameters, variables and expressions (global
-parameters normalise to `gp_<name>`; dropped expressions fail, rewritten ones are listed; a dataset parameter the dataset never
+parameters normalise to `gp_<name>`, whether a `gp_` parameter or a Variable Library reference; each factory global parameter is matched when a pipeline reads it from the library or as a parameter; dropped expressions fail, rewritten ones are listed; a dataset parameter the dataset never
 reads is ignored); 5 activity count, nesting and dependency-graph equivalence (conditions included; a placeholder `Fail` stand-in is
 BLOCKED, never matched; a Databricks Job activity run as one Notebook activity per task is paired with those tasks from the job's
 own definition in the project, never from the conversion record, only when every task's activity is there, and its linked service

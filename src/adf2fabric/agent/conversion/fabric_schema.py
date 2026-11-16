@@ -45,8 +45,13 @@ ENVELOPE_KEYS = frozenset({
 
 # Pipeline-level properties. ``activities`` and ``description`` are documented; the rest are
 # standard in exported pipelines but not in the definition page, so they are INFERRED.
-PIPELINE_PROPERTY_KEYS = frozenset({"activities", "description", "parameters", "variables", "annotations"})
-INFERRED_PIPELINE_PROPERTIES = frozenset({"parameters", "variables", "annotations"})
+PIPELINE_PROPERTY_KEYS = frozenset({"activities", "description", "parameters", "variables", "annotations", "libraryVariables"})
+INFERRED_PIPELINE_PROPERTIES = frozenset({"parameters", "variables", "annotations", "libraryVariables"})
+# properties.libraryVariables (alias -> {type, variableName, libraryName}) read as @pipeline().libraryVariables.<alias>
+# ("Variable library integration with pipelines"). The JSON shape is not on the definition page; it is what Fabric's
+# getDefinition returned for a pipeline set up that way, and a run of that probe returned the library's values (2026-11-16).
+# Number is not readable from a pipeline (Microsoft); these are the types it can read.
+LIBRARY_VARIABLE_TYPES = ("String", "Int", "Bool")
 
 
 @dataclass(frozen=True)
@@ -184,6 +189,8 @@ UNSUPPORTED_ACCESSORS = {
 INFERRED: tuple[str, ...] = (
     "pipeline properties 'parameters', 'variables' and 'annotations' (standard in exported pipelines, absent from "
     "the DataPipeline definition page)",
+    "pipeline property 'libraryVariables' (references to the factory's Variable Library; shape read back from Fabric and run "
+    "live, absent from the DataPipeline definition page)",
     "Script activity envelope 'externalReferences' (the documented Script table lists none)",
     "typeProperties of datasetSettings (shown in Microsoft's own example, absent from the DatasetSettings table)",
     "workspace item ids (notebook / dataflow / pipeline / Spark job) are placeholders until resolved",

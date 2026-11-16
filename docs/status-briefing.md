@@ -25,6 +25,11 @@ tool read the wheel from Databricks, generated the Fabric Environment `ADF_Migra
 and Deploy created and published it (about 5 minutes), then created the notebook attached to it. The Fabric run matches ADF and its
 output equals Databricks row for row (the wheel's bands and `humanize`'s text). The read-back does not list Environments yet.
 
+On 2026-11-16, ADF global parameters were tested with `PL_GlobalParams_Test` (factory `adf2fabricv1`; `env` is a String, `threshold`
+an Int). The converted pipeline reads both from the factory's Variable Library `adf2fabricv1_globals` ([conversion.md](conversion.md#global-parameters-the-factorys-variable-library)).
+Deploy created the library in `fabric-demo` and used the existing one in `adf2fabric-package-test` without changing it. Both Fabric
+runs returned the ADF baseline: `dev-50000` and `true`. The live read-back (`validate` API stage) does not list Variable Libraries yet.
+
 ## Where each area stands
 
 | Area | Status | What is missing |

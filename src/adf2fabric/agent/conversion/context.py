@@ -135,6 +135,8 @@ class ProjectContext:
     triggers: list[AdfTrigger]
     resolutions: Resolutions
     globals_needed: dict[str, list[str]] = field(default_factory=dict)  # pipeline(lower) -> global names
+    library_name: Optional[str] = None  # the Variable Library that holds the factory's global parameters (None: there are none it can hold)
+    library: dict[str, str] = field(default_factory=dict)  # global (lower) -> pipeline type, for those the library holds
     ir_kinds: dict[str, Optional[str]] = field(default_factory=dict)  # integration runtime (lower) -> kind
     prereqs: dict[tuple[str, str], Prerequisite] = field(default_factory=dict)
     # Spark workloads that were approved AND deployed to Fabric (workloads-deploy): source item (lower) -> manifest entry.
@@ -299,7 +301,7 @@ class ActivityBuilder:
     # -- environments --------------------------------------------------------------------------------
     def env(self, **kw) -> ExprEnv:
         return ExprEnv(activity_rename=self.pc.rename, used_globals=self.pc.used_globals,
-                       existing_params=self.pc.param_names, **kw)
+                       existing_params=self.pc.param_names, library=self.pc.project.library, **kw)
 
     # -- recording -----------------------------------------------------------------------------------
     def mapping(self, source: str, target: Optional[str], rule: str, note: str = "", preserved: bool = True) -> None:

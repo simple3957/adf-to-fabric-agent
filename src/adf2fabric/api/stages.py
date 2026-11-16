@@ -379,8 +379,12 @@ def _run_stage(c: Container, session: Session, pid: str, stage: str, log: Log, o
     held = {**waiting, **blocked}  # fabric pipeline name -> why it is not pushed in this call
     try:
         token = c.fabric_token(session)
+        from adf2fabric.agent.conversion import variable_library
+
+        lib_results: list = []
         results = deploy(FabricClient(token), workspace, [i for i in items if i.name not in held],
-                         apply=stage == "deploy_apply", allow_unbound=bool(options.get("allow_unbound")))
+                         apply=stage == "deploy_apply", allow_unbound=bool(options.get("allow_unbound")),
+                         libraries=variable_library.load(c.store.conversion_dir(pid)), library_results=lib_results)
     except DeployError as exc:
         raise StageError(str(exc)) from None
     from adf2fabric.agent.deployment.fabric_deploy import DeployResult
@@ -404,4 +408,5 @@ def _run_stage(c: Container, session: Session, pid: str, stage: str, log: Log, o
     return {"applied": stage == "deploy_apply",
             "results": [{"name": r.name, "action": r.action, "detail": r.detail, "children": r.children}
                         for r in results],
+            "libraries": [{"name": lr.name, "action": lr.action, "detail": lr.detail} for lr in lib_results],
             "warnings": warnings, "readback": readback}

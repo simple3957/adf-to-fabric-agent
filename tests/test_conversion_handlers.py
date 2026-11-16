@@ -397,19 +397,55 @@ def test_execute_pipeline_wait_default_is_written_explicitly_and_unknown_child_n
     assert a.status is S.manual_required and "child_pipeline_unknown" in codes(a)
 
 
-def test_global_parameters_become_parameters_and_flow_down_to_children():
+def test_global_parameters_a_library_cannot_hold_become_parameters_and_flow_down_to_children():
+    # Float has no pipeline-readable library type (Microsoft: Number is not supported in pipelines), so it stays a gp_ parameter
     child = pipe(act("W", "Wait", {"waitTimeInSeconds": expr("@int(pipeline().globalParameters.delay)")}), name="Child")
     parent = pipe(act("Run", "ExecutePipeline", {"pipeline": ref("Pipeline", "Child")}), name="Parent")
-    out = convert([parent, child], global_params={"delay": {"type": "Int", "defaultValue": 7}})
+    out = convert([parent, child], global_params={"delay": {"type": "Float", "defaultValue": 7.5}})
     c_rec, c_content = out["Child"]
     p_rec, p_content = out["Parent"]
-    assert c_content["properties"]["parameters"] == {"gp_delay": {"type": "Int", "defaultValue": 7}}
+    assert c_content["properties"]["parameters"] == {"gp_delay": {"type": "Float", "defaultValue": 7.5}}
+    assert "libraryVariables" not in c_content["properties"]
     assert find(c_content, "W")["typeProperties"]["waitTimeInSeconds"]["value"] == "@int(pipeline().parameters.gp_delay)"
-    assert p_content["properties"]["parameters"] == {"gp_delay": {"type": "Int", "defaultValue": 7}}
+    assert p_content["properties"]["parameters"] == {"gp_delay": {"type": "Float", "defaultValue": 7.5}}
     assert find(p_content, "Run")["typeProperties"]["parameters"]["gp_delay"] == {
         "value": "@pipeline().parameters.gp_delay", "type": "Expression"}
     assert by_name(c_rec)["W"].status is S.converted_with_differences and "gp_delay" in c_rec.parameters_added
     assert c_rec.structural_valid and p_rec.structural_valid
+
+
+def test_string_int_and_bool_global_parameters_are_read_from_the_factorys_variable_library():
+    # the shape Fabric returned and ran for a probe pipeline on 2026-11-16 (docs/conversion.md)
+    child = pipe(act("S", "SetVariable", {"variableName": "v", "value": expr(
+        "@concat(pipeline().globalParameters.env, string(pipeline().globalParameters.threshold), string(pipeline().globalParameters.on))")}),
+        name="Child", variables={"v": {"type": "String"}})
+    parent = pipe(act("Run", "ExecutePipeline", {"pipeline": ref("Pipeline", "Child")}), name="Parent")
+    out = convert([parent, child], global_params={"env": {"type": "String", "value": "dev"}, "threshold": {"type": "Int", "value": 50000},
+                                                   "on": {"type": "Bool", "value": True}})
+    c_rec, c_content = out["Child"]
+    p_rec, p_content = out["Parent"]
+    lib = c_content["properties"]["libraryVariables"]
+    name = lib["gp_env"]["libraryName"]
+    assert name.endswith("_globals") and lib == {
+        "gp_env": {"type": "String", "variableName": "env", "libraryName": name},
+        "gp_on": {"type": "Bool", "variableName": "on", "libraryName": name},
+        "gp_threshold": {"type": "Int", "variableName": "threshold", "libraryName": name}}
+    assert find(c_content, "S")["typeProperties"]["value"]["value"] == (
+        "@concat(pipeline().libraryVariables.gp_env, string(pipeline().libraryVariables.gp_threshold), string(pipeline().libraryVariables.gp_on))")
+    assert "parameters" not in c_content["properties"]  # nothing to pass: each pipeline reads the library itself
+    assert "parameters" not in p_content["properties"] and "parameters" not in find(p_content, "Run")["typeProperties"]
+    assert c_rec.structural_valid and p_rec.structural_valid and by_name(c_rec)["S"].status is S.converted
+
+
+def test_a_library_variable_the_pipeline_does_not_declare_is_a_validation_error():
+    from adf2fabric.agent.conversion.validation import validate_content
+
+    content = {"properties": {"activities": [{"name": "S", "type": "SetVariable", "dependsOn": [], "typeProperties": {
+        "variableName": "v", "value": {"value": "@pipeline().libraryVariables.gp_nope", "type": "Expression"}}}],
+        "variables": {"v": {"type": "String"}},
+        "libraryVariables": {"gp_x": {"type": "Float", "variableName": "x", "libraryName": "f_globals"}}}}
+    codes_ = {i.code for _, i in validate_content(content).issues}
+    assert {"undeclared_library_variable", "invalid_library_variable"} <= codes_
 
 
 # =============================================================================
