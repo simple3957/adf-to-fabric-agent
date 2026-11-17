@@ -110,3 +110,32 @@ def test_ids_are_kept_per_workspace_and_never_carried_to_another(tmp_path):
     assert next(i for i in B.open_items(store, pid, ws_a) if i["key"] == "notebook:NB_X")["value"] == NB
     assert B.use_workspace(store, pid, ws_a) is False  # nothing to change
 
+
+
+def _conn(cid, name, kind):
+    return {"id": cid, "displayName": name, "connectionDetails": {"type": kind}}
+
+
+def test_the_invoke_pipeline_connection_is_asked_for_from_the_tenants_fabric_data_pipelines_connections(tmp_path):
+    store, pid, _ = _convert(tmp_path, FILES)
+    assert B.pipelines_needing_connection(store, pid)  # the sample runs a child pipeline
+    tenant = [_conn(CONN, "Lake", "AzureDataLakeStorage"), _conn(NB, "Fabric-b", "FabricDataPipelines"),
+              _conn("33333333-3333-3333-3333-333333333333", "Fabric-a", "FabricDataPipelines")]
+    assert [c["name"] for c in B.pipeline_connection_choices(tenant)] == ["Fabric-a", "Fabric-b"]  # only that type, by name
+    assert B.set_pipeline_connection(store, pid, NB.upper()) == {"key": "connection:invoke-pipeline", "changed": True}
+    assert B.pipeline_connection(store, pid) == NB
+    assert next(i for i in B.open_items(store, pid) if i["key"] == "connection:invoke-pipeline")["value"] == NB  # the Convert step sees it
+    with pytest.raises(B.BindingError, match="not a Fabric connection id"):
+        B.set_pipeline_connection(store, pid, "Fabric-a")
+
+
+def test_connect_apply_binds_the_invoke_pipeline_connection_only_when_the_tenant_has_exactly_one(tmp_path):
+    from adf2fabric.connections.service import ConnectionService
+
+    store, pid, _ = _convert(tmp_path, FILES)
+    svc = ConnectionService(store)
+    two = [_conn(NB, "Fabric-b", "FabricDataPipelines"), _conn(CONN, "Fabric-a", "FabricDataPipelines")]
+    assert "choose one" in svc._pipeline_connection(pid, two, dry_run=False) and B.pipeline_connection(store, pid) is None  # never a guess
+    assert "would be used" in svc._pipeline_connection(pid, two[:1], dry_run=True) and B.pipeline_connection(store, pid) is None
+    assert "was set" in svc._pipeline_connection(pid, two[:1], dry_run=False) and B.pipeline_connection(store, pid) == NB
+    assert "'Fabric-b' is set" in svc._pipeline_connection(pid, two, dry_run=False)  # a choice already made is kept

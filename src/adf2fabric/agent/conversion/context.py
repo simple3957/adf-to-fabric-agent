@@ -147,6 +147,9 @@ class ProjectContext:
     # Opt-in Lakehouse repointing: (account, container) -> shortcut name under Files, from the storage map; the lakehouse's name.
     storage_routes: dict[tuple[str, str], str] = field(default_factory=dict)
     route_lakehouse: Optional[str] = None
+    route_default: bool = True  # repoint every dataset that can be (convert --lakehouse); False: only those the activity mapping chose
+    # The project's activity mapping (agent/conversion/project_mapping.py): activity id (lower) -> (switch kind, chosen value).
+    choices: dict[str, tuple[str, str]] = field(default_factory=dict)
     _ls_sets: dict[str, set] = field(default_factory=dict)  # linked service (lower) -> distinct literal argument sets in use
 
     def ls_argument_sets(self, ls_name: str) -> set:
@@ -426,6 +429,12 @@ class ActivityBuilder:
         ref = self.pc.project.free_connection_ref(key, detail, self.act.name)
         self._bind("connection", key)
         return ref
+
+    def choice(self, kind: str) -> Optional[str]:
+        """What a person chose for this activity in the project's activity mapping for switch ``kind`` (storage / spark / dataflow),
+        or None (follow the run's normal decision)."""
+        hit = self.pc.project.choices.get((self.act.activity_id or "").lower())
+        return hit[1] if hit and hit[0] == kind else None
 
     def item(self, kind: str, name: str, detail: str) -> str:
         ref = self.pc.project.item_ref(kind, name, self.act.name, detail)

@@ -151,6 +151,18 @@ class ConversionAgent:
             shortcuts = json.loads(smap.read_text(encoding="utf-8")).get("shortcuts", [])
             ctx.storage_routes = {(s["account"].lower(), s["container"].lower()): s["shortcut"] for s in shortcuts}
             ctx.route_lakehouse = request.lakehouse
+        # The project's activity mapping (conversion/activity-mapping.json): written again from discovery (choices kept), then followed.
+        from adf2fabric.agent.conversion import project_mapping as PM
+
+        try:
+            mapping = PM.build(self.store, pid)
+            ctx.choices = PM.choices(mapping)
+        except PM.MappingError as exc:
+            return ConversionResult(success=False, message="Conversion failed.", error=str(exc))
+        if not request.lakehouse and any(v == ("storage", "lakehouse") for v in ctx.choices.values()):
+            routes, lh = self._lakehouse_for_choices(pid)  # only the activities that chose it are repointed
+            if routes:
+                ctx.storage_routes, ctx.route_lakehouse, ctx.route_default = routes, lh, False
         compute_sources = load_sources(request.compute_sources_path)
         wanted = {n.lower() for n in request.pipelines}
         selected = [p for p in sorted(d.pipelines, key=lambda p: p.name.lower())
@@ -218,6 +230,7 @@ class ConversionAgent:
         conv.assisted = [AssistedNote(**n) for n in assisted if n["pipeline"].lower() in {p.name.lower() for p in selected}]
         conv.schema_notes += [f"Converted from a reviewed model-assisted edit of the source (not the original file): {n.pipeline}, accepted "
                               f"{n.accepted_at or '?'} by {n.accepted_by or '?'}{' and edited' if n.edited else ''}." for n in conv.assisted] + assist_log
+        conv.schema_notes += [f"Activity mapping: {m}" for m in PM.check(mapping, conv)]  # the converter and the master catalog must agree
         conv.reconstruction_applied = sorted(p.id for p in applied)
         conv.reconstruction_open = sorted(open_blockers)
         self.store.save_conversion(pid, conv)
@@ -231,6 +244,23 @@ class ConversionAgent:
         return ConversionResult(success=True, conversion=conv, message=msg, problems=resolutions.problems)
 
     # ------------------------------------------------------------------------------------------------------
+    def _lakehouse_for_choices(self, pid: str) -> tuple[dict, Optional[str]]:
+        """Shortcut routes and the lakehouse name for activities whose mapping chose the Lakehouse when the run itself did not: the
+        storage map's shortcuts, and the lakehouse a person named (the storage map's, else the last provisioning plan's). Never invents one."""
+        smap = self.store.project_dir(pid) / "storage" / "storage-map.json"
+        if not smap.exists():
+            return {}, None
+        data = json.loads(smap.read_text(encoding="utf-8"))
+        name = data.get("lakehouse")
+        if not name and self.store.has_provisioning(pid, "target"):
+            from adf2fabric.agent.provisioning import service as prov
+
+            spec = prov.load_spec(self.store, pid)
+            name = spec.lakehouse_names[0] if spec and len(spec.lakehouse_names) == 1 else None
+        if not name:
+            return {}, None
+        return {(s["account"].lower(), s["container"].lower()): s["shortcut"] for s in data.get("shortcuts", [])}, name
+
     def _with_reconstruction(self, pid: str, d: AdfSemanticDiscovery, commit: str):
         """(completed discovery, applied proposals, open blocker ids) - or an error message."""
         if not self.store.has_reconstruction(pid):

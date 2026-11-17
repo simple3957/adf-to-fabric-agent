@@ -21,7 +21,7 @@ from typing import Any, Optional
 
 from adf2fabric.agent.conversion.context import ActivityBuilder
 from adf2fabric.agent.conversion.handlers._common import block, carry
-from adf2fabric.agent.conversion.registry import ConversionRule, register
+from adf2fabric.agent.conversion.registry import register, rule_from_catalog
 from adf2fabric.agent.workloads import databricks_jobs
 from adf2fabric.project.conversion import ConversionStrategy
 from adf2fabric.project.discovery import AdfOperationKind as Op
@@ -168,8 +168,15 @@ def convert_databricks_notebook(cx: ActivityBuilder) -> None:
     entry = _workload(cx)
     passed = cx.act.raw_properties.get("baseParameters")
     params_ok = not passed or (entry is not None and isinstance(passed, dict) and _parameters_mapped(entry, passed))
-    if bound and params_ok and not cx.act.raw_properties.get("libraries"):
+    chosen = cx.choice("spark")  # the project's activity mapping: databricks | fabric | None (follow what is approved and bound)
+    if chosen != "databricks" and bound and params_ok and not cx.act.raw_properties.get("libraries"):
         return _databricks_notebook_as_fabric_notebook(cx, bound, entry)
+    if chosen == "fabric":
+        return _block(cx, "databricks_notebook_pending",
+                      "the activity mapping chose a Fabric notebook for it, but its migrated notebook is not approved and in this workspace "
+                      "yet, or the activity passes libraries or parameters the notebook does not read.",
+                      "Generate the notebook (Review > Compute), approve it on the Deploy step (Deploy creates it), then convert again.",
+                      "Set 'chosen' to databricks in the activity mapping to keep it running on Azure Databricks.", disposition="replace")
     ls = _ls(cx)
     if not ls:
         return _block(cx, "databricks_no_linked_service", "it has no Databricks linked service.",
@@ -202,19 +209,7 @@ def convert_databricks_other(cx: ActivityBuilder) -> None:
            "Wrap the job as a Databricks notebook and use the notebook mapping.", disposition="reuse_externally")
 
 
-register(ConversionRule(
-    name="databricks_notebook", adf_types=("DatabricksNotebook",), fabric_types=("DatabricksNotebook", "TridentNotebook"),
-    variants=("existing cluster", "new job cluster", "libraries", "base parameters"),
-    strategy=ConversionStrategy.transformed, handler=convert_databricks_notebook,
-    runtime_disposition="reuse_externally",
-    property_rules=("notebookPath, baseParameters, libraries carried", "linkedServiceName -> externalReferences.connection",
-                    "linked service cluster -> existingClusterId or newCluster* settings"),
-    io_rules=("none",), expression_rules=("baseParameters expressions converted",),
-    dependency_rules=("dependsOn mapped 1:1",), parameter_variable_rules=("unchanged",),
-    unsupported=("instance pools", "autoscaling (not confirmed)", "init scripts, Spark environment variables, tag values"),
-    manual_configuration=("Fabric Databricks connection", "a cluster the linked service does not fully describe"),
-    validation_rules=("notebookPath present", "connection present"),
-))
+register(rule_from_catalog("databricks_notebook", convert_databricks_notebook))
 _JOB_NOT_GENERATED = ("Fabric's Azure Databricks activity has a Job type, but only its portal settings are documented (a job "
                       "picked from a list, plus job parameters), not the JSON property names, so a faithful configuration "
                       "cannot be generated")
@@ -314,6 +309,10 @@ def _databricks_job_as_fabric_notebooks(cx: ActivityBuilder, shape: Any, struct:
 
 def convert_databricks_job(cx: ActivityBuilder) -> None:
     raw = cx.act.raw_properties
+    if cx.choice("spark") == "databricks":
+        return _block(cx, "databricks_job", f"{_JOB_NOT_GENERATED}, and the activity mapping chose to keep it on Azure Databricks.",
+                      "Create the Job task on the Fabric Azure Databricks activity (Settings > Job) with the original job and job parameters.",
+                      "Set 'chosen' to fabric in the activity mapping to run the job's tasks as Fabric notebooks.", disposition="reuse_externally")
     job_id = databricks_jobs.job_id_of(raw)
     struct = cx.pc.project.databricks_jobs.get(job_id) if job_id else None
     if struct is None:
@@ -358,45 +357,59 @@ def convert_databricks_job(cx: ActivityBuilder) -> None:
            "and convert again.", disposition="reuse_externally")
 
 
-register(ConversionRule(
-    name="databricks_job", adf_types=("DatabricksJob",), fabric_types=("TridentNotebook",),
-    variants=("job id", "job parameters", "job of notebook and Python file tasks migrated to Fabric notebooks"),
-    strategy=ConversionStrategy.manual, handler=convert_databricks_job, runtime_disposition="reuse_externally",
-    property_rules=("not converted as a Databricks Job task: the Fabric Job task's JSON structure is undocumented",
-                    "jobId -> one Fabric Notebook activity per notebook or Python file task, only when the job's definition was "
-                    "read and each task's notebook was deployed and bound"),
-    io_rules=("none",), expression_rules=("jobParameters values converted like any expression",),
-    dependency_rules=("a fail-fast placeholder keeps the dependency graph intact",
-                      "tasks keep the job's dependencies (ALL_SUCCESS -> Succeeded, ALL_DONE -> Completed)"),
-    parameter_variable_rules=("job parameters -> the parameters of every notebook task's notebook that reads them (the activity's "
-                              "jobParameters value, else the job's default)",
-                              "notebook base parameters and Python file arguments (as argv_N) -> notebook parameters, from the job "
-                              "definition; a whole {{job.parameters.x}} value takes x's value"),
-    unsupported=("Job task settings (jobId, jobParameters)", "task types other than notebook and Python file, Git-sourced code, "
-                 "task libraries, condition tasks and other run_if values, other {{...}} value references, secret parameter "
-                 "values, a base parameter named like a job parameter"),
-    manual_configuration=("recreate the Job task on the Fabric Azure Databricks activity, or migrate the job's notebooks",),
-    validation_rules=("placeholder Fail activity present", "notebookId bound per task"),
-))
-register(ConversionRule(
-    name="databricks_jar_python", adf_types=("DatabricksSparkJar", "DatabricksSparkPython"),
-    fabric_types=(), variants=("Spark JAR", "Python file"),
-    strategy=ConversionStrategy.manual, handler=convert_databricks_other, runtime_disposition="reuse_externally",
-    property_rules=("not converted: the Fabric task structure is undocumented",), io_rules=("none",),
-    expression_rules=("none",), dependency_rules=("a fail-fast placeholder keeps the dependency graph intact",),
-    parameter_variable_rules=("none",), unsupported=("Spark JAR / Python task settings",),
-    manual_configuration=("recreate the task on the Fabric Azure Databricks activity",),
-    validation_rules=("placeholder Fail activity present",),
-))
+register(rule_from_catalog("databricks_job", convert_databricks_job))
+register(rule_from_catalog("databricks_jar_python", convert_databricks_other))
 
 
 # --- HDInsight -------------------------------------------------------------------------------------------------------
+
+
+def _hdinsight_spark_job_name(cx: ActivityBuilder) -> str:
+    """The Fabric Spark job definition's name for this HDInsight Spark activity: its generated workload's display name when there is one
+    (the workload engine names it after the entry file), else the entry file's stem."""
+    me = f"{cx.pc.pipeline.name}/{cx.act.name}".lower()
+    for w in cx.pc.project.workloads.values():
+        if getattr(w.kind, "value", w.kind) == "hdinsight_spark" and me in {u.lower() for u in w.used_by}:
+            return w.artifact.display_name or w.name
+    entry = str(cx.act.raw_properties.get("entryFilePath") or cx.act.name)
+    return entry.rstrip("/").rsplit("/", 1)[-1].rsplit(".", 1)[0] or cx.act.name
+
+
+def _hdinsight_spark_as_sjd(cx: ActivityBuilder) -> None:
+    """HDInsight Spark -> a Fabric Spark job definition that runs the same file (generated by the workload engine, approved by a person,
+    created by workloads-deploy). Until its id is bound in this workspace, a fail-fast placeholder names what is missing."""
+    a, raw = cx.act, cx.act.raw_properties
+    job = _hdinsight_spark_job_name(cx)
+    sjd = cx.item("sparkjob", job, f"The Fabric Spark job definition that runs HDInsight Spark job '{job}' (rootPath + entryFilePath).")
+    if sjd.startswith("<"):
+        return _block(cx, "hdinsight_spark_job_pending",
+                      f"its job runs as the Fabric Spark job definition '{job}', which is not in this Fabric workspace yet.",
+                      "Generate it (workloads-generate, or Review > Compute > Generate Fabric notebooks), have a person approve it, create it "
+                      "with workloads-deploy --resolutions conversion/resolutions.json, then convert again.",
+                      "Recreate the job on the Fabric HDInsight activity using the original program settings.", disposition="replace")
+    tp: dict[str, Any] = {"sparkJobDefinitionId": sjd, "workspaceId": cx.workspace()}
+    cx.mapping("typeProperties.rootPath/entryFilePath", "sparkJobDefinition.executableFile", "hdinsight_file_to_sjd",
+               "the main file is referenced in place by the Spark job definition")
+    for src, dst in (("className", "mainClass"), ("arguments", "commandLineArguments")):
+        if src in raw:
+            cx.mapping(f"typeProperties.{src}", f"sparkJobDefinition.{dst}", "hdinsight_to_sjd")
+    for key in raw:
+        if key not in ("rootPath", "entryFilePath", "className", "arguments", "sparkJobLinkedService"):
+            cx.dropped(f"typeProperties.{key}", "an HDInsight cluster setting (sparkConfig, proxyUser, getDebugInfo) with no Spark job "
+                       "definition equivalent; set Spark properties in a Fabric Environment")
+    name = cx.add(cx.envelope(a.name, "SparkJobDefinition", tp))
+    cx.cover(Op.external_execution, name)
+    cx.strategy = ConversionStrategy.alternative
+    cx.disposition = "replace"
+    cx.summary = f"HDInsightSpark '{a.name}' -> Fabric Spark job definition activity running '{job}' (the same file, on Fabric Spark)."
 
 
 def convert_hdinsight(cx: ActivityBuilder) -> None:
     a = cx.act
     kind = {"hdinsighthive": "Hive", "hdinsightpig": "Pig", "hdinsightmapreduce": "MapReduce",
             "hdinsightstreaming": "Streaming", "hdinsightspark": "Spark"}[(a.type or "").lower()]
+    if kind == "Spark":
+        return _hdinsight_spark_as_sjd(cx)
     ls = _ls(cx)
     if kind in ("MapReduce", "Streaming", "Spark") or not ls:
         return _block(
@@ -433,19 +446,7 @@ def convert_hdinsight(cx: ActivityBuilder) -> None:
     cx.summary = f"HDInsight{kind} '{a.name}' -> Fabric HDInsight activity (type {kind}) on the same cluster."
 
 
-register(ConversionRule(
-    name="hdinsight", adf_types=("HDInsightHive", "HDInsightPig", "HDInsightMapReduce", "HDInsightStreaming",
-                                 "HDInsightSpark"),
-    fabric_types=("AzureHDInsight",), variants=("Hive", "Pig", "MapReduce", "Streaming", "Spark"),
-    strategy=ConversionStrategy.transformed, handler=convert_hdinsight, runtime_disposition="reuse_externally",
-    property_rules=("hdiActivityType derived from the ADF type", "arguments/getDebugInfo/defines/variables/"
-                    "queryTimeout carried", "scriptPath + scriptLinkedService -> scriptSettings"),
-    io_rules=("none",), expression_rules=("converted like Copy",), dependency_rules=("dependsOn mapped 1:1",),
-    parameter_variable_rules=("unchanged",),
-    unsupported=("MapReduce / Streaming / Spark program settings (undocumented in Fabric) -> blocked",
-                 "storageLinkedServices"),
-    manual_configuration=("Fabric HDInsight connection",), validation_rules=("hdiActivityType present",),
-))
+register(rule_from_catalog("hdinsight", convert_hdinsight))
 
 
 # --- Custom (Azure Batch) ----------------------------------------------------------------------------------------------
@@ -477,17 +478,7 @@ def convert_custom(cx: ActivityBuilder) -> None:
     cx.summary = f"Custom '{a.name}' -> Fabric Azure Batch (Custom) activity running {tp.get('command')!r}."
 
 
-register(ConversionRule(
-    name="custom", adf_types=("Custom",), fabric_types=("Custom",), variants=("with resource storage", "extended properties"),
-    strategy=ConversionStrategy.transformed, handler=convert_custom, runtime_disposition="reuse_externally",
-    property_rules=("command, folderPath, extendedProperties, retentionTimeInDays, autoUserSpecification carried",
-                    "linkedServiceName -> externalReferences (activity and typeProperties)",
-                    "resourceLinkedService -> staging.externalReferences"),
-    io_rules=("referenceObjects (linked services/datasets) are not carried",), expression_rules=("converted like Copy",),
-    dependency_rules=("dependsOn mapped 1:1",), parameter_variable_rules=("unchanged",),
-    unsupported=("referenceObjects",), manual_configuration=("Fabric Azure Batch connection",),
-    validation_rules=("command present", "externalReferences at both required levels"),
-))
+register(rule_from_catalog("custom", convert_custom))
 
 
 # --- Azure ML / Kusto ----------------------------------------------------------------------------------------------------
@@ -530,34 +521,9 @@ def convert_kusto(cx: ActivityBuilder) -> None:
     cx.summary = f"AzureDataExplorerCommand '{a.name}' -> Fabric KQL activity running the same control command."
 
 
-register(ConversionRule(
-    name="azure_ml", adf_types=("AzureMLExecutePipeline",), fabric_types=("AzureMLExecutePipeline",),
-    variants=("published pipeline", "pipeline endpoint"), strategy=ConversionStrategy.transformed,
-    handler=convert_aml_pipeline, runtime_disposition="reuse_externally",
-    property_rules=("pipeline id/endpoint/version/experiment/parameters carried",
-                    "linkedServiceName -> externalReferences.connection"),
-    io_rules=("none",), expression_rules=("converted like Copy",), dependency_rules=("dependsOn mapped 1:1",),
-    parameter_variable_rules=("unchanged",), unsupported=(), manual_configuration=("Fabric Azure ML connection",),
-    validation_rules=("connection present", "policy present"),
-))
-register(ConversionRule(
-    name="azure_ml_deprecated", adf_types=("AzureMLBatchExecution", "AzureMLUpdateResource"), fabric_types=(),
-    variants=("batch execution", "update resource"), strategy=ConversionStrategy.manual,
-    handler=convert_aml_deprecated, runtime_disposition="redesign",
-    property_rules=("not converted: deprecated, unavailable in Fabric",), io_rules=("none",), expression_rules=("none",),
-    dependency_rules=("a fail-fast placeholder keeps the dependency graph intact",), parameter_variable_rules=("none",),
-    unsupported=("Azure ML Studio (classic) batch execution / update resource",),
-    manual_configuration=("republish via Azure ML pipelines or batch endpoints",),
-    validation_rules=("placeholder Fail activity present",),
-))
-register(ConversionRule(
-    name="kusto", adf_types=("AzureDataExplorerCommand",), fabric_types=("KustoQueryLanguage",),
-    variants=("control command",), strategy=ConversionStrategy.transformed, handler=convert_kusto,
-    runtime_disposition="reuse_externally",
-    property_rules=("command, commandTimeout carried",), io_rules=("none",), expression_rules=("converted like Copy",),
-    dependency_rules=("dependsOn mapped 1:1",), parameter_variable_rules=("unchanged",), unsupported=(),
-    manual_configuration=("Fabric Kusto connection", "database"), validation_rules=("command present",),
-))
+register(rule_from_catalog("azure_ml", convert_aml_pipeline))
+register(rule_from_catalog("azure_ml_deprecated", convert_aml_deprecated))
+register(rule_from_catalog("kusto", convert_kusto))
 
 
 # --- Fabric-item scaffolds: Synapse notebook, Spark job, data flows ------------------------------------------------------------
@@ -640,7 +606,7 @@ def _dataflow_parameter(cx: ActivityBuilder, name: str, v: Any) -> Any:
 def convert_dataflow(cx: ActivityBuilder) -> None:
     a, raw = cx.act, cx.act.raw_properties
     df = a.configuration.get("dataflow") or _ref(raw.get("dataflow")) or "dataflow"
-    if a.type == "ExecuteDataFlow":
+    if a.type == "ExecuteDataFlow" and cx.choice("dataflow") != "dataflow_gen2":  # the activity mapping may choose Dataflow Gen2
         return _dataflow_as_notebook(cx, df)
     return _dataflow_gen2(cx, df)
 
@@ -730,50 +696,10 @@ def convert_usql(cx: ActivityBuilder) -> None:
 
 
 for _rule in (
-    ConversionRule(
-        name="synapse_notebook", adf_types=("SynapseNotebook",), fabric_types=("TridentNotebook",),
-        variants=("with parameters",), strategy=ConversionStrategy.alternative, handler=convert_synapse_notebook,
-        runtime_disposition="replace",
-        property_rules=("parameters carried", "notebook reference -> notebookId placeholder"),
-        io_rules=("none",), expression_rules=("parameter expressions converted",),
-        dependency_rules=("dependsOn mapped 1:1",), parameter_variable_rules=("unchanged",),
-        unsupported=("Spark pool, executor and configuration settings",),
-        manual_configuration=("migrate the notebook to Fabric", "bind notebookId and workspaceId"),
-        validation_rules=("notebookId and workspaceId present",)),
-    ConversionRule(
-        name="spark_job", adf_types=("SparkJob",), fabric_types=("SparkJobDefinition",),
-        variants=("with arguments",), strategy=ConversionStrategy.alternative, handler=convert_spark_job,
-        runtime_disposition="replace",
-        property_rules=("file -> executableFile", "className -> mainClass", "args -> commandLineArguments"),
-        io_rules=("none",), expression_rules=("converted like Copy",), dependency_rules=("dependsOn mapped 1:1",),
-        parameter_variable_rules=("unchanged",), unsupported=("pool / executor / configuration settings",),
-        manual_configuration=("create the Spark job definition", "bind its id"),
-        validation_rules=("sparkJobDefinitionId and workspaceId present",)),
-    ConversionRule(
-        name="dataflow", adf_types=("ExecuteDataFlow", "ExecuteWranglingDataflow"), fabric_types=("TridentNotebook", "RefreshDataFlow"),
-        variants=("mapping data flow (translated to a notebook)", "wrangling data flow"), strategy=ConversionStrategy.alternative,
-        handler=convert_dataflow, runtime_disposition="replace",
-        property_rules=("mapping data flow -> Notebook activity running the notebook translated from its script (once approved and in "
-                        "the workspace)", "data flow parameters -> notebook parameters (pipeline expressions and literals)",
-                        "wrangling data flow -> Dataflow Gen2 refresh, dataflowId placeholder"),
-        io_rules=("none",), expression_rules=("parameter expressions converted",),
-        dependency_rules=("dependsOn mapped 1:1",), parameter_variable_rules=("unchanged",),
-        unsupported=("Spark compute / staging / trace settings of mapping data flows",),
-        manual_configuration=("upgrade or re-author the data flow as Dataflow Gen2", "bind the dataflow id"),
-        validation_rules=("dataflowId and workspaceId present",)),
-    ConversionRule(
-        name="ssis", adf_types=("ExecuteSSISPackage",), fabric_types=(), variants=("SSISDB", "file system"),
-        strategy=ConversionStrategy.manual, handler=convert_ssis, runtime_disposition="redesign",
-        property_rules=("not converted: no Fabric equivalent",), io_rules=("none",), expression_rules=("none",),
-        dependency_rules=("a fail-fast placeholder keeps the dependency graph intact",),
-        parameter_variable_rules=("none",), unsupported=("SSIS package execution",),
-        manual_configuration=("choose an alternative",), validation_rules=("placeholder Fail activity present",)),
-    ConversionRule(
-        name="usql", adf_types=("DataLakeAnalyticsU-SQL",), fabric_types=(), variants=("script",),
-        strategy=ConversionStrategy.manual, handler=convert_usql, runtime_disposition="redesign",
-        property_rules=("not converted: service retired",), io_rules=("none",), expression_rules=("none",),
-        dependency_rules=("a fail-fast placeholder keeps the dependency graph intact",),
-        parameter_variable_rules=("none",), unsupported=("U-SQL",), manual_configuration=("re-implement",),
-        validation_rules=("placeholder Fail activity present",)),
+    rule_from_catalog("synapse_notebook", convert_synapse_notebook),
+    rule_from_catalog("spark_job", convert_spark_job),
+    rule_from_catalog("dataflow", convert_dataflow),
+    rule_from_catalog("ssis", convert_ssis),
+    rule_from_catalog("usql", convert_usql),
 ):
     register(_rule)

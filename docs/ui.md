@@ -10,10 +10,10 @@ authorised by the server (see [security.md](security.md)).
 | 1 | Discover | `discovery`, `semantic` stages | semantic record exists |
 | 2 | Review | `GET /inventory`, `/compatibility`; `dependencies`, `workloads` stages | the person has read the inventory |
 | 3 | Consult | `GET/PUT /brief`, submit, approve | the current answers are approved; the run follows the brief |
-| 4 | Connect | connection cards, tests, apply | every linked service has a verdict |
+| 4 | Connect | connection cards, tests, apply; `GET/PUT /pipeline-connection` (the Invoke pipeline connection, chosen from the tenant's FabricDataPipelines connections; apply sets it by itself when exactly one exists) | every linked service has a verdict |
 | 5 | Plan target | `/provisioning` plan, approve, dry run, apply, verify | a current plan exists; apply only after approval and a dry run |
 | 6 | Convert | `convert` stage | pipelines generated |
-| 7 | Deploy | `deploy_dry_run`, `deploy_apply`; `GET /package` (Fabric package ZIP, [fabric-package.md](fabric-package.md)) | dry run done; apply confirmed |
+| 7 | Deploy | `deploy_dry_run`, `deploy_apply`; `GET /workloads/approvals`, `.../{ref}/code`, `POST /workloads/approve` (read and approve generated notebooks, Spark jobs and Environments as the signed-in person; Deploy creates only approved ones); `GET /package` (Fabric package ZIP, [fabric-package.md](fabric-package.md)) | dry run done; apply confirmed |
 | 8 | Validate | `validate` stage | a validation result exists |
 | 9 | Report | `GET /report` | always readable; "verified" only if the backend says so |
 
@@ -137,7 +137,7 @@ Checked against the API routes and the CLI on 2026-10-29. Everything the API exp
 
 | Feature | CLI | Why it matters for "everything intact" |
 |---|---|---|
-| Generate, approve, deploy and record a run of Spark notebooks and jobs | `workloads-generate`, `workloads-approve`, `workloads-deploy`, `workloads-record-run` | The UI assesses them (Review > Compute) and, on Deploy, binds a notebook already in the workspace to its generated notebook (Check / Bind; see [workload-migration.md](workload-migration.md)) |
+| Generate Spark notebooks and jobs (fetching their code), and record a run | `workloads-generate`, `workloads-record-run` | The UI assesses them (Review > Compute), approves what was generated and creates approved notebooks on Deploy (since 2026-11-16), and binds a notebook already in the workspace to its generated notebook (Check / Bind; see [workload-migration.md](workload-migration.md)) |
 | Deploy proposed Spark pools and environments | `compute-deploy` | Review shows the proposals; creating them is CLI |
 | Storage map, OneLake shortcuts | `storage-map`, `create-shortcut` | Needed before Convert can repoint storage |
 | Notebook deploy, Git commit | `deploy-notebook`, `git-commit` | Notebooks are not deployed by Deploy |

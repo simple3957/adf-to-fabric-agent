@@ -222,6 +222,16 @@ class FabricService:
             raise _error(resp, "creating the connection")
         return resp.body if isinstance(resp.body, dict) else {}
 
+    def create_workspace(self, display_name: str, capacity_id: str, description: str = "") -> dict:
+        """Create a workspace on a capacity (Fabric REST ``POST /v1/workspaces``). An existing name is refused by Fabric; nothing is
+        replaced. Returns ``{id, displayName, capacityId}``."""
+        body = {"displayName": display_name, "capacityId": capacity_id, **({"description": description} if description else {})}
+        resp = self.api.request("POST", "workspaces", body)
+        if resp.status not in (200, 201):
+            raise _error(resp, f"creating workspace '{display_name}'")
+        b = resp.body if isinstance(resp.body, dict) else {}
+        return {"id": b.get("id"), "displayName": b.get("displayName", display_name), "capacityId": b.get("capacityId", capacity_id)}
+
     def provision_identity(self, workspace_id: str) -> dict:
         """Creates the workspace identity (admin role required); a 202 is polled by the caller via the operation id."""
         resp = self.api.request("POST", f"workspaces/{workspace_id}/provisionIdentity")

@@ -98,3 +98,18 @@ def deploy_spark_job_definition(client: FabricClient, workspace: str, name: str,
     if not item_id:
         raise DeployError(f"Spark job definition '{name}' was created but its id could not be read; check the workspace.")
     return SjdResult(name, action, item_id, "created")
+
+
+def bind_resolutions(path, name: str, item_id: str) -> None:
+    """Record ``sparkjob:<name>`` -> ``item_id`` (ItemToId) in a resolutions file, so the next convert binds the activity to it."""
+    from pathlib import Path
+
+    from adf2fabric.project.locks import lock_for, read_text_retry, write_atomic
+
+    path = Path(path)
+    with lock_for(path):
+        entries = json.loads(read_text_retry(path)) if path.exists() else []
+        key = f"sparkjob:{name}"
+        entries = [e for e in entries if not (isinstance(e, dict) and e.get("type") == "ItemToId" and str(e.get("key", "")).lower() == key.lower())]
+        entries.append({"type": "ItemToId", "key": key, "value": item_id})
+        write_atomic(path, json.dumps(entries, indent=2) + "\n")

@@ -38,6 +38,7 @@ class WorkloadKind(str, Enum):
     synapse_spark_job = "synapse_spark_job"
     databricks_job = "databricks_job"  # a Databricks job whose tasks cannot all become Fabric notebooks (or that was not read)
     adf_dataflow = "adf_dataflow"  # an ADF mapping data flow, translated to a Fabric notebook (agent/workloads/dataflow.py)
+    hdinsight_spark = "hdinsight_spark"  # an HDInsight Spark activity's job, run by a Fabric Spark job definition on the same file
 
 
 class Classification(str, Enum):

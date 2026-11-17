@@ -168,6 +168,40 @@ def _map_dataset(ds: AdfDataset, ls: Optional[AdfLinkedService], used: list[Use]
     return dm
 
 
+_ABFSS_URI = re.compile(r"^abfss://([a-z0-9][a-z0-9-]{1,62})@([a-z0-9]{3,24})\.dfs\.core\.windows\.net(/[^?#]*)?$", re.I)
+
+
+def _spark_job_locations(disc: AdfSemanticDiscovery, lss: dict[str, AdfLinkedService]) -> list[DatasetMap]:
+    """Storage an HDInsight Spark job reads outside datasets: its file (rootPath "<container>/<folder>" on an ADLS Gen2
+    sparkJobLinkedService) and every literal abfss:// argument. Each becomes a mapped row, so the container gets its shortcut and the
+    generated Spark job definition can reach it through OneLake (agent/workloads/engine.py routes the file and the arguments)."""
+    from adf2fabric.agent.discovery.adf_semantic.inventory import walk
+
+    out: list[DatasetMap] = []
+    for p in disc.pipelines:
+        for a in walk(p.activities):
+            if a.type != "HDInsightSpark":
+                continue
+            raw = a.raw_properties
+            use = [Use(p.name, a.name, "input")]
+            ls_ref = raw.get("sparkJobLinkedService")
+            ls = lss.get(str(ls_ref.get("referenceName", "")).lower()) if isinstance(ls_ref, dict) else None
+            root, r_dyn = _text(raw.get("rootPath"))
+            account, _url, problem = _account(ls) if ls is not None else (None, None, "")
+            if account and root and not r_dyn and not problem:
+                container, _, folder = _clean(root).partition("/")
+                out.append(DatasetMap(dataset=f"{p.name}/{a.name} (Spark job file)", format="HDInsightSpark", linked_service=ls.name, store="adls_gen2",
+                                      status="mapped", account=account, container=container.lower(), folder=folder,
+                                      file=_text(raw.get("entryFilePath"))[0], lakehouse_path=f"Files/{container.lower()}/{folder}".rstrip("/"), used_by=use))
+            for arg in raw.get("arguments") or []:
+                m = _ABFSS_URI.match(arg) if isinstance(arg, str) else None
+                if m:
+                    out.append(DatasetMap(dataset=f"{p.name}/{a.name} (Spark job argument)", format="HDInsightSpark", linked_service=None, store="adls_gen2",
+                                          status="mapped", account=m.group(2).lower(), container=m.group(1).lower(), folder=_clean(m.group(3)),
+                                          lakehouse_path=f"Files/{m.group(1).lower()}/{_clean(m.group(3))}".rstrip("/"), used_by=use))
+    return out
+
+
 class StorageMapError(ValueError):
     pass
 
@@ -190,6 +224,7 @@ def build_storage_map(disc: AdfSemanticDiscovery, lakehouse: Optional[str] = Non
             not_file += 1
         else:
             rows.append(row)
+    rows += _spark_job_locations(disc, lss)
 
     groups: dict[tuple[str, str], list[DatasetMap]] = {}
     for r in rows:

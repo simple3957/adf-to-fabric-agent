@@ -57,6 +57,7 @@ class ApplyResult(_M):
     dry_run: bool = False
     items: list[ApplyItem] = Field(default_factory=list)
     resolutions_file: Optional[str] = None
+    pipeline_connection: Optional[str] = None  # what happened to the Invoke pipeline connection (bound by itself, or why not)
 
 
 class ConnectionService:
@@ -230,9 +231,33 @@ class ConnectionService:
             self._states[(pid, card.name)] = item.state
         if bindings and not dry_run:
             result.resolutions_file = self._merge_resolutions(pid, bindings)
+        if want is None:
+            result.pipeline_connection = self._pipeline_connection(pid, list(existing.values()), dry_run)
         if not dry_run:
             write_atomic(self._dir(pid) / "apply.yaml", yaml.safe_dump(json.loads(result.model_dump_json()), sort_keys=False))
         return result
+
+    def _pipeline_connection(self, pid: str, connections: list[dict], dry_run: bool) -> Optional[str]:
+        """The Invoke pipeline connection: bound by itself when the tenant has exactly one, never guessed between several."""
+        from adf2fabric.project import bindings as B
+
+        users = B.pipelines_needing_connection(self.store, pid)
+        if not users:
+            return None
+        current = B.pipeline_connection(self.store, pid)
+        choices = B.pipeline_connection_choices(connections)
+        if current:
+            name = next((c["name"] for c in choices if c["id"] == current.lower()), None)
+            return f"Invoke pipeline connection: '{name}' is set." if name else "Invoke pipeline connection: set (not among the connections this account can see)."
+        if len(choices) == 1:
+            if dry_run:
+                return f"Invoke pipeline connection: '{choices[0]['name']}' would be used (the only one in the tenant)."
+            B.set_pipeline_connection(self.store, pid, choices[0]["id"])
+            return f"Invoke pipeline connection: '{choices[0]['name']}' was set (the only one in the tenant)."
+        if not choices:
+            return ("Invoke pipeline connection: none exists in the tenant. Create a 'Fabric Data Pipelines' connection in Fabric "
+                    "(Settings > Manage connections and gateways), then choose it on this step.")
+        return f"Invoke pipeline connection: {len(choices)} exist in the tenant; choose one on this step."
 
     def _apply_one(self, pid, session, fabric, card: LinkedServiceCard, existing: dict, auto_match: bool, dry_run: bool) -> ApplyItem:
         item = ApplyItem(linked_service=card.name, action="skipped", state=card.state)

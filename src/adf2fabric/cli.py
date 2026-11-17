@@ -1947,6 +1947,29 @@ def fetch_databricks_notebooks_cmd(project_name: str, linked_service: str | None
         sys.exit(2)
 
 
+@cli.command(name="mapping-export")
+@click.option("--project", "project_name", required=True, help="Project name (`discovery-adf-semantic` must have run).")
+def mapping_export(project_name: str) -> None:
+    """Write the project's activity mapping (conversion/activity-mapping.json): every activity with what the master compatibility
+    catalog allows it to become in Fabric, and the per-activity choices (kept when the file is written again). Convert follows it."""
+    from adf2fabric.agent.conversion import project_mapping as PM
+
+    store = ProjectStore(projects_root(load_config()))
+    pid = slugify(project_name)
+    try:
+        data = PM.build(store, pid)
+        PM.choices(data)
+    except PM.MappingError as exc:
+        click.secho(f"Mapping failed: {exc}", fg="red", err=True)
+        sys.exit(1)
+    rows = data["activities"]
+    switchable = [r for r in rows if r.get("switch")]
+    click.echo(f"ACTIVITY MAPPING  {store.conversion_dir(pid) / PM.FILE}\n  {len(rows)} activities · {len(switchable)} with a choice "
+               f"({sum(1 for r in switchable if r.get('chosen'))} set) · master catalog v{data['catalog_version']}")
+    for r in switchable:
+        click.echo(f"  - {r['id']} ({r['adf_type']}): {r['switch']} = {r.get('chosen') or 'follow the run'}   allowed: {', '.join(r['allowed'])}")
+
+
 @cli.command(name="package")
 @click.option("--project", "project_name", required=True, help="Project name (`convert` must have run).")
 @click.option("--out", "out_dir", default=None, type=click.Path(file_okay=False), help="Folder to write (default: projects/<p>/package/; replaced).")

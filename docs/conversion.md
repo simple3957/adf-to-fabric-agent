@@ -31,6 +31,14 @@ the operation. Coverage proves every source activity, operation and dynamic expr
 
 ## Rules (the registry)
 
+**Everything the converter knows is in one file:** the master compatibility catalog
+([master-catalog.md](master-catalog.md), `src/adf2fabric/catalog/compatibility.json`) holds, for each of the 41 ADF activity types,
+every way it can be converted (condition, Fabric activities, status, code), what is and is not carried, manual steps, workarounds,
+Microsoft's own comparison and lifecycle, plus connectors, triggers, concepts and the Fabric schema, each with its source page. The
+rule registry, the compatibility catalog, connector verdicts and the schema below are read from it. Each project gets its own
+`conversion/activity-mapping.json` (every activity, its options, and a per-activity choice of storage route, Spark platform and data
+flow target) that Convert writes and follows.
+
 `agent/conversion/registry.py` holds one `ConversionRule` per activity family; each declares ADF types and
 variants, Fabric targets, property / input-output / expression / dependency / parameter-variable rules,
 unsupported properties, manual configuration, validation rules and runtime disposition
@@ -173,6 +181,10 @@ per Microsoft, but it is not part of any ADF export, so it cannot be detected (s
 therefore **not** needed in the convert-stage resolutions file for deployment; connections still are (for example
 `connection:invoke-pipeline`), because Fabric connections cannot be created by this tool. Anything still unbound
 after substitution blocks that pipeline unless `--allow-unbound`.
+
+The Invoke pipeline connection is an OAuth connection of type FabricDataPipelines. It belongs to the tenant, not to a workspace, and
+Fabric's API cannot create it. The UI asks for it on the **Connect** step, listing the tenant's connections of that type. Connect's apply
+binds it by itself when exactly one exists, and never picks between several (`project/bindings.py`, since 2026-11-16).
 
 ## Known limits
 

@@ -115,6 +115,8 @@ These are exposed over HTTP, each with its own permission (the route-by-role tes
 |---|---|
 | `GET .../inventory`, `waves`, `compatibility`, `validation`, `report`, `provisioning` | `reports:view` |
 | `GET .../package` (the Fabric package as a ZIP; it holds the pipelines' connection ids, never a credential; audited `package.build`) | `reports:view` |
+| `GET .../pipeline-connection` (pipelines that need an Invoke pipeline connection, the one set, the tenant's choices) / `PUT` (sets it; a seen connection must be FabricDataPipelines; audited `binding.set`) | `reports:view` / `plans:generate` |
+| `GET .../workloads/approvals`, `.../approvals/{ref}/code` (generated code to read) / `POST .../workloads/approve` (`confirm: true`; records the signed-in person; audited `workloads.approve`) | `reports:view` / `provision:approve` |
 | `POST .../provisioning/plan` (read-only) | `plans:generate` + `azure:use` |
 | `POST .../provisioning/approve` | `provision:approve` (not held by analysts or operators) |
 | `POST .../provisioning/apply` | `migration:execute`; `apply: true` also needs `confirm: true` and a finished dry run of the same, approved, unchanged plan |

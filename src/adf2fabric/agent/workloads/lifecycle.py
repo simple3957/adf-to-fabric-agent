@@ -107,6 +107,8 @@ def deploy(store: ProjectStore, project_id: str, client: FabricClient, workspace
                 r = sjd_deploy.deploy_spark_job_definition(client, workspace, w.artifact.display_name or w.name, definition, apply=apply)
                 if apply and r.item_id:
                     _record_item(w, workspace, r.item_id)
+                    if resolutions is not None:  # the converter binds <item:sparkjob:NAME> from it (an HDInsight Spark activity)
+                        sjd_deploy.bind_resolutions(resolutions, w.artifact.display_name or w.name, r.item_id)
             else:
                 results.append((w, f"skipped: unsupported artifact kind {w.artifact.kind}"))
                 continue
@@ -332,6 +334,27 @@ def notebooks_to_create(store: ProjectStore, project_id: str, workspace: str, pi
     out = []
     for w in store.load_workload_manifest(project_id).workloads:
         if w.artifact.kind != "fabric_notebook" or w.generation.status != "generated" or w.approval.status != "approved":
+            continue
+        if (w.artifact.fabric_item_ids or {}).get(workspace.lower()):
+            continue
+        users = {u.split("/", 1)[0].lower() for u in w.used_by}
+        if scope is None or users & scope:
+            out.append(w)
+    return out
+
+
+def spark_jobs_to_create(store: ProjectStore, project_id: str, workspace: str, pipelines: Optional[list[str]] = None) -> list[WorkloadEntry]:
+    """The generated Spark job definitions Deploy creates in ``workspace`` before deploying (an HDInsight Spark job's): approved by a person,
+    with a default lakehouse, used by a pipeline in scope, and with no id in that workspace yet. A definition only references its main file
+    (its code is not read), so 'generated with open issues' for that reason is accepted once a person approved it."""
+    if not workspace or not store.has_workload_manifest(project_id):
+        return []
+    scope = {p.lower() for p in pipelines} if pipelines else None
+    out = []
+    for w in store.load_workload_manifest(project_id).workloads:
+        if w.artifact.kind != "fabric_spark_job_definition" or w.approval.status != "approved":
+            continue
+        if w.generation.status not in ("generated", "generated_with_open_issues") or w.artifact.configuration.get("lakehouse") != "set":
             continue
         if (w.artifact.fabric_item_ids or {}).get(workspace.lower()):
             continue

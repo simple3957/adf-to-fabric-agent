@@ -7,7 +7,7 @@ from typing import Any, Optional
 from adf2fabric.agent.conversion.context import ActivityBuilder
 from adf2fabric.agent.conversion.expr_convert import expr_obj, is_expression
 from adf2fabric.agent.conversion.handlers._common import block, carry, dataset_settings, lakehouse_route, lakehouse_store_settings
-from adf2fabric.agent.conversion.registry import ConversionRule, register
+from adf2fabric.agent.conversion.registry import register, rule_from_catalog
 from adf2fabric.project.conversion import ConversionStrategy
 from adf2fabric.project.discovery import AdfOperationKind as Op
 
@@ -125,29 +125,7 @@ def convert_copy(cx: ActivityBuilder) -> None:
                   f"'{src_io.name}' -> '{snk_io.name}' (datasets inlined, connections bound by reference).")
 
 
-register(ConversionRule(
-    name="copy", adf_types=("Copy",), fabric_types=("Copy",),
-    variants=("source/sink connector pairs", "explicit translator", "staged copy", "query/stored-procedure source",
-              "parameterized datasets", "incremental (watermark) filter"),
-    strategy=ConversionStrategy.transformed, handler=convert_copy, runtime_disposition="replace",
-    property_rules=("source/sink objects kept (type, query, partitioning, store/format settings)",
-                    "documented Copy settings carried (parallelCopies, dataIntegrationUnits, validateDataConsistency, "
-                    "skipErrorFile, enableStaging, translator, preserve)",
-                    "stagingSettings.linkedServiceName -> stagingSettings.externalReferences.connection"),
-    io_rules=("input dataset -> source.datasetSettings", "output dataset -> sink.datasetSettings",
-              "dataset linkedServiceName -> datasetSettings.externalReferences.connection",
-              "dataset parameters substituted with the activity's arguments (or declared defaults)"),
-    expression_rules=("dataset().x inlined; pipeline().Pipeline -> PipelineName; globalParameters -> gp_ parameters",
-                      "all other expressions pass through unchanged"),
-    dependency_rules=("dependsOn mapped 1:1 onto the single generated Copy",),
-    parameter_variable_rules=("parameters/variables referenced unchanged; globals become gp_ parameters",),
-    unsupported=("logSettings / logStorageSettings / redirectIncompatibleRowSettings (undocumented Fabric structure)",
-                 "any ADF Copy property not in the documented Fabric Copy table"),
-    manual_configuration=("one Fabric connection per linked service", "re-create copy logging if used",
-                         "on-premises data gateway for self-hosted integration runtimes"),
-    validation_rules=("source and sink present with a type and datasetSettings", "documented typeProperties only",
-                      "connection bound"),
-))
+register(rule_from_catalog("copy", convert_copy))
 
 
 # --- Lookup -----------------------------------------------------------------------------------------------
@@ -186,20 +164,7 @@ def convert_lookup(cx: ActivityBuilder) -> None:
     cx.summary = f"Lookup '{act.name}' -> Fabric Lookup over inline dataset '{io.name}'."
 
 
-register(ConversionRule(
-    name="lookup", adf_types=("Lookup",), fabric_types=("Lookup",),
-    variants=("table", "query", "stored procedure", "first row only", "all rows"),
-    strategy=ConversionStrategy.transformed, handler=convert_lookup, runtime_disposition="replace",
-    property_rules=("source kept as authored", "firstRowOnly kept (default true on both platforms)"),
-    io_rules=("typeProperties.dataset -> typeProperties.datasetSettings (inlined, connection bound)",),
-    expression_rules=("query/dataset expressions converted like Copy; downstream activity('x').output.firstRow/.value "
-                      "references are unchanged",),
-    dependency_rules=("dependsOn mapped 1:1",),
-    parameter_variable_rules=("unchanged",),
-    unsupported=("properties outside the documented Lookup table",),
-    manual_configuration=("Fabric connection for the dataset's linked service",),
-    validation_rules=("source and datasetSettings present",),
-))
+register(rule_from_catalog("lookup", convert_lookup))
 
 
 # --- GetMetadata / Delete -------------------------------------------------------------------------------------
@@ -240,19 +205,7 @@ def convert_dataset_activity(cx: ActivityBuilder) -> None:
     cx.summary = f"{act.type} '{act.name}' -> Fabric {ftype} over inline dataset '{io.name}'."
 
 
-register(ConversionRule(
-    name="dataset_activity", adf_types=("GetMetadata", "Delete"), fabric_types=("GetMetadata", "Delete"),
-    variants=("fieldList metadata", "store/format settings", "recursive delete", "delete logging"),
-    strategy=ConversionStrategy.transformed, handler=convert_dataset_activity, runtime_disposition="replace",
-    property_rules=("fieldList/storeSettings/formatSettings (GetMetadata) and recursive/maxConcurrentConnections/"
-                    "enableLogging/storeSettings (Delete) carried",),
-    io_rules=("typeProperties.dataset -> typeProperties.datasetSettings (inlined, connection bound)",),
-    expression_rules=("converted like Copy; metadata output references unchanged",),
-    dependency_rules=("dependsOn mapped 1:1",), parameter_variable_rules=("unchanged",),
-    unsupported=("Delete logStorageSettings (linked-service reference, undocumented Fabric structure)",),
-    manual_configuration=("Fabric connection for the dataset's linked service",),
-    validation_rules=("datasetSettings present",),
-))
+register(rule_from_catalog("dataset_activity", convert_dataset_activity))
 
 
 # --- Validation (composite) ------------------------------------------------------------------------------------
@@ -343,17 +296,4 @@ def convert_validation(cx: ActivityBuilder) -> None:
                   f"polling every {sleep_v}s until the dataset is ready, timing out after {timeout_v}.")
 
 
-register(ConversionRule(
-    name="validation", adf_types=("Validation",), fabric_types=("Until", "GetMetadata", "IfCondition", "Wait"),
-    variants=("exists", "minimumSize", "childItems"),
-    strategy=ConversionStrategy.composite, handler=convert_validation, runtime_disposition="replace",
-    property_rules=("timeout -> Until.timeout (default made explicit)", "sleep -> Wait.waitTimeInSeconds",
-                    "minimumSize / childItems -> readiness expression over GetMetadata output"),
-    io_rules=("dataset -> GetMetadata.datasetSettings",),
-    expression_rules=("generated expressions reference only generated helper activities",),
-    dependency_rules=("the Until loop keeps the original name and carries all dependsOn / dependents",),
-    parameter_variable_rules=("unchanged",),
-    unsupported=("exact ADF Validation retry semantics",),
-    manual_configuration=("Fabric connection for the dataset",),
-    validation_rules=("helper activities named uniquely", "Until contains only same-scope dependencies"),
-))
+register(rule_from_catalog("validation", convert_validation))

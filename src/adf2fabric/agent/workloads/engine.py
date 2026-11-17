@@ -92,6 +92,9 @@ class _Spec:
     python_file: bool = False  # a Python file task of a Databricks job: its code becomes a notebook, sys.argv[N] -> argv_N
     environment: Optional[str] = None  # a job task: the job environment ("<job id>:<key>") whose libraries it uses
     environment_libraries: list[str] = field(default_factory=list)  # that environment's dependencies, as written
+    main_file: Optional[str] = None  # an HDInsight Spark job: the abfss URI of its main file (rootPath + entryFilePath on its storage)
+    main_class: Optional[str] = None  # an HDInsight Spark job: className (JVM jobs)
+    file_reason: str = ""  # an HDInsight Spark job: why the main file's URI is not known
 
 
 def _literal_args(raw: Any) -> tuple[list[str], bool]:
@@ -103,6 +106,28 @@ def _literal_args(raw: Any) -> tuple[list[str], bool]:
         else:
             dynamic = True
     return out, dynamic
+
+
+def hdinsight_main_file(d: AdfSemanticDiscovery, a: AdfActivity) -> tuple[Optional[str], str]:
+    """(the abfss URI of an HDInsight Spark activity's main file, why not). ADF: ``rootPath`` is "<container>/<folder>" in the storage
+    of ``sparkJobLinkedService`` and ``entryFilePath`` is relative to it. Only an ADLS Gen2 (AzureBlobFS) storage gives a dfs URI that a
+    Fabric Spark job definition can reference; a Blob storage account may not have a hierarchical namespace, so that is not assumed."""
+    raw = a.raw_properties
+    root, entry = _text(raw.get("rootPath")), _text(raw.get("entryFilePath"))
+    if not root or not entry:
+        return None, "rootPath or entryFilePath is missing or an expression"
+    ls_name = _ref(raw.get("sparkJobLinkedService"))
+    if not ls_name:
+        return None, "it names no sparkJobLinkedService, and the cluster's own storage is not part of the ADF source"
+    ls = next((x for x in d.linked_services if x.name.lower() == ls_name.lower()), None)
+    if ls is None:
+        return None, f"linked service '{ls_name}' is not in the source"
+    host = urlparse(ls.endpoint or "").hostname or ""
+    if (ls.type or "") != "AzureBlobFS" or not host.endswith(".dfs.core.windows.net"):
+        return None, f"linked service '{ls_name}' ({ls.type}) is not an ADLS Gen2 account with a literal URL"
+    container, _, folder = root.strip("/").partition("/")
+    path = "/".join(x for x in (folder.strip("/"), entry.strip("/")) if x)
+    return f"abfss://{container}@{host}/{path}", ""
 
 
 def _workspace_host(d: AdfSemanticDiscovery, ls_name: Optional[str]) -> Optional[str]:
@@ -197,6 +222,16 @@ def _specs(d: AdfSemanticDiscovery, plan: Any, selected: Optional[set[str]], rea
                 item = _ref(raw.get("sparkJob")) or f"(dynamic: {p.name}/{a.name})"
                 kind, name = W.synapse_spark_job, item
                 passed, args = [], _literal_args(raw.get("args"))[0]
+            elif t == "HDInsightSpark":
+                uri, why = hdinsight_main_file(d, a)
+                item = uri or f"(unresolved: {p.name}/{a.name})"
+                name = (_text(raw.get("entryFilePath")) or a.name).rstrip("/").rsplit("/", 1)[-1].rsplit(".", 1)[0] or a.name
+                wid = f"{W.hdinsight_spark.value}:{item.lower()}"
+                spec = specs.setdefault(wid, _Spec(wid, W.hdinsight_spark, name, item, a, p.name, args=_literal_args(raw.get("arguments"))[0],
+                                                   compute_id=cid_of.get((p.name, a.name), ""), main_file=uri,
+                                                   main_class=_text(raw.get("className")), file_reason=why))
+                spec.used_by.append(f"{p.name}/{a.name}")
+                continue
             else:
                 continue
             wid = f"{kind.value}:{item.lower()}"
@@ -222,7 +257,7 @@ def _environment(spec: _Spec, d: AdfSemanticDiscovery, plan: Any) -> ExecutionEn
     if spec.kind is W.adf_dataflow:  # ADF's own Spark runs a data flow; in Fabric it is a notebook on the workspace's runtime
         return ExecutionEnvironment(platform="adf_dataflow")
     use: Optional[ComputeUse] = next((u for u in plan.inventory if u.id == spec.compute_id), None)
-    platform = "databricks" if spec.kind.value.startswith("databricks") else "synapse"
+    platform = "databricks" if spec.kind.value.startswith("databricks") else ("hdinsight" if spec.kind is W.hdinsight_spark else "synapse")
     env = ExecutionEnvironment(platform=platform)
     if use is None:
         env.gaps.append("The compute this workload runs on could not be resolved from the source.")
@@ -414,7 +449,7 @@ def _classify(entry: WorkloadEntry, an: Optional[analyzer.Analysis]) -> tuple[K,
         if entry.code.status is C.binary:
             return (K.blocked if "jar_not_uploaded" in {x.code for x in f} else K.convertible_with_changes,
                     ["Compiled code cannot be scanned; it needs a Spark job definition pointing at an uploaded JAR."])
-        if entry.kind is W.synapse_spark_job and entry.code.status is C.unsupported_location:
+        if entry.kind in (W.synapse_spark_job, W.hdinsight_spark) and entry.code.status is C.unsupported_location:
             return K.convertible_with_changes, ["The job's code sits in storage and was not read; the Spark job definition can still reference it."]
         return K.blocked, [f"The code is not available ({entry.code.status.value}): {entry.code.detail or 'no detail'}".strip()]
     alts = [x for x in f if x.severity is S.alternative]
@@ -626,8 +661,8 @@ def build_manifest(store: ProjectStore, project_id: str, opts: Optional[Options]
     now = now or datetime.now(timezone.utc)
     d = store.load_adf_semantic_discovery(project_id)
     plan = build_compute_plan(d, opts.pipelines, _sources(opts))
-    if plan is None and any(a.type == "ExecuteDataFlow" for p in d.pipelines for a in walk(p.activities)):
-        plan = _NoCompute()  # data flows only: nothing to size, but each one is still translated
+    if plan is None and any(a.type in ("ExecuteDataFlow", "HDInsightSpark") for p in d.pipelines for a in walk(p.activities)):
+        plan = _NoCompute()  # data flows / HDInsight Spark only: nothing to size here, but each one is still translated or generated
     previous = store.load_workload_manifest(project_id) if store.has_workload_manifest(project_id) else None
     prior = {w.id: w for w in previous.workloads} if previous else {}
     entries: list[WorkloadEntry] = []
@@ -780,6 +815,16 @@ def _assess(spec: _Spec, d: AdfSemanticDiscovery, plan: Any, resolver: SourceRes
         jar_uri = opts.artifacts.get(spec.source_item) or next((opts.artifacts[k] for k in opts.artifacts if k.lower() == spec.source_item.lower()), None)
     elif spec.kind is W.synapse_notebook:
         code = resolver.synapse_artifact("notebook", _ref(raw.get("notebook")))
+    elif spec.kind is W.hdinsight_spark:
+        code = Code(CodeSource(status=C.unsupported_location if spec.main_file else C.incomplete_definition, location=spec.source_item,
+                               detail=("The job's file is referenced in place by the Spark job definition; its code is not read."
+                                       if spec.main_file else f"The main file is not known: {spec.file_reason}."),
+                               action="" if spec.main_file else "Give the activity a literal rootPath / entryFilePath on an ADLS Gen2 linked service."))
+        if spec.main_file and opts.storage_routes:  # the file, and any storage path among its arguments, go through the OneLake shortcut
+            routed = opts.storage_routes.rewrite(spec.main_file)
+            if routed.routed:
+                spec.main_file = routed.text
+            spec.args = [opts.storage_routes.rewrite(x).text for x in spec.args]
     else:
         code = resolver.synapse_artifact("sparkJobDefinition", _ref(raw.get("sparkJob")))
     # 2. analysis
@@ -837,10 +882,10 @@ def _assess(spec: _Spec, d: AdfSemanticDiscovery, plan: Any, resolver: SourceRes
         entry.required_resources.append(RequiredResource(kind="environment", name=f"runtime {env.fabric_runtime}", reason="Libraries and runtime version are set through a Fabric Environment."))
     if (an is not None and any(f.code == "dbutils_secrets" for f in entry.findings)) or tr and counts_has(tr, "secrets_get"):
         entry.required_resources.append(RequiredResource(kind="key_vault", name="Key Vault secrets", reason="Secrets are read with notebookutils.credentials.getSecret; the running identity needs secret access."))
-    if spec.kind in (W.databricks_jar, W.databricks_python, W.synapse_spark_job):
+    if spec.kind in (W.databricks_jar, W.databricks_python, W.synapse_spark_job, W.hdinsight_spark):
         entry.required_resources.append(RequiredResource(kind="lakehouse", name="default lakehouse", reason="Every Fabric Spark job definition needs at least one lakehouse.",
                                                          status="provided" if opts.lakehouse_id else "needed"))
-        if spec.kind is not W.synapse_spark_job:
+        if spec.kind not in (W.synapse_spark_job, W.hdinsight_spark):
             entry.required_resources.append(RequiredResource(kind="file_upload", name=spec.source_item, reason="The main file must be in OneLake/ADLS; the definition stores only its URI.",
                                                              status="provided" if (jar_uri or opts.artifacts.get(spec.source_item)) else "needed"))
     entry.classification, entry.classification_reasons = _classify(entry, an)
@@ -968,6 +1013,10 @@ def _generate_job(entry: WorkloadEntry, spec: _Spec, code: Code, job: dict, jar_
         _write(project_dir, f"{base}/{display}.py", code.text.encode("utf-8"))
         props = sjd_deploy.build_properties(language="python", executable_file=uri, main_class=None, arguments=spec.args,
                                             lakehouse_id=opts.lakehouse_id, library_uris=[])
+    elif spec.kind is W.hdinsight_spark:  # the HDInsight job's own file, in place (or through its OneLake shortcut)
+        file = spec.main_file or ""
+        props = sjd_deploy.build_properties(language="python" if file.lower().endswith(".py") else "scala", executable_file=file,
+                                            main_class=spec.main_class, arguments=spec.args, lakehouse_id=opts.lakehouse_id, library_uris=[])
     else:  # synapse spark job definition: reuse the definition's own file reference
         file, lang = job.get("file"), job.get("language") or ""
         if not file:

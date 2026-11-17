@@ -216,3 +216,60 @@ def candidates(fabric: Any, workspace_id: Optional[str], items: list[dict[str, A
 
         return {}, f"Fabric's items could not be read ({reason(exc)}). You can still paste an id."
     return out, ""
+
+
+# --- the Invoke pipeline connection, asked for on the Connect step (2026-11-16) -------------------------------------------------------
+# An Invoke pipeline activity needs a Fabric connection of type FabricDataPipelines (OAuth, tenant-wide, not tied to a workspace). Fabric's
+# API cannot create an OAuth connection, so one that exists is chosen: on the Connect step, before Convert, from the connections read live
+# from the tenant; Connect's apply binds it by itself when exactly one exists. The binding is the same resolutions entry the Convert step's
+# list writes (``ItemToId`` ``connection:invoke-pipeline``), so either place may set it.
+PIPELINE_CONNECTION_KEY = "connection:invoke-pipeline"
+
+
+def pipelines_needing_connection(store: ProjectStore, pid: str) -> list[str]:
+    """The pipelines whose Execute pipeline activities become Invoke pipeline activities (read from discovery)."""
+    from adf2fabric.agent.discovery.adf_semantic.inventory import walk
+
+    if not store.has_adf_semantic_discovery(pid):
+        return []
+    d = store.load_adf_semantic_discovery(pid)
+    return sorted({p.name for p in d.pipelines for a in walk(p.activities) if a.type == "ExecutePipeline"}, key=str.lower)
+
+
+def pipeline_connection(store: ProjectStore, pid: str) -> Optional[str]:
+    for e in _resolution_entries(store, pid):
+        if e.get("type") == "ItemToId" and str(e.get("key", "")).lower() == PIPELINE_CONNECTION_KEY:
+            return str(e.get("value") or "") or None
+    return None
+
+
+def pipeline_connection_choices(connections: list[dict]) -> list[dict[str, str]]:
+    """The tenant's connections an Invoke pipeline activity can use (``id``, ``name``), by name."""
+    return sorted(({"id": str(c.get("id", "")).lower(), "name": str(c.get("displayName", ""))} for c in connections
+                   if (c.get("connectionDetails") or {}).get("type") == FABRIC_PIPELINE_CONNECTION), key=lambda c: c["name"].lower())
+
+
+def set_pipeline_connection(store: ProjectStore, pid: str, value: str) -> dict[str, Any]:
+    """Record the Invoke pipeline connection. Only for a project whose pipelines need one, and only a GUID."""
+    from adf2fabric.connections.catalog import normalize_guid
+
+    value = normalize_guid(value)
+    if not _GUID.match(value):
+        raise BindingError("That is not a Fabric connection id: it should look like 12345678-1234-1234-1234-123456789abc.")
+    if not pipelines_needing_connection(store, pid):
+        raise BindingError("No pipeline of this project runs another pipeline, so no Invoke pipeline connection is needed.")
+    path = store.conversion_dir(pid) / "resolutions.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_for(path):
+        entries = _resolution_entries(store, pid)
+        for e in entries:
+            if e.get("type") == "ItemToId" and str(e.get("key", "")).lower() == PIPELINE_CONNECTION_KEY:
+                changed = e.get("value") != value
+                e["value"] = value
+                break
+        else:
+            entries.append({"type": "ItemToId", "key": PIPELINE_CONNECTION_KEY, "value": value})
+            changed = True
+        if changed:
+            write_atomic(path, json.dumps(entries, indent=2) + "\n")
+    return {"key": PIPELINE_CONNECTION_KEY, "changed": changed}

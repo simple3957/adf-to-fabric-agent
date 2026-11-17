@@ -81,6 +81,25 @@ def load_inputs(store: ProjectStore, pid: str) -> Inputs:
                 connections[str(e.get("key", "")).lower()] = str(e["value"])
     except (OSError, ValueError, TypeError):
         pass
+    # The Connect step's own record, so a shortcut can be planned before Convert has written resolutions.json (the UI puts Plan target
+    # before Convert): a connection Connect applied (apply.yaml), else an existing connection a person chose there (choices.yaml).
+    # Convert's resolutions win where both name one.
+    import yaml
+
+    cdir = store.project_dir(pid) / "connections"
+    try:
+        for it in (yaml.safe_load((cdir / "apply.yaml").read_text(encoding="utf-8")) or {}).get("items") or []:
+            if isinstance(it, dict) and it.get("bound") and it.get("connection_ids") and it.get("linked_service"):
+                connections.setdefault(str(it["linked_service"]).lower(), str(it["connection_ids"][0]))
+    except (OSError, ValueError, TypeError, yaml.YAMLError):
+        pass
+    try:
+        for ls, ch in (yaml.safe_load((cdir / "choices.yaml").read_text(encoding="utf-8")) or {}).items():
+            cid = (ch.get("values") or {}).get("connection_id") if isinstance(ch, dict) and ch.get("method") == "existing_connection" else None
+            if cid:
+                connections.setdefault(str(ls).lower(), str(cid))
+    except (OSError, ValueError, TypeError, AttributeError, yaml.YAMLError):
+        pass
     return Inputs(load_compute_plan(store, pid), wl, inv, storage_map if isinstance(storage_map, dict) else {}, connections)
 
 

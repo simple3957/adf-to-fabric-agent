@@ -499,6 +499,27 @@ def create_app(settings: Optional[Settings] = None, live: Optional[Container] = 
         _dest_checks(ctx, provider, account, None, None)
         return {"capacities": ctx.c.fabric(ctx.session, provider, account).capacities()}
 
+    @app.post("/fabric/workspaces")
+    def create_fabric_workspace(body: S.WorkspaceBody, ctx: Ctx = Depends(), _: Principal = need(P.azure_use, P.migration_execute)):
+        """Create a Fabric workspace on a capacity the account can see (Connections page). Changes Fabric: needs migration:execute and
+        confirm: true; audited. An existing workspace of that name is never reused or changed: Fabric refuses the name."""
+        _dest_checks(ctx, body.provider, body.account, body.tenant_id, None)
+        guards.valid_name(body.display_name, "workspace name")
+        if not body.capacity_id:
+            raise HTTPException(422, "Choose the capacity the workspace runs on.")
+        guards.valid_guid(body.capacity_id, "capacity id")
+        if not ctx.principal.granted("workspaces", WILDCARD):  # a new workspace could not be in a limited grant list
+            raise HTTPException(403, "Your workspace access is limited, so you cannot create workspaces here.")
+        if not body.confirm:
+            raise HTTPException(422, "This creates a workspace in Fabric. Confirm it (confirm: true).")
+        svc = ctx.c.fabric(ctx.session, body.provider, body.account)
+        if body.capacity_id.lower() not in {str(c.get("id", "")).lower() for c in svc.capacities()}:
+            raise HTTPException(422, "That capacity is not one this account can use.")
+        ctx.audit("fabric.workspace_create", "requested", resource="workspace", resource_id=body.display_name)
+        made = svc.create_workspace(body.display_name, body.capacity_id, "Created by the ADF to Fabric accelerator.")
+        ctx.audit("fabric.workspace_create", "ok", resource="workspace", resource_id=made.get("id") or body.display_name)
+        return {"workspace": made}
+
     @app.post("/test/destination")
     def test_destination(body: S.DestinationSelection, ctx: Ctx = Depends(), _: Principal = need(P.azure_use)):
         _dest_checks(ctx, body.provider, body.account, body.tenant_id, body.workspace_id)
@@ -683,6 +704,53 @@ def create_app(settings: Optional[Settings] = None, live: Optional[Container] = 
         return {"items": [{**i, "candidates": found.get(i["key"], [])} for i in items], "fabric_note": why or read_error,
                 "workspace_note": B.workspace_mismatch(ctx.c.store, slug, ctx.session.destination.get("workspace_id"))}
 
+    @app.get("/projects/{pid}/pipeline-connection")
+    def pipeline_connection(pid: str, ctx: Ctx = Depends(), _: Principal = need(P.reports_view)):
+        """The Invoke pipeline connection (Connect step): which pipelines need one, the one set, and the tenant's choices read live."""
+        from adf2fabric.project import bindings as B
+
+        slug = ctx.project(pid)
+        users = B.pipelines_needing_connection(ctx.c.store, slug)
+        if not users:
+            return {"needed_by": [], "current": None, "choices": [], "note": ""}
+        fabric, why = _fabric_or_why(ctx)
+        choices: list = []
+        note = why or ""
+        if fabric is not None:
+            try:
+                choices = B.pipeline_connection_choices(fabric.connections())
+            except Exception as exc:  # noqa: BLE001 - a failed read gives no choices and says so, never a guess
+                from adf2fabric.connections.service import reason
+
+                note = f"The tenant's connections could not be read ({reason(exc)}). You can still paste an id."
+        return {"needed_by": users, "current": B.pipeline_connection(ctx.c.store, slug), "choices": choices, "note": note}
+
+    @app.put("/projects/{pid}/pipeline-connection")
+    def set_pipeline_connection(pid: str, body: S.PipelineConnectionBody, ctx: Ctx = Depends(), _: Principal = need(P.plans_generate)):
+        from adf2fabric.connections.catalog import normalize_guid
+        from adf2fabric.project import bindings as B
+
+        slug = ctx.project(pid)
+        verified: Optional[bool] = None
+        fabric, _why = _fabric_or_why(ctx)
+        if fabric is not None:
+            try:
+                conns = fabric.connections()
+            except Exception:  # noqa: BLE001 - a failed read says nothing about the id
+                conns = None
+            if conns is not None:
+                cid = normalize_guid(body.value)
+                seen = next((c for c in conns if str(c.get("id", "")).lower() == cid), None)
+                if seen is not None and (seen.get("connectionDetails") or {}).get("type") != B.FABRIC_PIPELINE_CONNECTION:
+                    raise guards.Rejected(f"'{seen.get('displayName')}' is not a {B.FABRIC_PIPELINE_CONNECTION} connection; Invoke pipeline needs one.")
+                verified = seen is not None
+        try:
+            done = B.set_pipeline_connection(ctx.c.store, slug, body.value)
+        except B.BindingError as exc:
+            raise guards.Rejected(str(exc)) from None
+        ctx.audit("binding.set", resource="binding", resource_id=done["key"], changed=done["changed"], verified=verified)
+        return {**done, "verified": verified}
+
     @app.put("/projects/{pid}/bindings")
     def set_binding(pid: str, body: S.BindingBody, ctx: Ctx = Depends(), _: Principal = need(P.plans_generate)):
         from adf2fabric.connections.catalog import normalize_guid
@@ -722,6 +790,57 @@ def create_app(settings: Optional[Settings] = None, live: Optional[Container] = 
             raise guards.Rejected(str(exc)) from None
         ctx.audit("binding.set", resource="binding", resource_id=done["key"], changed=done["changed"], verified=verified)
         return {**done, "verified": verified}
+
+    @app.get("/projects/{pid}/workloads/approvals")
+    def workload_approvals(pid: str, ctx: Ctx = Depends(), _: Principal = need(P.reports_view)):
+        """What was generated and waits for (or has) a person's approval: notebooks, Spark job definitions and Environments."""
+        slug = ctx.project(pid)
+        if not ctx.c.store.has_workload_manifest(slug):
+            return {"items": []}
+        m = ctx.c.store.load_workload_manifest(slug)
+        items = [{"ref": w.id, "name": w.artifact.display_name or w.name, "kind": w.artifact.kind.replace("fabric_", "").replace("_", " "),
+                  "source": w.source_item, "status": w.approval.status, "approved_by": w.approval.by}
+                 for w in m.workloads if w.artifact.kind != "none"]
+        items += [{"ref": e.id, "name": e.name, "kind": "environment", "source": f"Databricks job {e.job_id} environment '{e.environment_key}'",
+                   "status": e.approval.status, "approved_by": e.approval.by, "libraries": [f"{lib.spec.rsplit(chr(47), 1)[-1]} ({lib.kind})" for lib in e.libraries][:20]}
+                  for e in m.environments if e.definition_file and not e.problems]
+        return {"items": items}
+
+    @app.get("/projects/{pid}/workloads/approvals/{ref:path}/code")
+    def workload_code(pid: str, ref: str, ctx: Ctx = Depends(), _: Principal = need(P.reports_view)):
+        """The generated code a person approves (a notebook's cells, or a Spark job's main file), so they can read it first."""
+        import json as _json
+
+        slug = ctx.project(pid)
+        m = ctx.c.store.load_workload_manifest(slug) if ctx.c.store.has_workload_manifest(slug) else None
+        w = next((x for x in (m.workloads if m else []) if x.id == ref), None)
+        if w is None or not w.artifact.file:
+            raise HTTPException(404, "No generated code for that workload.")
+        text = (ctx.c.store.project_dir(slug) / w.artifact.file).read_text(encoding="utf-8")[:200_000]
+        if w.artifact.file.endswith(".ipynb"):
+            cells = _json.loads(text).get("cells") or []
+            text = "\n\n# ---- cell ----\n".join("".join(c.get("source") or []) if isinstance(c.get("source"), list) else str(c.get("source") or "")
+                                                 for c in cells)
+        return {"ref": ref, "code": text}
+
+    @app.post("/projects/{pid}/workloads/approve")
+    def workloads_approve(pid: str, body: S.WorkloadApproveBody, ctx: Ctx = Depends(), _: Principal = need(P.provision_approve)):
+        """Approve generated workloads and Environments as the signed-in person (the CLI's workloads-approve). Approving records the
+        decision; nothing is created in Fabric (Deploy creates approved notebooks and Environments)."""
+        from adf2fabric.agent.workloads.lifecycle import LifecycleError, approve
+
+        slug = ctx.project(pid)
+        if not body.confirm:
+            raise HTTPException(422, "Approving generated code records you as accepting it. Confirm it (confirm: true) after reading it.")
+        done, refused = [], []
+        for ref in body.refs:
+            try:
+                approve(ctx.c.store, slug, ref, by=ctx.principal.id)
+                done.append(ref)
+            except LifecycleError as exc:
+                refused.append({"ref": ref, "why": str(exc)})
+        ctx.audit("workloads.approve", "ok" if not refused else "partial", resource="project", resource_id=slug, approved=len(done), refused=len(refused))
+        return {"approved": done, "refused": refused, "by": ctx.principal.id}
 
     @app.get("/projects/{pid}/workloads/notebooks")
     def workload_notebooks(pid: str, ctx: Ctx = Depends(), _: Principal = need(P.reports_view)):
@@ -1402,6 +1521,10 @@ def create_app(settings: Optional[Settings] = None, live: Optional[Container] = 
     def provisioning_plan(pid: str, body: S.ProvisionPlanBody, ctx: Ctx = Depends(), _: Principal = need(P.plans_generate, P.azure_use)):
         slug = ctx.project(pid)
         spec = _target_spec(ctx, body)
+        if not spec.lakehouse_names and ctx.c.store.has_provisioning(slug, "target"):  # a refresh with the field left empty keeps the
+            prev = ctx.c.store.load_provisioning(slug, "target", TargetSpec)  # lakehouse a person named for this workspace; never invents one
+            if prev.workspace_id and spec.workspace_id and prev.workspace_id.lower() == spec.workspace_id.lower():
+                spec.lakehouse_names = list(prev.lakehouse_names)
         settings = brief_record.approved_settings(ctx.c.store, slug, ctx.session.destination) if ctx.c.store.has_adf_semantic_discovery(slug) else None
         if settings is not None:  # an approved, current brief decides where Spark runs; without one the compute plan is followed as before
             spec.spark_compute = "fabric" if settings.get("workloads_to_fabric") else "keep"

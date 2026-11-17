@@ -55,6 +55,21 @@ def register(rule: ConversionRule) -> ConversionRule:
     return rule
 
 
+def rule_from_catalog(name: str, handler: Handler) -> ConversionRule:
+    """A rule whose description (types, target, strategy, carried / not carried, manual steps, validation) is read from the master
+    compatibility catalog (``adf2fabric/catalog/compatibility.json``); the handler module supplies only the code."""
+    from adf2fabric.catalog import capability
+
+    c = capability(name)
+    return ConversionRule(
+        name=name, adf_types=tuple(c["adf_types"]), variants=tuple(c["variants"]),
+        fabric_types=tuple(f["type"] for f in c["fabric_activities"]), strategy=ConversionStrategy(c["strategy"]), handler=handler,
+        property_rules=tuple(c["carried"]), io_rules=tuple(c["inputs_outputs"]), expression_rules=tuple(c["expressions"]),
+        dependency_rules=tuple(c["dependencies"]), parameter_variable_rules=tuple(c["parameters_variables"]),
+        unsupported=tuple(c["not_carried"]), manual_configuration=tuple(c["manual_configuration"]),
+        validation_rules=tuple(c["validated_by"]), runtime_disposition=c.get("runtime"))
+
+
 def rule_for(adf_type: Optional[str]) -> Optional[ConversionRule]:
     return REGISTRY.get((adf_type or "").strip().lower())
 

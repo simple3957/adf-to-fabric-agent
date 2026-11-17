@@ -14,7 +14,7 @@ from typing import Any
 from adf2fabric.agent.conversion.context import ActivityBuilder
 from adf2fabric.agent.conversion.expr_convert import expr_obj, global_param_name
 from adf2fabric.agent.conversion.handlers._common import block, carry
-from adf2fabric.agent.conversion.registry import ConversionRule, register
+from adf2fabric.agent.conversion.registry import register, rule_from_catalog
 from adf2fabric.project.conversion import ConversionStrategy
 from adf2fabric.project.discovery import AdfOperationKind as Op
 
@@ -129,20 +129,7 @@ for _name, _types, _ftype, _handler, _props in (
     ("wait", ("Wait",), "Wait", convert_wait, ("waitTimeInSeconds carried",)),
     ("fail", ("Fail",), "Fail", convert_fail, ("message, errorCode carried",)),
 ):
-    register(ConversionRule(
-        name=_name, adf_types=_types, variants=("static value", "dynamic expression"), fabric_types=(_ftype,),
-        strategy=ConversionStrategy.direct, handler=_handler, runtime_disposition="replace",
-        property_rules=_props,
-        io_rules=("none (control-flow activity)",),
-        expression_rules=("expressions pass through unchanged unless a named rewrite applies "
-                          "(pipeline().Pipeline, globalParameters)",),
-        dependency_rules=("dependsOn mapped 1:1; nested activities keep their own scope",),
-        parameter_variable_rules=("item(), variables() and parameters referenced unchanged",),
-        unsupported=("properties outside the documented Fabric table",),
-        manual_configuration=(),
-        validation_rules=("documented typeProperties only", "nested activities valid in their own scope",
-                          "total activities <= 120"),
-    ))
+    register(rule_from_catalog(_name, _handler))
 
 
 # --- Variables ------------------------------------------------------------------------------------------------
@@ -166,24 +153,8 @@ def convert_append_variable(cx: ActivityBuilder) -> None:
             f"'{cx.act.configuration.get('variable_name')}'.")
 
 
-register(ConversionRule(
-    name="set_variable", adf_types=("SetVariable",), fabric_types=("SetVariable",),
-    variants=("pipeline variable", "pipeline return value (setSystemVariable)"),
-    strategy=ConversionStrategy.direct, handler=convert_set_variable, runtime_disposition="replace",
-    property_rules=("variableName, value, setSystemVariable carried",),
-    io_rules=("none",), expression_rules=("value expression converted; unchanged unless a named rewrite applies",),
-    dependency_rules=("dependsOn mapped 1:1",),
-    parameter_variable_rules=("the variable declaration is carried to the pipeline's variables",),
-    unsupported=("policy other than secureInput/secureOutput (SetVariable accepts only those)",),
-    manual_configuration=(), validation_rules=("variable declared on the pipeline",)))
-register(ConversionRule(
-    name="append_variable", adf_types=("AppendVariable",), fabric_types=("AppendVariable",),
-    variants=("array variable",), strategy=ConversionStrategy.direct, handler=convert_append_variable,
-    runtime_disposition="replace",
-    property_rules=("variableName, value carried",), io_rules=("none",),
-    expression_rules=("value expression converted",), dependency_rules=("dependsOn mapped 1:1",),
-    parameter_variable_rules=("the Array variable declaration is carried to the pipeline's variables",),
-    unsupported=(), manual_configuration=(), validation_rules=("variable declared on the pipeline",)))
+register(rule_from_catalog("set_variable", convert_set_variable))
+register(rule_from_catalog("append_variable", convert_append_variable))
 
 
 # --- ExecutePipeline -> InvokePipeline ---------------------------------------------------------------------------
@@ -257,19 +228,4 @@ def convert_execute_pipeline(cx: ActivityBuilder) -> None:
                   f"({'waiting' if wait_v is True else 'not waiting'}), passing {len(params)} parameter(s).")
 
 
-register(ConversionRule(
-    name="execute_pipeline", adf_types=("ExecutePipeline",), fabric_types=("InvokePipeline",),
-    variants=("wait on completion", "fire and continue", "parameterized child", "per-item child (inside ForEach)"),
-    strategy=ConversionStrategy.transformed, handler=convert_execute_pipeline, runtime_disposition="replace",
-    property_rules=("pipeline reference -> pipelineId (+ workspaceId)", "parameters carried",
-                    "waitOnCompletion made explicit"),
-    io_rules=("child pipeline name -> Fabric pipeline item id placeholder",),
-    expression_rules=("parameter expressions converted; gp_ parameters appended for the child's global parameters the Variable "
-                      "Library cannot hold (the others each pipeline reads from the library itself)",),
-    dependency_rules=("dependsOn mapped 1:1",),
-    parameter_variable_rules=("global parameters the Variable Library cannot hold are passed down as gp_ pipeline parameters",),
-    unsupported=("any property outside parameters/waitOnCompletion/pipeline",),
-    manual_configuration=("a Fabric connection for Invoke pipeline", "the child pipeline item ids and workspace id",
-                         "confirm the invoke operation type in the UI"),
-    validation_rules=("externalReferences.connection present", "pipelineId and workspaceId present"),
-))
+register(rule_from_catalog("execute_pipeline", convert_execute_pipeline))

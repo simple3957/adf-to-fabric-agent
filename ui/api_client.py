@@ -226,6 +226,30 @@ class ApiClient:
         return self._post(f"/projects/{pid}/output-checks", {"pipeline": pipeline, "name": name, "source": source, "target": target,
                                                              "format": fmt}, idempotency_key=idempotency_key)
 
+    def workload_approvals(self, pid: str) -> dict:
+        return self._get(f"/projects/{pid}/workloads/approvals")
+
+    def workload_code(self, pid: str, ref: str) -> dict:
+        from urllib.parse import quote
+
+        return self._get(f"/projects/{pid}/workloads/approvals/{quote(ref, safe='')}/code")
+
+    def approve_workloads(self, pid: str, refs: list[str]) -> dict:
+        return self._post(f"/projects/{pid}/workloads/approve", {"refs": refs, "confirm": True})
+
+    def capacities(self, provider: str, account: Optional[str] = None) -> list[dict]:
+        return self._get("/fabric/capacities", provider=provider, account=account).get("capacities", [])
+
+    def create_workspace(self, provider: str, account: Optional[str], name: str, capacity_id: str) -> dict:
+        return self._post("/fabric/workspaces", {"display_name": name, "capacity_id": capacity_id, "provider": provider, "account": account,
+                                                 "confirm": True})
+
+    def pipeline_connection(self, pid: str) -> dict:
+        return self._get(f"/projects/{pid}/pipeline-connection")
+
+    def set_pipeline_connection(self, pid: str, value: str) -> dict:
+        return self._put(f"/projects/{pid}/pipeline-connection", {"value": value})
+
     def set_binding(self, pid: str, key: str, value: str) -> dict:
         return self._put(f"/projects/{pid}/bindings", {"key": key, "value": value})
 
@@ -260,9 +284,10 @@ class ApiClient:
     def run_stage(self, pid: str, stage: str, *, pipelines: Iterable[str] = (), workspace_id: Optional[str] = None,
                   with_children: bool = False, allow_unbound: bool = False, confirm: bool = False, validate_stages: Iterable[str] = (),
                   run: bool = False, run_timeout: Optional[int] = None, lakehouse: Optional[str] = None, apply_reconstruction: Optional[bool] = None,
-                  assisted: bool = False, idempotency_key: Optional[str] = None) -> dict:
+                  assisted: bool = False, generate: bool = False, fetch_code: bool = False, idempotency_key: Optional[str] = None) -> dict:
         body = {"pipelines": list(pipelines), "workspace_id": workspace_id, "with_children": with_children,
-                "allow_unbound": allow_unbound, "confirm": confirm, "validate_stages": list(validate_stages), "run": run, "assisted": assisted}
+                "allow_unbound": allow_unbound, "confirm": confirm, "validate_stages": list(validate_stages), "run": run, "assisted": assisted,
+                "generate": generate, "fetch_code": fetch_code}
         for k, v in (("run_timeout", run_timeout), ("lakehouse", lakehouse), ("apply_reconstruction", apply_reconstruction)):
             if v is not None:  # left out = follow the approved brief
                 body[k] = v

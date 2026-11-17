@@ -54,6 +54,15 @@ class BindingBody(_In):
     value: str = Field(max_length=64)
 
 
+class PipelineConnectionBody(_In):
+    value: str = Field(max_length=64)
+
+
+class WorkloadApproveBody(_In):
+    refs: list[str] = Field(min_length=1, max_length=100)  # workload ids or Environment ids, from GET /workloads/approvals
+    confirm: bool = False
+
+
 class NotebookBindBody(_In):
     workload: str = Field(max_length=200)
     item_id: str = Field(max_length=64)
@@ -119,12 +128,17 @@ class StageBody(_In):
     assisted: bool = False  # convert: use the model-assisted drafts a person accepted (and that are still current) in place of the original source
     run: bool = False  # verify stage: START a real Fabric run of each named pipeline, then compare (needs migration:execute + confirm)
     run_timeout: int = Field(default=1800, ge=60, le=3000)  # seconds to wait for each started run; kept within one Fabric token's lifetime
+    generate: bool = False  # workloads stage: generate Fabric notebooks / Spark jobs / Environments locally (nothing is sent to Fabric)
+    fetch_code: bool = False  # workloads stage: read the code from Databricks with the Azure CLI sign-in (Entra ID token)
 
 
 class WorkspaceBody(_In):
-    display_name: str
+    display_name: str = Field(min_length=1, max_length=256)
     capacity_id: Optional[str] = None
     tenant_id: Optional[str] = None
+    provider: str = "azure_cli"
+    account: Optional[str] = None
+    confirm: bool = False  # creating a workspace changes Fabric
 
 
 class IdentityBody(_In):

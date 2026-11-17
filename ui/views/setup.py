@@ -9,7 +9,7 @@ import streamlit as st
 import theme
 from api_client import ApiError
 from cache import DISCOVERY_TTL, SUBSCRIPTIONS_TTL, WORKSPACES_TTL, cached, forget
-from components import account_picker, call, client, identity, run_job, short_source, show_error, test_report
+from components import account_picker, call, can, client, identity, run_job, short_source, show_error, test_report
 
 api = client()
 pid = st.session_state.get("project_id")
@@ -206,6 +206,7 @@ def _workspace_picker(provider: str, account: str | None) -> None:
         for a in err.actions:
             st.info(a)
         return
+    _create_workspace(provider, account)
     if not workspaces:
         st.info("No Fabric workspaces for this account. It needs a Fabric licence and access to a workspace.")
         return
@@ -229,6 +230,36 @@ def _workspace_picker(provider: str, account: str | None) -> None:
     if st.session_state.get("dest_report") and dest.get("workspace_id") == ws_id:
         with st.expander("Last test", expanded=not dst_tested):
             test_report(st.session_state.dest_report)
+
+
+def _create_workspace(provider: str, account: str | None) -> None:
+    """A new, empty workspace on a capacity this account can use. It changes Fabric, so it needs migration:execute and a typed CREATE."""
+    with st.expander("Create a new workspace"):
+        try:
+            caps = [c for c in cached(f"caps:{provider}:{account}", WORKSPACES_TTL, lambda: api.capacities(provider, account))
+                    if str(c.get("state", "Active")).lower() == "active"]
+        except ApiError as err:
+            st.error(err.message)
+            return
+        if not caps:
+            st.info("This account can use no active capacity, so it cannot create a workspace here.")
+            return
+        by = {f"{c.get('displayName')} · {c.get('sku', '?')} · {c.get('region', '?')}": c["id"] for c in caps}
+        with st.form("dst-new-ws", border=False):
+            name = st.text_input("Workspace name", key="dst-new-name")
+            cap = st.selectbox("Capacity", list(by), key="dst-new-cap")
+            sure = st.text_input("Type CREATE to create it in Fabric", key="dst-new-confirm")
+            allowed = can("migration:execute")
+            if st.form_submit_button("Create workspace", type="primary", disabled=not allowed,
+                                     help=None if allowed else "Creating a workspace changes Fabric: your role needs migration:execute."):
+                if not name.strip():
+                    st.error("Give the workspace a name.")
+                elif sure.strip() != "CREATE":
+                    st.error("Type CREATE to confirm.")
+                elif (made := call(api.create_workspace, provider, account, name.strip(), by[cap])) is not None:
+                    forget("ws")
+                    st.success(f"Created workspace '{name.strip()}'. Choose it below and test the connection.")
+                    st.rerun()
 
 
 # ---- the two cards --------------------------------------------------------------------------------------------------------

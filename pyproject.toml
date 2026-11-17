@@ -55,7 +55,7 @@ adf2fabric = "adf2fabric.cli:cli"
 where = ["src"]
 
 [tool.setuptools.package-data]
-adf2fabric = ["agent/assist/prompts/*.md"]
+adf2fabric = ["agent/assist/prompts/*.md", "catalog/*.json"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

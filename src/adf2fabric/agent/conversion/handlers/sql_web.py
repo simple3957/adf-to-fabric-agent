@@ -8,7 +8,7 @@ from adf2fabric.agent.conversion import connectors
 from adf2fabric.agent.conversion.context import ActivityBuilder, gateway_need
 from adf2fabric.agent.conversion.expr_convert import is_expression
 from adf2fabric.agent.conversion.handlers._common import block, carry, split_url
-from adf2fabric.agent.conversion.registry import ConversionRule, register
+from adf2fabric.agent.conversion.registry import register, rule_from_catalog
 from adf2fabric.project.conversion import ConversionStrategy
 from adf2fabric.project.discovery import AdfOperationKind as Op
 
@@ -72,20 +72,7 @@ def convert_stored_procedure(cx: ActivityBuilder) -> None:
     cx.summary = f"Stored procedure '{a.name}' -> Fabric Stored procedure {tp['storedProcedureName']!r} on connection '{ls}'."
 
 
-register(ConversionRule(
-    name="stored_procedure", adf_types=("SqlServerStoredProcedure",), fabric_types=("SqlServerStoredProcedure",),
-    variants=("with parameters", "dynamic procedure name"),
-    strategy=ConversionStrategy.transformed, handler=convert_stored_procedure, runtime_disposition="replace",
-    property_rules=("storedProcedureName, storedProcedureParameters (name/value/type) carried",
-                    "linkedServiceName -> externalReferences.connection"),
-    io_rules=("none (no dataset)",),
-    expression_rules=("parameter value expressions converted; unchanged unless a named rewrite applies",),
-    dependency_rules=("dependsOn mapped 1:1",), parameter_variable_rules=("unchanged",),
-    unsupported=("stores outside the documented list (Fabric SQL database/Warehouse, Azure SQL DB/MI, Synapse, "
-                 "SQL Server, Amazon RDS for SQL Server) -> blocked with alternatives",),
-    manual_configuration=("Fabric connection to the database", "gateway for on-premises SQL Server"),
-    validation_rules=("storedProcedureName present", "connection present"),
-))
+register(rule_from_catalog("stored_procedure", convert_stored_procedure))
 
 
 # --- SQL pool stored procedure (Synapse) -------------------------------------------------------------------------
@@ -124,19 +111,7 @@ def convert_sql_pool_stored_procedure(cx: ActivityBuilder) -> None:
                   f"connection 'sqlpool:{pool}'.")
 
 
-register(ConversionRule(
-    name="sql_pool_stored_procedure", adf_types=("SqlPoolStoredProcedure",), fabric_types=("SqlServerStoredProcedure",),
-    variants=("with parameters", "dynamic procedure name"),
-    strategy=ConversionStrategy.transformed, handler=convert_sql_pool_stored_procedure, runtime_disposition="replace",
-    property_rules=("storedProcedureName, storedProcedureParameters (name/value/type) carried",
-                    "sqlPool (activity-level reference) -> externalReferences.connection, bound as connection:sqlpool:<pool>"),
-    io_rules=("none (no dataset)",),
-    expression_rules=("parameter value expressions converted; unchanged unless a named rewrite applies",),
-    dependency_rules=("dependsOn mapped 1:1",), parameter_variable_rules=("unchanged",),
-    unsupported=("the dedicated SQL pool itself is not migrated by this activity",),
-    manual_configuration=("Fabric connection to the Synapse pool or to the migrated Fabric Warehouse",),
-    validation_rules=("sqlPool present", "storedProcedureName present", "connection present"),
-))
+register(rule_from_catalog("sql_pool_stored_procedure", convert_sql_pool_stored_procedure))
 
 
 # --- Script ----------------------------------------------------------------------------------------------------------
@@ -184,19 +159,7 @@ def convert_script(cx: ActivityBuilder) -> None:
     cx.summary = f"Script '{a.name}' -> Fabric Script with {len(scripts)} block(s) ({kinds}) on connection '{ls}'."
 
 
-register(ConversionRule(
-    name="script", adf_types=("Script",), fabric_types=("Script",),
-    variants=("Query blocks", "NonQuery blocks", "parameterized blocks", "multi-block"),
-    strategy=ConversionStrategy.transformed, handler=convert_script, runtime_disposition="replace",
-    property_rules=("scripts[] (type, text, parameters) carried verbatim", "scriptBlockExecutionTimeout carried",
-                    "linkedServiceName -> externalReferences.connection (inferred placement)"),
-    io_rules=("none",), expression_rules=("script text / parameter expressions converted",),
-    dependency_rules=("dependsOn mapped 1:1",), parameter_variable_rules=("unchanged",),
-    unsupported=("logSettings (linked-service reference, undocumented structure)",
-                 "stores outside the documented Script list -> blocked with alternatives"),
-    manual_configuration=("Fabric connection", "typeProperties.database (not read from the linked service)"),
-    validation_rules=("scripts and database present",),
-))
+register(rule_from_catalog("script", convert_script))
 
 
 # --- Web / WebHook --------------------------------------------------------------------------------------------------------
@@ -271,32 +234,8 @@ def convert_webhook(cx: ActivityBuilder) -> None:
     _web(cx, "WebHook")
 
 
-register(ConversionRule(
-    name="web", adf_types=("WebActivity",), fabric_types=("WebActivity",),
-    variants=("GET/POST/PUT/DELETE/PATCH", "literal URL", "dynamic URL", "with authentication", "self-hosted IR"),
-    strategy=ConversionStrategy.transformed, handler=convert_web, runtime_disposition="replace",
-    property_rules=("url -> connection base URL + typeProperties.relativeUrl (literal URLs only)",
-                    "method upper-cased; headers, body, disableCertValidation, httpRequestTimeout, turnOffAsync carried"),
-    io_rules=("datasets / linkedServices passed to the activity are not carried",),
-    expression_rules=("header/body/relative-URL expressions converted",),
-    dependency_rules=("dependsOn mapped 1:1",), parameter_variable_rules=("unchanged",),
-    unsupported=("authentication on the activity (moves to the connection)", "dynamic base URL",
-                 "datasets / linkedServices arguments"),
-    manual_configuration=("Fabric Web connection (base URL + credential)", "gateway for self-hosted integration runtimes"),
-    validation_rules=("externalReferences.connection present", "relativeUrl and method present"),
-))
-register(ConversionRule(
-    name="webhook", adf_types=("WebHook",), fabric_types=("WebHook",),
-    variants=("callback timeout", "reportStatusOnCallBack"),
-    strategy=ConversionStrategy.transformed, handler=convert_webhook, runtime_disposition="replace",
-    property_rules=("url -> connection base URL + relativeUrl", "method, headers, body, timeout, "
-                    "reportStatusOnCallBack, disableCertValidation carried"),
-    io_rules=("none",), expression_rules=("converted like Web",), dependency_rules=("dependsOn mapped 1:1",),
-    parameter_variable_rules=("unchanged",),
-    unsupported=("authentication on the activity (moves to the connection)", "dynamic base URL"),
-    manual_configuration=("Fabric Web connection",),
-    validation_rules=("externalReferences.connection present",),
-))
+register(rule_from_catalog("web", convert_web))
+register(rule_from_catalog("webhook", convert_webhook))
 
 
 # --- Azure Function -----------------------------------------------------------------------------------------------------------
@@ -321,13 +260,4 @@ def convert_function(cx: ActivityBuilder) -> None:
     cx.summary = f"AzureFunctionActivity '{a.name}' -> Fabric AzureFunction '{tp.get('functionName')}' via connection '{ls}'."
 
 
-register(ConversionRule(
-    name="azure_function", adf_types=("AzureFunctionActivity",), fabric_types=("AzureFunction",),
-    variants=("GET/POST", "headers/body"),
-    strategy=ConversionStrategy.transformed, handler=convert_function, runtime_disposition="reuse_externally",
-    property_rules=("method, functionName, headers, body carried", "linkedServiceName -> externalReferences.connection"),
-    io_rules=("none",), expression_rules=("converted like Web",), dependency_rules=("dependsOn mapped 1:1",),
-    parameter_variable_rules=("unchanged",), unsupported=("function-app key (belongs to the connection)",),
-    manual_configuration=("Fabric connection to the function app",),
-    validation_rules=("externalReferences.connection present", "functionName and method present"),
-))
+register(rule_from_catalog("azure_function", convert_function))

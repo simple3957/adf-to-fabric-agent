@@ -91,6 +91,14 @@ def _literal(v: Any) -> tuple[Optional[str], bool]:
 def lakehouse_route(cx: ActivityBuilder, io: Optional[AdfIO], store_settings: Any, role: str) -> Optional[LakehouseRoute]:
     """The shortcut a dataset can be read or written through, or None (with an info issue saying why) when it stays on its connection."""
     pc = cx.pc.project
+    chosen = cx.choice("storage")  # the project's activity mapping, when a person set it for this activity
+    if chosen == "connection" or (chosen is None and not pc.route_default):
+        return None
+    if chosen == "lakehouse" and not pc.storage_routes:
+        cx.manual("storage_choice_unavailable", "The activity mapping chose the Lakehouse for this activity, but no lakehouse and storage map "
+                  "are known for this conversion, so it stays on its storage connection.",
+                  "Run storage-map and name the lakehouse (Plan target), or convert with --lakehouse, then convert again.")
+        return None
     if not pc.storage_routes or io is None or io.kind != "dataset" or not io.name:
         return None
     ds = pc.datasets.get(io.name.lower())

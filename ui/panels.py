@@ -253,8 +253,12 @@ def _editor(api: ApiClient, pid: str, card: dict, known: dict[str, str], sibling
 
 
 def _apply_table(res: dict) -> None:
+    made = sum(1 for i in res.get("items", []) if i.get("action") == "created")
+    bound = sum(1 for i in res.get("items", []) if i.get("bound"))
     st.markdown(theme.badge("Preview: nothing was created", "info") if res.get("dry_run")
-                else theme.badge("Created in Fabric", "success"), unsafe_allow_html=True)
+                else theme.badge(f"Applied: {made} created in Fabric · {bound} bound", "success"), unsafe_allow_html=True)
+    if res.get("pipeline_connection"):
+        st.caption(res["pipeline_connection"])
     st.dataframe([{"linked service": i["linked_service"], "action": i["action"], "bound": i["bound"],
                    "Fabric validated": i["fabric_validated"], "detail": i["detail"]} for i in res.get("items", [])], hide_index=True)
     for i in res.get("items", []):
@@ -311,6 +315,7 @@ def connect(api: ApiClient, pid: str, cards: list[dict] | None, workspace_id: st
         kind = card.get("fabric_connection_type")
         _editor(api, pid, card, known.get(kind or "?", {}),
                 [c for c in cards if c["name"] != card["name"] and kind and c.get("fabric_connection_type") == kind and c["state"] not in READY], settings)
+    _pipeline_connection(api, pid)
 
     st.markdown("#### Create the connections in Fabric")
     if not workspace_id:
@@ -539,8 +544,82 @@ def deploy(api: ApiClient, pid: str, dest: dict, conversion: dict | None, result
     readback(api, pid, result)
     explain_for_step(api, pid, "deploy")
     panels_results.results(api, pid, key="dep-res")
+    _approvals(api, pid)
     _notebooks(api, pid)
     _package(api, pid)
+
+
+def _approvals(api: ApiClient, pid: str) -> None:
+    """Generated notebooks, Spark job definitions and Environments wait for a person's approval before Deploy creates them. Read the code,
+    tick what you accept, approve: you are recorded as the approver. Nothing is created in Fabric here."""
+    items = (read(api, "workload_approvals", pid) or {}).get("items") or []
+    if not items:
+        return
+    waiting = [i for i in items if i["status"] != "approved"]
+    st.markdown(f"#### Generated code to approve · {len(waiting)} waiting" + (f" · {len(items) - len(waiting)} approved" if len(items) > len(waiting) else ""))
+    st.caption("Deploy creates only what a person approved. Read each one, then approve: you are recorded as accepting it. Approving creates nothing in Fabric.")
+    st.dataframe([{"item": i["name"], "kind": i["kind"], "from": i["source"], "status": i["status"], "approved by": i.get("approved_by") or ""}
+                  for i in items], hide_index=True)
+    for i in waiting:
+        with st.expander(f"Read: {i['name']} ({i['kind']})"):
+            if i["kind"] == "environment":
+                st.caption("Libraries: " + ", ".join(i.get("libraries") or []))
+            elif st.button("Show the generated code", key=f"code-{pid}-{i['ref']}"):
+                got = call(api.workload_code, pid, i["ref"])
+                if got:
+                    st.code(got["code"], language="python")
+    if not waiting:
+        return
+    labels = {f"{i['name']} ({i['kind']})": i["ref"] for i in waiting}
+    chosen = st.multiselect("Approve these", list(labels), default=list(labels), key=f"approve-pick-{pid}")
+    allowed = can("provision:approve")
+    if st.button(f"Approve {len(chosen)} selected", type="primary", key=f"approve-go-{pid}", disabled=not (chosen and allowed),
+                 help=None if allowed else "Approving generated code needs provision:approve."):
+        res = call(api.approve_workloads, pid, [labels[c] for c in chosen])
+        if res is not None:
+            for r in res.get("refused") or []:
+                st.warning(f"{r['ref']}: {r['why']}")
+            if not res.get("refused"):
+                st.rerun()
+
+
+def _pipeline_connection(api: ApiClient, pid: str) -> None:
+    """The connection Invoke pipeline activities use (FabricDataPipelines, OAuth). Fabric's API cannot create one, so a person picks one the
+    tenant already has; 'Create in Fabric' below sets it by itself when the tenant has exactly one."""
+    got = read(api, "pipeline_connection", pid) or {}
+    if not got.get("needed_by"):
+        return
+    choices = {f"{c['name']} · {c['id'][:8]}…": c["id"] for c in got.get("choices") or []}
+    current = got.get("current")
+    with st.container(border=True):
+        st.markdown("**Invoke pipeline connection**")
+        st.caption(f"{len(got['needed_by'])} pipeline(s) run another pipeline ({', '.join(got['needed_by'][:4])}"
+                   f"{' …' if len(got['needed_by']) > 4 else ''}). Fabric's Invoke pipeline activity signs in through a 'Fabric Data Pipelines' "
+                   "connection, chosen from the ones in your tenant.")
+        if got.get("note"):
+            st.info(got["note"])
+        if current:
+            name = next((k for k, v in choices.items() if v == current), None)
+            st.success(f"Set: {name or 'a connection id not among those this account can see'}.")
+        elif len(choices) == 1:
+            st.info("Only one exists in the tenant: 'Create in Fabric' below sets it, or save it here.")
+        elif not choices:
+            st.warning("None exists in the tenant. Create a 'Fabric Data Pipelines' connection in Fabric (Settings > Manage connections and "
+                       "gateways), then pick it here.")
+        labels = [CHOOSE_PIPELINE_CONNECTION, *choices]
+        at = next((k for k, v in choices.items() if v == current), labels[0])
+        with st.form(f"pipeconn-{pid}", border=False):
+            picked = st.selectbox("Fabric Data Pipelines connection", labels, index=labels.index(at), key=f"pipeconn-pick-{pid}")
+            pasted = st.text_input("…or paste a connection ID", key=f"pipeconn-id-{pid}")
+            if st.form_submit_button("Save", disabled=not can("plans:generate")):
+                value = pasted.strip() or choices.get(picked, "")
+                if not value:
+                    st.warning("Choose a connection or paste its id.")
+                elif call(api.set_pipeline_connection, pid, value) is not None:
+                    st.rerun()
+
+
+CHOOSE_PIPELINE_CONNECTION = "- choose a Fabric Data Pipelines connection -"
 
 
 def _package(api: ApiClient, pid: str) -> None:

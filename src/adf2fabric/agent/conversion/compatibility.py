@@ -6,8 +6,8 @@ activity is reported with its date and a concrete way forward instead of passing
 
 Rules that keep it honest:
 
-* Every entry cites a Microsoft page (``source_url``) and ``VERIFIED_ON``. Nothing here is from memory: when a
-  page changes, update the entry and the date together (``tests/test_compatibility.py`` enforces the shape).
+* Every entry cites a Microsoft page (``source_url``) and its date. The entries live in the master compatibility catalog
+  (``adf2fabric/catalog/compatibility.json``): when a page changes, update the entry there with the source's date.
 * Absence from the catalog means "not known to be a problem", never "supported".
 * A linked service whose connector exists in several versions is matched on ``typeProperties.version``. When the
   version is not stated, the finding says so; it does not assume V1.
@@ -26,13 +26,12 @@ from adf2fabric.agent.discovery.adf_semantic.pipeline_analysis import walk
 from adf2fabric.project.conversion import CompatibilityFinding, Impact
 from adf2fabric.project.discovery import AdfSemanticDiscovery
 
-VERIFIED_ON = "2026-10-13"
+from adf2fabric.catalog import master, source
 
-COMPARE_URL = ("https://learn.microsoft.com/en-us/fabric/data-factory/"
-               "compare-fabric-data-factory-and-azure-data-factory")
-CONNECTORS_URL = ("https://learn.microsoft.com/en-us/azure/data-factory/"
-                  "connector-release-stages-and-timelines")
-MDF_URL = "https://learn.microsoft.com/en-us/fabric/data-factory/dataflow-gen2-mapping-data-flows-transforms"
+VERIFIED_ON = source("adf_connector_release_stages")["read_on"]
+COMPARE_URL = source("fabric_vs_adf")["url"]
+CONNECTORS_URL = source("adf_connector_release_stages")["url"]
+MDF_URL = source("fabric_mdf_transforms")["url"]
 
 REMOVED, DEPRECATED, PREVIEW, NOT_AVAILABLE = "removed", "deprecated", "preview", "not_available"
 REPLACED = "replaced"  # exists in Fabric, but as a different kind of item
@@ -53,98 +52,33 @@ class CompatEntry:
     emit: bool = True  # also raise an issue on the using activity
 
 
-# --- activities (Fabric activity comparison) -----------------------------------------------------------------
+# --- read from the master compatibility catalog (adf2fabric/catalog/compatibility.json) ----------------------------------
 
-_ACTIVITIES: tuple[CompatEntry, ...] = (
-    CompatEntry(
-        id="activity.aml_classic", kind="activity", types=("azuremlbatchexecution", "azuremlupdateresource"),
-        status=DEPRECATED, impact=Impact.blocker, emit=False, source_url=COMPARE_URL,
-        summary="Azure Machine Learning Batch Execution and Update Resource are deprecated in ADF and not available "
-                "in Fabric Data Factory.",
-        alternatives=("Publish the model as an Azure Machine Learning pipeline or batch endpoint and call it with the "
-                      "Fabric Azure Machine Learning activity.",)),
-    CompatEntry(
-        id="activity.wrangling_dataflow", kind="activity", types=("executewranglingdataflow",),
-        status=DEPRECATED, impact=Impact.difference, source_url=COMPARE_URL,
-        summary="Power Query / Wrangling Data Flow is deprecated in ADF. Fabric has no equivalent activity; its "
-                "comparison points to Dataflow Gen2 (Power Query).",
-        alternatives=("Re-author the Power Query in a Dataflow Gen2 item and run it from a pipeline Dataflow activity.",)),
-    CompatEntry(
-        id="activity.mapping_dataflow", kind="activity", types=("executedataflow",),
-        status=PREVIEW, impact=Impact.difference, source_url=MDF_URL,
-        summary="This tool translates the data flow's script into a Fabric notebook (fixed rules; steps it cannot map are "
-                "named and raise), run from a Notebook activity once a person approves it. Microsoft's own route, Mapping Data "
-                "Flow transforms in Dataflow Gen2, is in public preview and does not support flowlets, the Data Flow library, "
-                "user-defined functions or managed virtual networks.",
-        alternatives=("Use the built-in Mapping Data Flow upgrade (Dataflow Gen2 with MDF transforms) and check the "
-                      "documented limitations first.",
-                      "Re-author the transformation as Power Query in Dataflow Gen2.")),
-    CompatEntry(
-        id="activity.ssis", kind="activity", types=("executessispackage",),
-        status=NOT_AVAILABLE, impact=Impact.blocker, emit=False, source_url=COMPARE_URL,
-        summary="SSIS package execution is not available in Fabric Data Factory, and Azure-SSIS integration runtimes "
-                "have no Fabric equivalent yet.",
-        alternatives=("Keep the package on the Azure-SSIS runtime in ADF and call that pipeline from Fabric.",
-                      "Re-implement the package logic with Copy, Dataflow Gen2 or a notebook.")),
-    CompatEntry(
-        id="activity.synapse_spark", kind="activity", types=("synapsenotebook", "sparkjob"),
-        status=NOT_AVAILABLE, impact=Impact.manual, emit=False, source_url=COMPARE_URL,
-        summary="Synapse Notebook and Spark job definition activities are not available in Fabric Data Factory; Fabric "
-                "has its own Notebook activity.",
-        alternatives=("Move the notebook or Spark job definition into the Fabric workspace and run it with the Fabric "
-                      "Notebook activity or a Spark job definition.",)),
-    CompatEntry(
-        id="activity.usql", kind="activity", types=("datalakeanalyticsusql",),
-        status=REMOVED, impact=Impact.blocker, emit=False, source_url=COMPARE_URL,
-        summary="Azure Data Lake Analytics (U-SQL) is retired and is not in Fabric Data Factory's activity list.",
-        alternatives=("Re-implement the U-SQL job as a Fabric notebook (Spark) or Dataflow Gen2.",)),
-)
 
-# --- factory-level artifacts that are not pipeline activities ----------------------------------------------------
-# Detected from the source estate (an ADF CDC resource is ``Microsoft.DataFactory/factories/adfcdcs``). Azure Synapse Link
-# is NOT detectable this way: it is configured in Synapse / the source database, not in an ADF export, so it has no
-# entry here; Microsoft's guidance (use Fabric Mirroring instead) is in the playbook.
+def _entry(d: dict, kind: str, types: tuple[str, ...]) -> CompatEntry:
+    return CompatEntry(id=d["id"], kind=kind, types=types, status=d["status"], summary=d["summary"], impact=Impact(d["impact"]),
+                       alternatives=tuple(d["alternatives"]), source_url=d["source_url"], emit=d.get("emit", True))
 
-_ARTIFACTS: tuple[CompatEntry, ...] = (
-    CompatEntry(
-        id="artifact.adf_cdc", kind="artifact", types=("changedatacapture",), status=REPLACED, impact=Impact.manual,
-        emit=False, source_url=COMPARE_URL,
-        summary="An ADF change data capture resource has no Fabric artifact: Microsoft's comparison says Fabric manages "
-                "incremental data movement through Copy jobs instead of CDC artifacts. Its table mappings are not converted.",
-        alternatives=("Create a Fabric Copy job with the same source and destination connections and the same tables, in "
-                      "the incremental mode that fits; recreate any column mappings there.",
-                      "Keep the CDC resource running in ADF until the Copy job is verified.")),
-)
 
-# --- linked services / connectors (ADF connector release stages and timelines) -------------------------------
+def _activity_entries() -> tuple[CompatEntry, ...]:
+    """Each lifecycle entry once, with every ADF activity type that carries it (one entry may cover several types)."""
+    seen: dict[str, tuple[dict, list[str]]] = {}
+    for cap in master()["capabilities"].values():
+        for adf_type, e in cap["by_adf_type"].items():
+            for d in e.get("lifecycle") or []:
+                seen.setdefault(d["id"], (d, []))[1].append(adf_type.lower())
+    return tuple(_entry(d, "activity", tuple(types)) for d, types in seen.values())
 
+
+_ACTIVITIES: tuple[CompatEntry, ...] = _activity_entries()
+_ARTIFACTS: tuple[CompatEntry, ...] = tuple(_entry(d, "artifact", tuple(d["types"])) for d in master()["artifacts"])
+_LIFECYCLE = master()["connectors"]["lifecycle"]
 # Connectors Microsoft lists as Removed outright (no replacement version): type -> removal date.
-_REMOVED_OUTRIGHT: dict[str, Optional[str]] = {
-    "azuremariadb": "2024-12-31", "concur": "2024-12-31", "couchbase": "2024-12-31", "drill": "2024-12-31",
-    "hbase": "2024-12-31", "magento": "2024-12-31", "marketo": "2024-12-31", "eloqua": "2024-12-31",
-    "responsys": "2024-12-31", "oracleservicecloud": "2024-12-31", "paypal": "2024-12-31", "phoenix": "2024-12-31",
-    "salesforcemarketingcloud": "2024-12-31", "zoho": "2024-12-31", "amazonmws": None,
-}
-
+_REMOVED_OUTRIGHT: dict[str, Optional[str]] = dict(_LIFECYCLE["removed"])
 # V1 connectors that have a separate V2 type name; the V1 type is Removed: type -> (V2 type, removal date).
-_V1_TYPE_REMOVED: dict[str, tuple[str, str]] = {
-    "googlebigquery": ("GoogleBigQueryV2", "2025-09-30"),
-    "postgresql": ("PostgreSqlV2", "2025-09-30"),
-    "salesforce": ("SalesforceV2", "2025-09-30"),
-    "salesforceservicecloud": ("SalesforceServiceCloudV2", "2025-09-30"),
-    "servicenow": ("ServiceNowV2", "2025-09-30"),
-    "snowflake": ("SnowflakeV2", "2025-09-30"),
-}
-
+_V1_TYPE_REMOVED: dict[str, tuple[str, str]] = {k: (v["v2_type"], v["date"]) for k, v in _LIFECYCLE["v1_type_removed"].items()}
 # Connectors keeping one type name across versions where version 1.0 is Removed: type -> removal date.
-_V1_VERSION_REMOVED: dict[str, str] = {
-    "amazonrdsfororacle": "2026-03-31", "amazonredshift": "2026-04-30", "cassandra": "2025-09-30",
-    "greenplum": "2025-09-30", "hive": "2025-10-31", "hubspot": "2025-11-22", "impala": "2025-10-31",
-    "jira": "2026-04-30", "mariadb": "2025-09-30", "mysql": "2025-09-30", "netezza": "2025-10-31",
-    "oracle": "2026-03-31", "presto": "2025-09-30", "quickbooks": "2025-09-30", "shopify": "2025-11-22",
-    "spark": "2025-10-31", "square": "2025-11-15", "teradata": "2025-10-31", "vertica": "2025-09-30",
-    "xero": "2026-04-30",
-}
+_V1_VERSION_REMOVED: dict[str, str] = dict(_LIFECYCLE["v1_version_removed"])
 
 
 def _connector_entries() -> list[CompatEntry]:

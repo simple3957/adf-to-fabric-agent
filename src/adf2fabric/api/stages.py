@@ -10,7 +10,7 @@ import json
 from typing import Any, Callable, Optional
 
 from adf2fabric.agent.conversion import ConversionAgent, ConversionRequest
-from adf2fabric.agent.deployment import record as deploy_record
+from adf2fabric.agent.deployment import record as deploy_record, sjd_deploy
 from adf2fabric.agent.deployment.fabric_deploy import DeployError, DeployItem, FabricClient, child_refs, deploy
 from adf2fabric.agent.discovery import DiscoveryAgent, DiscoveryRequest
 from adf2fabric.agent.discovery.adf_semantic import AdfSemanticDiscoveryRequest
@@ -170,17 +170,63 @@ def _verify(c: Container, session: Session, pid: str, options: dict, log: Log) -
     return {"results": [{k: v.to_dict()[k] for k in keep} for v in results]}
 
 
-def _workloads(c: Container, pid: str, log: Log) -> dict[str, Any]:
-    """Assess Spark workloads (read-only: nothing is generated or sent to Fabric; no code is fetched without a credential)."""
+def _workloads(c: Container, session: Session, pid: str, options: dict, log: Log) -> dict[str, Any]:
+    """Assess Spark workloads; with ``generate``, also generate the Fabric notebooks, Spark jobs and Environments locally (the CLI's
+    workloads-generate). Nothing is sent to Fabric. Code is read from Databricks only with ``fetch_code`` (the Azure CLI sign-in's Entra
+    token); generated code reads storage through the OneLake shortcuts of the lakehouse verified in the chosen workspace, when there is one."""
+    from adf2fabric.agent.dependencies.access import TokenSource
     from adf2fabric.agent.workloads.engine import Options, build_manifest
     from adf2fabric.agent.workloads.report import render_report
 
     if not c.store.has_adf_semantic_discovery(pid):
         raise StageError("Run the 'semantic' stage first.")
-    m = build_manifest(c.store, pid, Options(generate=False))
+    generate, fetch = bool(options.get("generate")), bool(options.get("fetch_code"))
+    opts = Options(generate=generate, fetch=fetch, tokens=TokenSource(env_names={}, allow_az=fetch))
+    notes: list[str] = []
+    if generate:
+        workspace = options.get("workspace_id") or session.destination.get("workspace_id")
+        lakehouse = _verified_lakehouse(c, pid, workspace)
+        if lakehouse:
+            opts.lakehouse_id = lakehouse
+            smap = c.store.project_dir(pid) / "storage" / "storage-map.json"
+            if not smap.exists():  # generated code reads storage through the map's shortcuts: write it (read-only), named after the plan's lakehouse
+                from adf2fabric.agent.provisioning import service as prov
+
+                spec = prov.load_spec(c.store, pid)
+                if spec and len(spec.lakehouse_names) == 1:
+                    _write_storage_map(c, pid, spec.lakehouse_names[0])
+                    log("wrote the storage map (the shortcuts generated code reads through)")
+            if smap.exists():
+                import json
+
+                from adf2fabric.agent.storage.routes import Routes, Target
+
+                opts.storage_routes = Routes.from_storage_map(json.loads(smap.read_text(encoding="utf-8")), Target(workspace, lakehouse)) or None
+        else:
+            notes.append("No lakehouse is verified in the chosen workspace (Plan target), so generated code keeps its original storage paths.")
+    m = build_manifest(c.store, pid, opts)
     c.store.save_workload_manifest(pid, m, render_report(m))
-    log(f"{m.summary.total} workload(s) assessed")
-    return {"message": "Workloads assessed.", "workloads": m.summary.total, "by_classification": m.summary.by_classification}
+    log(f"{m.summary.total} workload(s) {'generated' if generate else 'assessed'}")
+    return {"message": "Workloads generated (approve them on the Deploy step)." if generate else "Workloads assessed.",
+            "workloads": m.summary.total, "generated": m.summary.generated, "with_open_issues": m.summary.generated_with_open_issues,
+            "by_classification": m.summary.by_classification, "notes": notes}
+
+
+def _verified_lakehouse(c: Container, pid: str, workspace: Optional[str]) -> Optional[str]:
+    """The id of the one lakehouse provisioning verified for ``workspace``, or None (none, several, or another workspace's)."""
+    from adf2fabric.agent.provisioning import service as prov
+
+    if not workspace or not c.store.has_provisioning(pid, "verification"):
+        return None
+    target = prov.load_spec(c.store, pid)
+    if target is None or not target.workspace_id or target.workspace_id.lower() != workspace.lower():
+        return None
+    import yaml
+
+    rows = yaml.safe_load((c.store.project_dir(pid) / "provisioning" / "verification.yaml").read_text(encoding="utf-8")) or {}
+    ids = [r.get("resource_id") for r in (rows.get("results") or rows.get("steps") or []) if isinstance(r, dict)
+           and str(r.get("step_id", "")).startswith("lakehouse:") and r.get("status") == "verified" and r.get("resource_id")]
+    return ids[0] if len(ids) == 1 else None
 
 
 def _validate(c: Container, session: Session, pid: str, options: dict, log: Log) -> dict[str, Any]:
@@ -240,7 +286,8 @@ def _notebooks_for_deploy(c: Container, session: Session, pid: str, workspace: s
     from adf2fabric.project import bindings as bindings_mod
 
     need = wl.notebooks_to_create(c.store, pid, workspace, options.get("pipelines"))
-    if not need:
+    jobs = wl.spark_jobs_to_create(c.store, pid, workspace, options.get("pipelines"))
+    if not need and not jobs:
         return {}, {}
     client = FabricClient(c.fabric_token(session))
     bindings_mod.use_workspace(c.store, pid, workspace)  # the ids saved for this workspace; the other workspace's are kept for it
@@ -265,11 +312,33 @@ def _notebooks_for_deploy(c: Container, session: Session, pid: str, workspace: s
             pipe = names.get(u.split("/", 1)[0].lower())
             if pipe:
                 target.setdefault(pipe, []).append(w.name)
-    log("converting again with this workspace's notebook ids")
+    for w in jobs:  # approved Spark job definitions (an HDInsight Spark job's), created the same way: never replacing one with that name
+        label = w.artifact.display_name or w.name
+        try:
+            existing = sjd_deploy.list_spark_job_definitions(client, workspace).get(label.lower())
+            if existing:
+                target = clash
+            elif stage == "deploy_apply":
+                done = wl.deploy(c.store, pid, client, workspace, [w.id], apply=True, resolutions=res)
+                outcome = done[0][1] if done else "nothing happened"
+                if not outcome.startswith("create"):
+                    raise StageError(f"Spark job definition '{label}' could not be created: {outcome}")
+                log(f"created Spark job definition {label} in the workspace")
+                continue
+            else:
+                target = pending
+        except DeployError as exc:
+            raise StageError(f"Spark job definition '{label}' could not be prepared for this workspace: {getattr(exc, 'detail', None) or exc}") from None
+        for u in w.used_by:
+            pipe = names.get(u.split("/", 1)[0].lower())
+            if pipe:
+                target.setdefault(pipe, []).append(label)
+    log("converting again with this workspace's notebook and Spark job definition ids")
     _run_stage(c, session, pid, "convert", log, {"workspace_id": workspace})
-    return ({n: f"deploys once its notebook(s) {', '.join(sorted(set(v)))} are created: Deploy creates them first" for n, v in pending.items()},
-            {n: f"a notebook named {', '.join(sorted(set(v)))} is already in this workspace and is not replaced: bind it (Deploy step, "
-                "Notebooks the pipelines run), then deploy again" for n, v in clash.items()})
+    return ({n: f"deploys once its notebook(s) / Spark job definition(s) {', '.join(sorted(set(v)))} are created: Deploy creates them first"
+             for n, v in pending.items()},
+            {n: f"an item named {', '.join(sorted(set(v)))} is already in this workspace and is not replaced: bind it (Deploy step), then "
+                "deploy again" for n, v in clash.items()})
 
 
 def run_stage(c: Container, session: Session, pid: str, stage: str, log: Log, options: Optional[dict] = None) -> dict[str, Any]:
@@ -356,7 +425,7 @@ def _run_stage(c: Container, session: Session, pid: str, stage: str, log: Log, o
         return {"message": "Dependencies resolved.", "dependencies": inv.summary.total, "blocking": inv.summary.blocking, "errors": inv.summary.findings_error,
                 "cycles": len(inv.cycles)}
     if stage == "workloads":
-        return _workloads(c, pid, log)
+        return _workloads(c, session, pid, options, log)
     if stage == "validate":
         return _validate(c, session, pid, options, log)
     # deploy

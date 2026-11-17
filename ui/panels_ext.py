@@ -130,6 +130,18 @@ def _compute(api: ApiClient, pid: str, comp: dict) -> None:
         if (job := run_job(lambda: api.run_stage(pid, "workloads", idempotency_key=intent("workloads")), "Assessing workloads", intent_name="workloads")) \
                 and job["state"] == "succeeded":
             st.rerun()
+    if comp.get("workloads"):
+        fetch = st.checkbox("Read the code from Databricks with my Azure sign-in", key="rv-wl-fetch",
+                            help="Uses an Entra ID token from the Azure CLI sign-in for the Databricks workspace; read-only. Without it, only code "
+                                 "already in the project is used.")
+        if st.button("Generate Fabric notebooks", key="rv-wl-generate", disabled=not can("plans:generate"),
+                     help="Writes the Fabric notebooks, Spark jobs and Environments into the project (nothing is sent to Fabric). Approve them "
+                          "on the Deploy step; Deploy creates the approved ones."):
+            if (job := run_job(lambda: api.run_stage(pid, "workloads", generate=True, fetch_code=fetch, idempotency_key=intent("workloads-generate")),
+                               "Generating Fabric notebooks", intent_name="workloads-generate")) and job["state"] == "succeeded":
+                for n in (job.get("result") or {}).get("notes") or []:
+                    st.info(n)
+                st.rerun()
 
 
 def _compatibility(api: ApiClient, pid: str) -> None:
@@ -186,8 +198,9 @@ def plan(api: ApiClient, pid: str, dest: dict, prov: dict | None) -> None:
     with st.form("plan-form", border=False):
         a, b = st.columns(2)
         lakehouses = a.text_input("Lakehouse name(s), comma-separated", key="plan-lh",
-                                  help="Leave empty and the plan uses the lakehouse name chosen for the storage map when the notebooks need one, "
-                                       "with the OneLake shortcuts they read through. A name is never invented.")
+                                  help="Leave empty and the plan keeps the lakehouse named in the last plan for this workspace, or else the one chosen "
+                                       "for the storage map when the notebooks need one, with the OneLake shortcuts they read through. A name is never "
+                                       "invented.")
         warehouses = b.text_input("Warehouse name(s), comma-separated", key="plan-wh")
         identity = st.checkbox("Plan a workspace identity", key="plan-id")
         go = st.form_submit_button("Build / refresh the plan", type="primary", disabled=not (has_ws and can("plans:generate")))

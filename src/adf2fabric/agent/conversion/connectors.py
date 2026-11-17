@@ -1,6 +1,7 @@
 """Which ADF linked-service types have a documented Fabric counterpart.
 
-Derived from Microsoft's Fabric Data Factory documentation (the data-store tables of the
+Read from the master compatibility catalog (``adf2fabric/catalog/compatibility.json``), which was derived from Microsoft's Fabric
+Data Factory documentation (the data-store tables of the
 Lookup, Script and Stored procedure activity articles, and the ADF-vs-Fabric comparison), and
 checked on 2026-10-16 against two more pages and Fabric's own list of connection types:
 
@@ -17,61 +18,20 @@ from __future__ import annotations
 
 from typing import Optional
 
-# ADF linked-service ``type`` (lowercase) -> Fabric connector name, for connectors the Fabric
-# documentation lists as data stores for pipeline activities.
-SUPPORTED: dict[str, str] = {k.lower(): v for k, v in {
-    "AzureBlobStorage": "Azure Blob Storage", "AzureBlobFS": "Azure Data Lake Storage Gen2",
-    "AzureFileStorage": "Azure Files", "AzureTableStorage": "Azure Table Storage",
-    "AzureSqlDatabase": "Azure SQL Database", "AzureSqlMI": "Azure SQL Managed Instance",
-    "AzureSqlDW": "Azure Synapse Analytics", "SqlServer": "SQL Server database",
-    "AmazonRdsForSqlServer": "Amazon RDS for SQL Server", "AmazonRdsForOracle": "Amazon RDS for Oracle",
-    "Oracle": "Oracle database", "PostgreSql": "PostgreSQL database",
-    "AzurePostgreSql": "Azure Database for PostgreSQL", "MySql": "MySQL database",
-    "AzureMySql": "Azure Database for MySQL", "MariaDB": "MariaDB", "Snowflake": "Snowflake",
-    "CosmosDb": "Azure Cosmos DB for NoSQL", "AzureDataExplorer": "Azure Data Explorer",
-    "AzureDatabricksDeltaLake": "Azure Databricks", "AmazonRedshift": "Amazon Redshift", "Db2": "IBM Db2 database",
-    "GoogleBigQuery": "Google BigQuery", "Greenplum": "Greenplum for Pipeline", "Informix": "Informix For Pipeline",
-    "MicrosoftAccess": "Microsoft Access", "Presto": "Presto", "SapHana": "SAP HANA database",
-    "SapTable": "SAP Table", "SapOpenHub": "SAP BW Open Hub", "Teradata": "Teradata database", "Vertica": "Vertica",
-    "AmazonS3": "Amazon S3", "AmazonS3Compatible": "Amazon S3 Compatible", "FileServer": "Folder",
-    "FtpServer": "FTP", "Sftp": "SFTP", "GoogleCloudStorage": "Google Cloud Storage", "Hdfs": "Hdfs for Pipeline",
-    "OracleCloudStorage": "Oracle Cloud Storage", "HttpServer": "HTTP", "OData": "OData", "Odbc": "ODBC",
-    "RestService": "REST", "Cassandra": "Cassandra", "CommonDataServiceForApps": "Dataverse",
-    "Dynamics": "Dynamics 365", "DynamicsAX": "Dynamics AX", "DynamicsCrm": "Dynamics CRM",
-    "Salesforce": "Salesforce objects", "SalesforceServiceCloud": "Salesforce Service Cloud",
-    "ServiceNow": "ServiceNow", "SharePointOnlineList": "SharePoint Online List",
-    # Added 2026-10-16 from the ADF-vs-Fabric connector comparison (available in Fabric, type strings from the ARM reference).
-    "CosmosDbMongoDbApi": "Azure Cosmos DB for MongoDB", "MongoDbV2": "MongoDB", "MongoDbAtlas": "MongoDB Atlas",
-    "AzureSearch": "Azure AI Search (sink only)", "Office365": "Microsoft 365", "Lakehouse": "Fabric Lakehouse",
-    "Warehouse": "Fabric Warehouse", "AzureDatabricks": "Azure Databricks workspace",
-}.items()}
+from adf2fabric.catalog import master
 
-# Marked "N" (not available) for Fabric in Microsoft's ADF-vs-Fabric connector comparison (2026-07-08), which is about
-# pipelines. Fabric's list of connection types names some of them (Impala, Netezza, Spark, Jira, Shopify, Xero, QuickBooks,
-# Google Ads), so a Dataflow Gen2 connector may exist: this is "unlisted" with that reason, not "unsupported".
-_NOT_IN_PIPELINES_NOTE = ("Microsoft's ADF-vs-Fabric connector comparison (2026-07-08) marks it not available in Fabric "
-                          "pipelines; a Dataflow Gen2 connector may exist. Options: Dataflow Gen2, the generic ODBC or REST "
-                          "connector, or land the data in a supported store first")
-NOT_IN_PIPELINES: dict[str, str] = {k.lower(): f"{label}: {_NOT_IN_PIPELINES_NOTE}" for k, label in {
-    "Hive": "Hive", "Impala": "Apache Impala", "Netezza": "Netezza", "SapBW": "SAP BW via MDX", "Spark": "Spark",
-    "Sybase": "Sybase", "GoogleAdWords": "Google Ads", "Hubspot": "HubSpot", "Jira": "Jira", "QuickBooks": "QuickBooks",
-    "SapCloudForCustomer": "SAP Cloud for Customer", "SapEcc": "SAP ECC", "Shopify": "Shopify", "Square": "Square",
-    "Web": "Web Table (HTML table)", "Xero": "Xero",
-}.items()}
+_LS = master()["connectors"]["adf_linked_services"]  # the master compatibility catalog (adf2fabric/catalog/compatibility.json)
 
+# ADF linked-service ``type`` (lowercase) -> Fabric connector name, for connectors the Fabric documentation lists as data stores for
+# pipeline activities.
+SUPPORTED: dict[str, str] = {k.lower(): v["fabric_connector"] for k, v in _LS.items() if v["verdict"] == "supported"}
+# Not available in Fabric pipelines per Microsoft's ADF-vs-Fabric connector comparison: "unlisted" with that reason, not "unsupported".
+NOT_IN_PIPELINES: dict[str, str] = {k.lower(): v["reason"] for k, v in _LS.items() if v["verdict"] == "not_in_pipelines"}
 # Known to have no Fabric counterpart (retired or not offered).
-UNSUPPORTED: dict[str, str] = {k.lower(): v for k, v in {
-    "AzureDataLakeStore": "Azure Data Lake Storage Gen1 is retired; migrate the data to ADLS Gen2 first",
-    "AzureDataLakeAnalytics": "Azure Data Lake Analytics is retired",
-}.items()}
-
-# Stores the Stored procedure activity supports (activity article).
-STORED_PROCEDURE_STORES = frozenset(s.lower() for s in (
-    "AzureSqlDatabase", "AzureSqlMI", "AzureSqlDW", "SqlServer", "AmazonRdsForSqlServer"))
-
-# Stores the Script activity supports (activity article).
-SCRIPT_STORES = frozenset(s.lower() for s in (
-    "AzureSqlDatabase", "AzureSqlMI", "AzureSqlDW", "SqlServer", "AzurePostgreSql", "Oracle", "Snowflake"))
+UNSUPPORTED: dict[str, str] = {k.lower(): v["reason"] for k, v in _LS.items() if v["verdict"] == "unsupported"}
+# Stores the Stored procedure and Script activities support (activity articles).
+STORED_PROCEDURE_STORES = frozenset(k.lower() for k, v in _LS.items() if v.get("stored_procedure"))
+SCRIPT_STORES = frozenset(k.lower() for k, v in _LS.items() if v.get("script"))
 
 
 def verdict(ls_type: Optional[str]) -> tuple[str, str]:
