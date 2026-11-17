@@ -5,6 +5,9 @@ cannot be told. For those, a person can ask a model for a **draft of corrected A
 default**, and it does not change the project's principle: **the deterministic converter is still the only thing that produces Fabric JSON.** The model
 never writes Fabric files, and nothing it says is used as it comes.
 
+The same switch also allows a draft of a single **mapping data flow step** the fixed translation rules cannot map (PySpark for one
+notebook cell, accepted by a person, pinned to the data flow script): see [workload-migration.md](workload-migration.md#mapping-data-flows).
+
 ## The flow
 
 ```

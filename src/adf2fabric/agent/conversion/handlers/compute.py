@@ -199,8 +199,76 @@ def convert_databricks_notebook(cx: ActivityBuilder) -> None:
                   f"{tp.get('notebookPath')!r} on the same workspace (reused externally).")
 
 
+def _python_as_fabric_notebook(cx: ActivityBuilder) -> bool:
+    """A Databricks Python activity whose file was migrated (generated as a notebook, approved, in this workspace): a Fabric Notebook
+    activity; ``parameters[i]`` (the script's sys.argv[i+1]) become the notebook parameters ``argv_<i+1>`` it reads. False when the
+    notebook is not bound yet (the caller says what is pending)."""
+    a, raw = cx.act, cx.act.raw_properties
+    path = raw.get("pythonFile")
+    name = _bound_notebook_name(cx, path)
+    if not name:
+        return False
+    entry = cx.pc.project.workloads.get(path.lower()) if isinstance(path, str) else None
+    read = {p.name for p in (entry.parameters if entry is not None else []) if p.mapped}
+    tp: dict[str, Any] = {"notebookId": cx.item("notebook", name, f"The Fabric notebook migrated from Databricks Python file '{path}'."),
+                          "workspaceId": cx.workspace()}
+    params: dict[str, Any] = {}
+    for i, v in enumerate(raw.get("parameters") or []):
+        key = f"argv_{i + 1}"
+        if key not in read:
+            cx.dropped(f"typeProperties.parameters[{i}]", "the migrated notebook never reads this argument")
+            continue
+        params[key] = {"value": cx.tree(v, f"typeProperties.parameters[{i}]", f"typeProperties.parameters.{key}.value"), "type": "string"}
+        cx.mapping(f"typeProperties.parameters[{i}]", f"typeProperties.parameters.{key}", "python_argument_to_parameter")
+    if params:
+        tp["parameters"] = params
+    for key in raw:
+        if key not in ("pythonFile", "parameters"):
+            cx.dropped(f"typeProperties.{key}", "a Databricks setting with no Fabric notebook activity equivalent (libraries go to a Fabric Environment)")
+    out = cx.add(cx.envelope(a.name, "TridentNotebook", tp))
+    cx.cover(Op.external_execution, out)
+    cx.strategy, cx.disposition = ConversionStrategy.alternative, "replace"
+    cx.summary = f"DatabricksSparkPython '{a.name}' -> Fabric Notebook activity running the migrated file {name}."
+    return True
+
+
+def _jar_as_spark_job(cx: ActivityBuilder) -> bool:
+    """A Databricks JAR activity whose Spark job definition was generated (the JAR is in OneLake / ADLS), approved and created in this
+    workspace: a Spark job definition activity. False when it is not bound yet."""
+    a, raw = cx.act, cx.act.raw_properties
+    main = raw.get("mainClassName")
+    if not isinstance(main, str) or not main:
+        return False
+    name = main.rsplit(".", 1)[-1]
+    sjd = cx.item("sparkjob", name, f"The Fabric Spark job definition that runs JAR main class '{main}'.")
+    if sjd.startswith("<"):
+        return False
+    out = cx.add(cx.envelope(a.name, "SparkJobDefinition", {"sparkJobDefinitionId": sjd, "workspaceId": cx.workspace()}))
+    cx.mapping("typeProperties.mainClassName", "sparkJobDefinition.mainClass", "jar_to_sjd")
+    for key in raw:
+        if key not in ("mainClassName", "parameters", "libraries"):
+            cx.dropped(f"typeProperties.{key}", "a Databricks setting with no Spark job definition equivalent")
+    cx.cover(Op.external_execution, out)
+    cx.strategy, cx.disposition = ConversionStrategy.alternative, "replace"
+    cx.summary = f"DatabricksSparkJar '{a.name}' -> Fabric Spark job definition activity running {main}."
+    return True
+
+
 def convert_databricks_other(cx: ActivityBuilder) -> None:
     t = cx.act.type
+    python = "Python" in (t or "")
+    if cx.choice("spark") != "databricks":  # migrated to Fabric unless the activity mapping keeps it on Databricks
+        if (_python_as_fabric_notebook(cx) if python else _jar_as_spark_job(cx)):
+            return
+        if cx.choice("spark") == "fabric" or cx.pc.project.workloads:
+            what = ("its Python file runs as a Fabric notebook" if python else "its JAR runs as a Fabric Spark job definition")
+            how = ("Generate it (Review > Compute, reading the file from DBFS), approve it on the Deploy step (Deploy creates it), then convert again."
+                   if python else "Put the JAR in OneLake / ADLS (or name its abfss:// library), generate and approve the Spark job definition; "
+                   "Deploy creates it, then convert again.")
+            return _block(cx, "databricks_python_pending" if python else "databricks_jar_pending",
+                          f"{what}, which is not approved and in this Fabric workspace yet.", how,
+                          "Set 'chosen' to databricks in the activity mapping to recreate the task on the Fabric Azure Databricks activity.",
+                          disposition="replace")
     _block(cx, "databricks_jar_python",
            f"the structure of Fabric's Databricks {'Spark JAR' if 'Jar' in (t or '') else 'Python'} task settings is "
            "not documented, so a faithful configuration cannot be generated.",
@@ -584,8 +652,12 @@ def convert_spark_job(cx: ActivityBuilder) -> None:
     cx.cover(Op.external_execution, name)
     cx.strategy = ConversionStrategy.alternative
     cx.disposition = "replace"
+    if not tp["sparkJobDefinitionId"].startswith("<"):  # migrated (generated from the Synapse definition, approved, created by Deploy) and bound
+        cx.summary = f"SparkJob '{a.name}' -> Fabric Spark job definition activity bound to the migrated definition '{job}'."
+        return
     cx.manual("spark_job_migrate", f"Spark job definition '{job}' must be recreated in Fabric.",
-              "Create the Spark job definition in the workspace and bind its item id.")
+              "Generate it from the Synapse definition (Review > Compute), approve it on the Deploy step (Deploy creates it), or create it by "
+              "hand and bind its item id.")
     cx.summary = f"SparkJob '{a.name}' -> Fabric Spark job definition activity (scaffold) for '{job}'."
 
 
@@ -673,6 +745,12 @@ def _dataflow_gen2(cx: ActivityBuilder, df: str) -> None:
     cx.cover(Op.transform, name)
     cx.strategy = ConversionStrategy.alternative
     cx.disposition = "replace"
+    if not tp["dataflowId"].startswith("<"):  # the Dataflow Gen2 generated from this data flow's Power Query script is in the workspace
+        cx.manual("dataflow_destination", f"Dataflow Gen2 '{df}' was generated from the data flow's Power Query script; its sign-in and output "
+                  "destination are not part of a generated definition (Microsoft documents neither).",
+                  "Open the Dataflow Gen2 in Fabric, sign in its source connections and set the output destination the ADF sink wrote to.")
+        cx.summary = f"{a.type} '{a.name}' -> Fabric Dataflow activity refreshing the Dataflow Gen2 generated from '{df}'."
+        return
     cx.manual("dataflow_reauthor",
               f"Data flow '{df}' is not converted automatically: its transformation graph is not part of the pipeline.",
               "Upgrade it with Fabric's built-in Mapping Data Flow upgrade (Dataflow Gen2 with MDF transforms, "

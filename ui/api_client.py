@@ -286,8 +286,9 @@ class ApiClient:
                   run: bool = False, run_timeout: Optional[int] = None, lakehouse: Optional[str] = None, apply_reconstruction: Optional[bool] = None,
                   assisted: bool = False, generate: bool = False, fetch_code: bool = False, idempotency_key: Optional[str] = None) -> dict:
         body = {"pipelines": list(pipelines), "workspace_id": workspace_id, "with_children": with_children,
-                "allow_unbound": allow_unbound, "confirm": confirm, "validate_stages": list(validate_stages), "run": run, "assisted": assisted,
-                "generate": generate, "fetch_code": fetch_code}
+                "allow_unbound": allow_unbound, "confirm": confirm, "validate_stages": list(validate_stages), "run": run, "assisted": assisted}
+        if generate:  # sent only when used, so a client stays compatible with an API server that predates these options
+            body["generate"], body["fetch_code"] = True, bool(fetch_code)
         for k, v in (("run_timeout", run_timeout), ("lakehouse", lakehouse), ("apply_reconstruction", apply_reconstruction)):
             if v is not None:  # left out = follow the approved brief
                 body[k] = v

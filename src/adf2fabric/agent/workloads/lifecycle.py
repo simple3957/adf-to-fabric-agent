@@ -343,6 +343,47 @@ def notebooks_to_create(store: ProjectStore, project_id: str, workspace: str, pi
     return out
 
 
+def dataflows_to_create(store: ProjectStore, project_id: str, workspace: str, pipelines: Optional[list[str]] = None) -> list[WorkloadEntry]:
+    """The generated Dataflow Gen2 items (wrangling data flows) Deploy creates in ``workspace``: approved, used by a pipeline in scope, not
+    there yet. Their open items (sign-in, destination) are set in Fabric afterwards, so they do not hold the creation back."""
+    if not workspace or not store.has_workload_manifest(project_id):
+        return []
+    scope = {p.lower() for p in pipelines} if pipelines else None
+    return [w for w in store.load_workload_manifest(project_id).workloads
+            if w.artifact.kind == "fabric_dataflow" and w.approval.status == "approved" and not (w.artifact.fabric_item_ids or {}).get(workspace.lower())
+            and (scope is None or {u.split("/", 1)[0].lower() for u in w.used_by} & scope)]
+
+
+def create_dataflow(store: ProjectStore, project_id: str, client: FabricClient, workspace: str, ident: str, *, apply: bool,
+                    resolutions: Optional[Path] = None) -> tuple[WorkloadEntry, str]:
+    """Create the approved Dataflow Gen2 in ``workspace`` (Fabric REST Create Item, type Dataflow, with its definition) and bind it as
+    ``dataflow:<name>``. Never replaces one with that name. Dry run unless ``apply``."""
+    m = store.load_workload_manifest(project_id)
+    w = _find(m, ident)
+    project_dir = store.project_dir(project_id)
+    tracked = project_dir / str(w.artifact.definition_file)
+    if not tracked.is_file() or hashlib.sha256(tracked.read_bytes()).hexdigest() != w.artifact.sha256:
+        raise LifecycleError(f"The generated Dataflow Gen2 '{w.name}' changed since it was generated: generate it again.")
+    name = w.artifact.display_name or w.name
+    if name.lower() in client.list_items(workspace, "Dataflow"):
+        return w, "exists"
+    if not apply:
+        return w, "create"
+    parts = json.loads(tracked.read_text(encoding="utf-8"))["parts"]
+    client.create_item(workspace, name, "Dataflow", parts)
+    item_id = client.list_items(workspace, "Dataflow").get(name.lower())
+    if not item_id:
+        raise LifecycleError(f"Dataflow Gen2 '{name}' was created but Fabric did not list it.")
+    _record_item(w, workspace, item_id)
+    m.updated_at = datetime.now(timezone.utc)
+    store.save_workload_manifest(project_id, m)
+    if resolutions is not None:
+        from adf2fabric.agent.deployment import sjd_deploy
+
+        sjd_deploy.bind_resolutions(resolutions, name, item_id, kind="dataflow")
+    return w, "created"
+
+
 def spark_jobs_to_create(store: ProjectStore, project_id: str, workspace: str, pipelines: Optional[list[str]] = None) -> list[WorkloadEntry]:
     """The generated Spark job definitions Deploy creates in ``workspace`` before deploying (an HDInsight Spark job's): approved by a person,
     with a default lakehouse, used by a pipeline in scope, and with no id in that workspace yet. A definition only references its main file

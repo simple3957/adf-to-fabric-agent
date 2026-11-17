@@ -2341,6 +2341,64 @@ def _assist_fail(exc: Exception) -> None:
     sys.exit(1)
 
 
+def _dataflow_steps(project_name: str):
+    import getpass
+
+    config = load_config()
+    store = ProjectStore(projects_root(config))
+    pid = slugify(project_name)
+    if not store.exists(pid):
+        click.secho(f"No project '{pid}' found.", fg="red", err=True)
+        sys.exit(1)
+    return store.project_dir(pid), getpass.getuser()
+
+
+@cli.command(name="assist-dataflow")
+@click.option("--project", "project_name", required=True)
+@click.option("--dataflow", "dataflow_name", required=True, help="The mapping data flow.")
+@click.option("--draft", "draft_step", default=None, help="Ask the model for this step's code (needs ADF2FABRIC_LLM=on).")
+@click.option("--accept", "accept_step", default=None, help="Accept the stored draft of this step after reading it.")
+@click.option("--show", "show_step", default=None, help="Print the stored draft of this step.")
+def assist_dataflow_cmd(project_name: str, dataflow_name: str, draft_step: str | None, accept_step: str | None, show_step: str | None) -> None:
+    """Data flow steps the fixed rules do not translate: list them, draft one with the model, show or accept a draft.
+    An accepted draft is used by `workloads-generate` (marked model-drafted) while the data flow is unchanged."""
+    from adf2fabric.agent.assist import dataflow_steps as DS
+
+    pdir, user = _dataflow_steps(project_name)
+    try:
+        script = DS.script_of(pdir, dataflow_name)
+        if draft_step:
+            d = DS.draft(pdir, dataflow_name, script, draft_step)
+            click.echo(f"  {draft_step}: draft stored ({d['confidence']} confidence). Read it with --show, accept with --accept.")
+            for u in d["unconverted"]:
+                click.secho(f"      not converted: {u}", fg="yellow")
+        elif accept_step:
+            d = DS.accept(pdir, dataflow_name, script, accept_step, user)
+            click.secho(f"  {accept_step}: accepted by {d['accepted_by']}. Run `workloads-generate` again to use it.", fg="green")
+        elif show_step:
+            d = DS.load(pdir, dataflow_name, show_step)
+            if d is None:
+                raise DS.StepDraftError(f"There is no draft for step '{show_step}'.")
+            click.echo(f"# {d['status']} ({d['confidence']} confidence)")
+            click.echo(d['code'])
+            for n in d.get("notes") or []:
+                click.echo(f"# note: {n}")
+        else:
+            rows = DS.candidates(pdir, dataflow_name, script)
+            if not rows:
+                click.echo("  Every step is translated by the fixed rules.")
+            for r in rows:
+                state = (r["draft"] or {}).get("status") or "no draft"
+                click.echo(f"  {r['step']}: {r['why']}  [{state}]")
+    except DS.StepDraftError as exc:
+        _assist_fail(exc)
+    except Exception as exc:  # the model wrapper's errors
+        from adf2fabric.agent.assist.model import ModelError
+        if isinstance(exc, ModelError):
+            _assist_fail(exc)
+        raise
+
+
 @cli.command(name="assist-candidates")
 @click.option("--project", "project_name", required=True, help="Project name (`convert` must have run).")
 def assist_candidates_cmd(project_name: str) -> None:

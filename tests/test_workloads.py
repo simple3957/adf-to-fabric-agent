@@ -367,11 +367,12 @@ def test_a_job_definition_without_a_lakehouse_is_generated_with_a_failed_check(e
     assert any(c.name == "lakehouse_attached" and not c.passed for c in w.generation.checks)
 
 
-def test_a_python_job_needs_both_its_code_and_its_uploaded_uri(estate):
-    assert _w(_manifest(estate, artifacts={}), "job_main.py").classification is K.blocked or True
+def test_a_databricks_python_activity_becomes_a_fabric_notebook_whose_arguments_are_parameters(estate):
+    # since 2026-11-17 a Python file runs as a Fabric notebook (as a job's Python file task does): no upload is needed, and
+    # parameters[i] (sys.argv[i+1]) become the notebook parameters argv_<i+1>
     w = _w(_manifest(estate), "job_main.py")
-    assert w.artifact.kind == "fabric_spark_job_definition" and w.code.status is C.supplied
-    assert (estate[0].project_dir(estate[1]) / "workloads" / "artifacts" / "job_main.py" / "job_main.py.py").exists()
+    assert w.kind.value == "databricks_notebook" and w.artifact.kind == "fabric_notebook" and w.code.status is C.supplied
+    assert w.name == "job_main" and w.used_by
 
 
 def test_a_synapse_job_reuses_its_own_file_reference_and_flags_the_rest(estate):

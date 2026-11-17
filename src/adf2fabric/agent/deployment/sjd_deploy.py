@@ -100,8 +100,8 @@ def deploy_spark_job_definition(client: FabricClient, workspace: str, name: str,
     return SjdResult(name, action, item_id, "created")
 
 
-def bind_resolutions(path, name: str, item_id: str) -> None:
-    """Record ``sparkjob:<name>`` -> ``item_id`` (ItemToId) in a resolutions file, so the next convert binds the activity to it."""
+def bind_resolutions(path, name: str, item_id: str, kind: str = "sparkjob") -> None:
+    """Record ``<kind>:<name>`` -> ``item_id`` (ItemToId; ``sparkjob`` or ``dataflow``) in a resolutions file, so the next convert binds it."""
     from pathlib import Path
 
     from adf2fabric.project.locks import lock_for, read_text_retry, write_atomic
@@ -109,7 +109,7 @@ def bind_resolutions(path, name: str, item_id: str) -> None:
     path = Path(path)
     with lock_for(path):
         entries = json.loads(read_text_retry(path)) if path.exists() else []
-        key = f"sparkjob:{name}"
+        key = f"{kind}:{name}"
         entries = [e for e in entries if not (isinstance(e, dict) and e.get("type") == "ItemToId" and str(e.get("key", "")).lower() == key.lower())]
         entries.append({"type": "ItemToId", "key": key, "value": item_id})
         write_atomic(path, json.dumps(entries, indent=2) + "\n")

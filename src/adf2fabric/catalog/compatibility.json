@@ -96,6 +96,18 @@
       "title": "Live checks in the user's Fabric tenant (run or getDefinition read back)",
       "page_updated": null,
       "read_on": "2026-11-16"
+    },
+    "fabric_dataflow_definition": {
+      "url": "https://learn.microsoft.com/en-us/rest/api/fabric/articles/item-management/definitions/dataflow-definition",
+      "title": "Dataflow definition (Fabric REST)",
+      "page_updated": "2026-06-16",
+      "read_on": "2026-11-17"
+    },
+    "adf_dataflow_template": {
+      "url": "https://learn.microsoft.com/en-us/azure/templates/microsoft.datafactory/factories/dataflows",
+      "title": "Microsoft.DataFactory dataflows template reference (WranglingDataFlow)",
+      "page_updated": "2026-07-20",
+      "read_on": "2026-11-17"
     }
   },
   "strategies": {
@@ -134,7 +146,9 @@
       },
       "applies_to": [
         "DatabricksNotebook",
-        "DatabricksJob"
+        "DatabricksJob",
+        "DatabricksSparkPython",
+        "DatabricksSparkJar"
       ],
       "default_from": "fabric when a migrated notebook is approved and in the workspace, else databricks"
     },
@@ -719,7 +733,18 @@
         "DatabricksSparkJar",
         "DatabricksSparkPython"
       ],
-      "fabric_activities": [],
+      "fabric_activities": [
+        {
+          "type": "TridentNotebook",
+          "name": "Fabric notebook",
+          "docs": "https://learn.microsoft.com/en-us/fabric/data-factory/notebook-activity"
+        },
+        {
+          "type": "SparkJobDefinition",
+          "name": "Spark job definition",
+          "docs": "https://learn.microsoft.com/en-us/fabric/data-factory/spark-job-definition-activity"
+        }
+      ],
       "strategy": "manual",
       "runtime": "reuse_externally",
       "variants": [
@@ -727,7 +752,8 @@
         "Python file"
       ],
       "carried": [
-        "not converted: the Fabric task structure is undocumented"
+        "Python: the file (read from DBFS) becomes a Fabric notebook; parameters[i] -> notebook parameter argv_<i+1>",
+        "JAR: a Spark job definition referencing the JAR in OneLake / ADLS (an abfss:// library, through its OneLake shortcut when routed); mainClassName -> mainClass; parameters -> commandLineArguments"
       ],
       "inputs_outputs": [
         "none"
@@ -745,21 +771,51 @@
         "Spark JAR / Python task settings"
       ],
       "manual_configuration": [
-        "recreate the task on the Fabric Azure Databricks activity"
+        "approve the generated notebook / Spark job definition (Deploy creates it)",
+        "JAR: put it in OneLake / ADLS when it is in DBFS"
       ],
       "validated_by": [
-        "placeholder Fail activity present"
+        "notebookId / sparkJobDefinitionId bound per workspace",
+        "placeholder Fail activity present while pending"
       ],
       "by_adf_type": {
         "DatabricksSparkJar": {
           "microsoft_comparison": "Azure Databricks activity (ADF Notebook, Jar, Python, Job)",
           "options": [
             {
-              "when": "always",
+              "when": "the JAR is in OneLake / ADLS (an abfss:// library or --artifact), its Spark job definition approved and in this workspace",
+              "fabric": [
+                "SparkJobDefinition"
+              ],
+              "status": "converted",
+              "how": "a Spark job definition activity on the generated definition",
+              "code": "",
+              "switch": {
+                "kind": "spark",
+                "value": "fabric"
+              }
+            },
+            {
+              "when": "switch spark = fabric (or a migration was started), but the definition is not approved and in this workspace yet",
+              "fabric": [],
+              "status": "blocked",
+              "how": "Fail placeholder; Deploy creates the approved definition, then convert again",
+              "code": "databricks_jar_pending",
+              "switch": {
+                "kind": "spark",
+                "value": "fabric"
+              }
+            },
+            {
+              "when": "switch spark = databricks, or nothing was migrated",
               "fabric": [],
               "status": "blocked",
               "how": "Fail placeholder: Fabric's Databricks JAR task settings are undocumented",
-              "code": "databricks_jar_python"
+              "code": "databricks_jar_python",
+              "switch": {
+                "kind": "spark",
+                "value": "databricks"
+              }
             }
           ],
           "workarounds": [
@@ -778,11 +834,39 @@
           "microsoft_comparison": "Azure Databricks activity (ADF Notebook, Jar, Python, Job)",
           "options": [
             {
-              "when": "always",
+              "when": "the file (dbfs:/) was read, generated as a notebook, approved and is in this workspace",
+              "fabric": [
+                "TridentNotebook"
+              ],
+              "status": "converted",
+              "how": "a Notebook activity; parameters[i] -> argv_<i+1>, only those the notebook reads",
+              "code": "",
+              "switch": {
+                "kind": "spark",
+                "value": "fabric"
+              }
+            },
+            {
+              "when": "switch spark = fabric (or a migration was started), but the notebook is not approved and in this workspace yet",
+              "fabric": [],
+              "status": "blocked",
+              "how": "Fail placeholder; Deploy creates the approved notebook, then convert again",
+              "code": "databricks_python_pending",
+              "switch": {
+                "kind": "spark",
+                "value": "fabric"
+              }
+            },
+            {
+              "when": "switch spark = databricks, or nothing was migrated",
               "fabric": [],
               "status": "blocked",
               "how": "Fail placeholder: Fabric's Databricks Python task settings are undocumented",
-              "code": "databricks_jar_python"
+              "code": "databricks_jar_python",
+              "switch": {
+                "kind": "spark",
+                "value": "databricks"
+              }
             }
           ],
           "workarounds": [
@@ -1069,7 +1153,8 @@
       "carried": [
         "mapping data flow -> Notebook activity running the notebook translated from its script (once approved and in the workspace)",
         "data flow parameters -> notebook parameters (pipeline expressions and literals)",
-        "wrangling data flow -> Dataflow Gen2 refresh, dataflowId placeholder"
+        "wrangling data flow -> Dataflow Gen2 refresh, dataflowId placeholder",
+        "wrangling data flow -> a Dataflow Gen2 generated from its Power Query script (agent/workloads/wrangling.py), created by Deploy once approved"
       ],
       "inputs_outputs": [
         "none"
@@ -1194,12 +1279,21 @@
           "microsoft_comparison": "Dataflow Gen2 (Power Query: ADF Deprecated)",
           "options": [
             {
-              "when": "always",
+              "when": "its Power Query script was generated into a Dataflow Gen2 definition (queryMetadata.json + mashup.pq), approved and created in this workspace",
               "fabric": [
                 "RefreshDataFlow"
               ],
               "status": "manual_required",
-              "how": "a Dataflow Gen2 refresh with a dataflowId placeholder; parameters carried",
+              "how": "a Dataflow activity refreshing the generated Dataflow Gen2; a person signs in its source connections and sets the output destination (Microsoft documents neither format)",
+              "code": "dataflow_destination"
+            },
+            {
+              "when": "not generated yet",
+              "fabric": [
+                "RefreshDataFlow"
+              ],
+              "status": "manual_required",
+              "how": "a Dataflow Gen2 refresh with a dataflowId placeholder",
               "code": "dataflow_reauthor"
             }
           ],
@@ -2331,12 +2425,21 @@
           "microsoft_comparison": "N/A",
           "options": [
             {
-              "when": "always",
+              "when": "generated from the Synapse definition (Review > Compute), approved and created in this workspace, or bound by hand",
+              "fabric": [
+                "SparkJobDefinition"
+              ],
+              "status": "converted",
+              "how": "a Spark job definition activity bound to the migrated definition",
+              "code": ""
+            },
+            {
+              "when": "not migrated yet",
               "fabric": [
                 "SparkJobDefinition"
               ],
               "status": "manual_required",
-              "how": "file -> executableFile, className -> mainClass, args -> commandLineArguments; a sparkJobDefinitionId placeholder until the definition is created and bound",
+              "how": "file -> executableFile, className -> mainClass, args -> commandLineArguments; a placeholder id until the definition exists",
               "code": "spark_job_migrate"
             }
           ],
@@ -3446,9 +3549,11 @@
       "fabric": "Dataflow Gen2",
       "microsoft": "Power Query: ADF Deprecated.",
       "sources": [
-        "fabric_vs_adf"
+        "fabric_vs_adf",
+        "fabric_dataflow_definition",
+        "adf_dataflow_template"
       ],
-      "tool": "A Dataflow Gen2 refresh with a placeholder; the dataflow is re-authored."
+      "tool": "Its Power Query script becomes a generated Dataflow Gen2 (approved, created by Deploy) refreshed by a Dataflow activity; sign-in and output destination are set by hand."
     },
     {
       "id": "change_data_capture",

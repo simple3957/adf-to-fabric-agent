@@ -489,6 +489,7 @@ class Translation:
     reads: list[str] = field(default_factory=list)  # paths read
     writes: list[str] = field(default_factory=list)  # paths written
     notes: list[str] = field(default_factory=list)  # review items that are translated but worth a look
+    drafted: list[str] = field(default_factory=list)  # steps whose code is a model draft a person accepted (agent/assist/dataflow_steps.py)
 
 
 def _code_cell(src: str, tags: Optional[list[str]] = None) -> dict:
@@ -533,9 +534,12 @@ def dataset_path(ds: dict, endpoint: Optional[str]) -> Optional[str]:
     return f"abfss://{container}@{account}.dfs.core.windows.net/" + "/".join(p.strip("/") for p in parts)
 
 
-def translate(script_text: str, nodes: dict[str, dict], datasets: dict[str, dict], endpoints: dict[str, str]) -> Translation:
+def translate(script_text: str, nodes: dict[str, dict], datasets: dict[str, dict], endpoints: dict[str, str],
+              drafts: Optional[dict[str, dict]] = None) -> Translation:
     """The notebook for a data flow. ``nodes``: source/sink name -> its dataset name (``typeProperties.sources|sinks``);
-    ``datasets``: dataset name (lower) -> the discovery record (dict); ``endpoints``: linked service name (lower) -> its endpoint URL."""
+    ``datasets``: dataset name (lower) -> the discovery record (dict); ``endpoints``: linked service name (lower) -> its endpoint URL.
+    ``drafts``: step name -> an accepted model draft (``code``, ``accepted_by``, ``accepted_at``) used for a step the fixed rules cannot
+    translate, instead of a cell that raises; each one is marked in the cell and listed in ``drafted``."""
     tr = Translation()
     script = parse(script_text)
     for name, typ, default in script.parameters:
@@ -554,9 +558,17 @@ def translate(script_text: str, nodes: dict[str, dict], datasets: dict[str, dict
             code = _step(st, nodes, datasets, endpoints, tr)
         except (Untranslated, ScriptError, KeyError, IndexError) as exc:
             why = str(exc) or type(exc).__name__
-            tr.untranslated.append(f"{st.name} ({st.transform}): {why}")
-            code = (f"# [adf2fabric] step '{st.name}' ({st.transform}) is not translated by the fixed rules: {why}.\n"
-                    f"raise NotImplementedError({f'data flow step {st.name} ({st.transform}) is not translated: {why}'!r})\n")
+            draft = (drafts or {}).get(st.name)
+            if draft and draft.get("code") and st.transform not in ("source", "sink"):  # storage I/O is never model-written
+                tr.drafted.append(f"{st.name} ({st.transform})")
+                tr.notes.append(f"step {st.name} ({st.transform}) runs model-drafted code accepted by {draft.get('accepted_by') or '?'}: review it")
+                code = (f"# [adf2fabric] MODEL-DRAFTED: step '{st.name}' ({st.transform}) is not translated by the fixed rules ({why}).\n"
+                        f"# This code was drafted by a model and accepted by {draft.get('accepted_by') or '?'} on {draft.get('accepted_at') or '?'}.\n"
+                        + draft["code"].rstrip() + "\n")
+            else:
+                tr.untranslated.append(f"{st.name} ({st.transform}): {why}")
+                code = (f"# [adf2fabric] step '{st.name}' ({st.transform}) is not translated by the fixed rules: {why}.\n"
+                        f"raise NotImplementedError({f'data flow step {st.name} ({st.transform}) is not translated: {why}'!r})\n")
         tr.cells.append(_code_cell(f"# {st.name}: {st.transform}" + (f" of {', '.join(st.inputs)}" if st.inputs else "") + "\n" + code))
     return tr
 

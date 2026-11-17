@@ -90,6 +90,7 @@ class _Spec:
     job_code: Optional[CodeSource] = None  # a Databricks job entry: how its definition was obtained
     job_reasons: list[str] = field(default_factory=list)  # a Databricks job entry: why Fabric notebooks cannot run it
     python_file: bool = False  # a Python file task of a Databricks job: its code becomes a notebook, sys.argv[N] -> argv_N
+    dbfs_file: bool = False  # a Databricks Python activity's file: read from DBFS (a job's Python file task is a workspace file)
     environment: Optional[str] = None  # a job task: the job environment ("<job id>:<key>") whose libraries it uses
     environment_libraries: list[str] = field(default_factory=list)  # that environment's dependencies, as written
     main_file: Optional[str] = None  # an HDInsight Spark job: the abfss URI of its main file (rootPath + entryFilePath on its storage)
@@ -192,6 +193,13 @@ def _specs(d: AdfSemanticDiscovery, plan: Any, selected: Optional[set[str]], rea
                     spec = specs.setdefault(wid, _Spec(wid, W.adf_dataflow, df, df, a, p.name))
                     spec.used_by.append(f"{p.name}/{a.name}")
                 continue
+            if t == "ExecuteWranglingDataflow":  # a wrangling data flow runs as the Dataflow Gen2 generated from its Power Query script
+                df = _ref(raw.get("dataflow"))
+                if df:
+                    wid = f"{W.adf_wrangling.value}:{df.lower()}"
+                    spec = specs.setdefault(wid, _Spec(wid, W.adf_wrangling, df, df, a, p.name))
+                    spec.used_by.append(f"{p.name}/{a.name}")
+                continue
             if t == "DatabricksJob":
                 for js in _job_specs(p, a, d, read_job, cid_of.get((p.name, a.name), "")):
                     spec = specs.setdefault(js.id, js)
@@ -204,11 +212,18 @@ def _specs(d: AdfSemanticDiscovery, plan: Any, selected: Optional[set[str]], rea
                 kind, name = W.databricks_notebook, (path or a.name).rstrip("/").rsplit("/", 1)[-1] or a.name
                 passed = sorted(raw["baseParameters"]) if isinstance(raw.get("baseParameters"), dict) else []
                 args: list[str] = []
-            elif t == "DatabricksSparkPython":
+            elif t == "DatabricksSparkPython":  # the file becomes a Fabric notebook (sys.argv[N] -> argv_N), like a job's Python file task
                 path = _text(raw.get("pythonFile"))
                 item = path if path is not None else f"(dynamic: {p.name}/{a.name})"
-                kind, name = W.databricks_python, (path or a.name).rstrip("/").rsplit("/", 1)[-1]
-                passed, args = [], _literal_args(raw.get("parameters"))[0]
+                wid = f"{W.databricks_notebook.value}:{item.lower()}"
+                spec = specs.setdefault(wid, _Spec(wid, W.databricks_notebook, databricks_jobs.notebook_name(path) or a.name, item, a, p.name,
+                                                   compute_id=cid_of.get((p.name, a.name), ""), notebook_path=path, python_file=True,
+                                                   dbfs_file=True))
+                spec.used_by.append(f"{p.name}/{a.name}")
+                for i, _v in enumerate(raw.get("parameters") or []):
+                    if f"argv_{i + 1}" not in spec.passed:
+                        spec.passed.append(f"argv_{i + 1}")
+                continue
             elif t == "DatabricksSparkJar":
                 item = _text(raw.get("mainClassName")) or f"(dynamic: {p.name}/{a.name})"
                 kind, name = W.databricks_jar, item.rsplit(".", 1)[-1]
@@ -256,6 +271,8 @@ def _specs(d: AdfSemanticDiscovery, plan: Any, selected: Optional[set[str]], rea
 def _environment(spec: _Spec, d: AdfSemanticDiscovery, plan: Any) -> ExecutionEnvironment:
     if spec.kind is W.adf_dataflow:  # ADF's own Spark runs a data flow; in Fabric it is a notebook on the workspace's runtime
         return ExecutionEnvironment(platform="adf_dataflow")
+    if spec.kind is W.adf_wrangling:  # Power Query: in Fabric a Dataflow Gen2
+        return ExecutionEnvironment(platform="adf_wrangling")
     use: Optional[ComputeUse] = next((u for u in plan.inventory if u.id == spec.compute_id), None)
     platform = "databricks" if spec.kind.value.startswith("databricks") else ("hdinsight" if spec.kind is W.hdinsight_spark else "synapse")
     env = ExecutionEnvironment(platform=platform)
@@ -661,7 +678,7 @@ def build_manifest(store: ProjectStore, project_id: str, opts: Optional[Options]
     now = now or datetime.now(timezone.utc)
     d = store.load_adf_semantic_discovery(project_id)
     plan = build_compute_plan(d, opts.pipelines, _sources(opts))
-    if plan is None and any(a.type in ("ExecuteDataFlow", "HDInsightSpark") for p in d.pipelines for a in walk(p.activities)):
+    if plan is None and any(a.type in ("ExecuteDataFlow", "ExecuteWranglingDataflow", "HDInsightSpark") for p in d.pipelines for a in walk(p.activities)):
         plan = _NoCompute()  # data flows / HDInsight Spark only: nothing to size here, but each one is still translated or generated
     previous = store.load_workload_manifest(project_id) if store.has_workload_manifest(project_id) else None
     prior = {w.id: w for w in previous.workloads} if previous else {}
@@ -753,14 +770,19 @@ def _assess_dataflow(spec: _Spec, d: AdfSemanticDiscovery, project_dir: Path, op
                                                          "only mapping data flows are translated.", "Use Dataflow Gen2 (Power Query) for a wrangling data flow.")]
     datasets = {x.name.lower(): x.model_dump() for x in d.datasets}
     endpoints = {x.name.lower(): x.endpoint for x in d.linked_services if getattr(x, "endpoint", None)}
+    from adf2fabric.agent.assist import dataflow_steps
+
     try:
-        dtr = dataflow.translate(text, dataflow.nodes_of(tp), datasets, endpoints)
+        dtr = dataflow.translate(text, dataflow.nodes_of(tp), datasets, endpoints, dataflow_steps.accepted(project_dir, spec.source_item, text))
     except dataflow.ScriptError as exc:
         return Code(source, text), None, None, [_finding("unreadable_notebook", F.source, S.blocker, f"The data flow script cannot be read: {exc}.")]
     findings = [_finding("dataflow_untranslated", F.api, S.change, f"Data flow step {u} is not translated by the fixed rules.",
                          "Draft it with a model (assist) or write it by hand; until then its notebook cell raises NotImplementedError.", u.split(" ")[0])
                 for u in dtr.untranslated]
     findings += [_finding("dataflow_review", F.contract, S.review, n, "Check it against the data flow.") for n in dtr.notes]
+    findings += [_finding("dataflow_step_model_drafted", F.api, S.review, f"Data flow step {s} runs model-drafted code a person accepted.",
+                          "Review the cell before approving the notebook; a run compared with ADF is the proof.", s.split(" ")[0])
+                 for s in dtr.drafted]
     code_cells = [c for c in dtr.cells if c["cell_type"] == "code"]
     an = analyzer.analyze([notebook_format.Cell(i, "python", "".join(c["source"]), 1) for i, c in enumerate(code_cells)], "databricks")
     findings += an.findings
@@ -802,17 +824,25 @@ def _assess(spec: _Spec, d: AdfSemanticDiscovery, plan: Any, resolver: SourceRes
     # 1. the code
     if spec.kind is W.databricks_job:
         return _assess_job(spec, env, d)
+    if spec.kind is W.adf_wrangling:
+        return _assess_wrangling(spec, env, project_dir, opts, used_names, now)
     cells = None
     if spec.kind is W.adf_dataflow:
         code, an, tr, fs = _assess_dataflow(spec, d, project_dir, opts)
         findings += fs
     elif spec.kind is W.databricks_notebook:
-        code = resolver.databricks_notebook(env.workspace, spec.notebook_path or _text(raw.get("notebookPath")), file=spec.python_file)
+        code = (resolver.databricks_python(env.workspace, spec.notebook_path) if spec.dbfs_file else
+                resolver.databricks_notebook(env.workspace, spec.notebook_path or _text(raw.get("notebookPath")), file=spec.python_file))
     elif spec.kind is W.databricks_python:
         code = resolver.databricks_python(env.workspace, _text(raw.get("pythonFile")))
     elif spec.kind is W.databricks_jar:
         code = resolver.jar(spec.source_item)
         jar_uri = opts.artifacts.get(spec.source_item) or next((opts.artifacts[k] for k in opts.artifacts if k.lower() == spec.source_item.lower()), None)
+        if jar_uri is None:  # a JAR library already in ADLS / OneLake is referenced in place (through its OneLake shortcut when routed)
+            jar_uri = next((str(lib["jar"]) for lib in spec.libraries if isinstance(lib.get("jar"), str)
+                            and str(lib["jar"]).startswith("abfss://")), None)
+            if jar_uri and opts.storage_routes:
+                jar_uri = opts.storage_routes.rewrite(jar_uri).text
     elif spec.kind is W.synapse_notebook:
         code = resolver.synapse_artifact("notebook", _ref(raw.get("notebook")))
     elif spec.kind is W.hdinsight_spark:
@@ -899,6 +929,51 @@ def _assess(spec: _Spec, d: AdfSemanticDiscovery, plan: Any, resolver: SourceRes
     # 3. generation
     _generate(entry, spec, code, tr, an, cells, job, jar_uri, opts, project_dir, used_names, now)
     entry.unresolved = _unresolved(entry)
+    return entry
+
+
+def _assess_wrangling(spec: _Spec, env: ExecutionEnvironment, project_dir: Path, opts: Options, used_names: dict[str, str],
+                      now: datetime) -> WorkloadEntry:
+    """A wrangling data flow: its Power Query script becomes a Fabric Dataflow Gen2 definition (wrangling.py), approved by a person and
+    created by Deploy. The connections' sign-in and the output destination are open items: Microsoft documents neither format."""
+    from adf2fabric.agent.workloads import wrangling
+
+    loc = f"dataflow/{spec.source_item}.json"
+    path = _dataflow_file(project_dir, spec.source_item)
+    entry = WorkloadEntry(id=spec.id, kind=spec.kind, name=spec.name, source_item=spec.source_item, used_by=sorted(spec.used_by), environment=env,
+                          code=CodeSource(status=C.not_found, location=loc, detail="The data flow is not in the imported source."),
+                          classification=K.blocked)
+    if path is None:
+        entry.classification_reasons = ["The data flow is not in the imported source."]
+        entry.generation.status, entry.generation.reason = "not_generated", "Blocked: the data flow is not in the imported source."
+        return entry
+    raw = json.loads(path.read_text(encoding="utf-8-sig"))
+    tp = (raw.get("properties") or {}).get("typeProperties") or {}
+    text = tp.get("script") or ""
+    entry.code = CodeSource(status=C.in_project, location=loc, language="power_query", sha256=hashlib.sha256(text.encode()).hexdigest(),
+                            lines=text.count("\n") + 1 if text else 0)
+    try:
+        parts, todo = wrangling.definition(spec.name, tp)
+    except ValueError as exc:
+        entry.classification, entry.classification_reasons = K.blocked, [str(exc)]
+        entry.generation.status, entry.generation.reason = "not_generated", f"Blocked: {exc}."
+        return entry
+    entry.classification, entry.classification_reasons = K.convertible_with_changes, ["The Power Query script is carried as the Dataflow Gen2 mashup."]
+    entry.required_resources = [RequiredResource(kind="connection", name="source sign-in", reason=todo[0]),
+                                RequiredResource(kind="file_upload", name="output destination", reason=todo[1])]
+    if not opts.generate:
+        entry.generation.status, entry.generation.reason = "not_generated", "Assessment only: run workloads-generate to write the Fabric artifact."
+        return entry
+    base = f"workloads/artifacts/{_slug(spec.name)}"
+    rel_m, _ = _write(project_dir, f"{base}/mashup.pq", parts["mashup.pq"].encode("utf-8"))
+    rel_d, sha = _write(project_dir, f"{base}/dataflow-definition.json", json.dumps({"parts": parts}, indent=2, ensure_ascii=False).encode("utf-8"))
+    entry.artifact = GeneratedArtifact(kind="fabric_dataflow", file=rel_m, definition_file=rel_d, sha256=sha, display_name=spec.name,
+                                       configuration={"queries": str(len(wrangling.query_names(text)))})
+    entry.generation.generated_at = now
+    entry.generation.checks = [_check("power_query_sections", True, f"{len(wrangling.query_names(text))} shared quer(ies)"),
+                               _check("connections_signed_in", False, todo[0]), _check("output_destination_set", False, todo[1])]
+    entry.generation.status, entry.generation.reason = "generated_with_open_issues", "Generated; the sign-in and output destination are set in Fabric."
+    entry.unresolved = todo
     return entry
 
 

@@ -287,7 +287,8 @@ def _notebooks_for_deploy(c: Container, session: Session, pid: str, workspace: s
 
     need = wl.notebooks_to_create(c.store, pid, workspace, options.get("pipelines"))
     jobs = wl.spark_jobs_to_create(c.store, pid, workspace, options.get("pipelines"))
-    if not need and not jobs:
+    flows = wl.dataflows_to_create(c.store, pid, workspace, options.get("pipelines"))
+    if not need and not jobs and not flows:
         return {}, {}
     client = FabricClient(c.fabric_token(session))
     bindings_mod.use_workspace(c.store, pid, workspace)  # the ids saved for this workspace; the other workspace's are kept for it
@@ -329,6 +330,24 @@ def _notebooks_for_deploy(c: Container, session: Session, pid: str, workspace: s
                 target = pending
         except DeployError as exc:
             raise StageError(f"Spark job definition '{label}' could not be prepared for this workspace: {getattr(exc, 'detail', None) or exc}") from None
+        for u in w.used_by:
+            pipe = names.get(u.split("/", 1)[0].lower())
+            if pipe:
+                target.setdefault(pipe, []).append(label)
+    for w in flows:  # approved Dataflow Gen2 items generated from wrangling data flows, created the same way
+        label = w.artifact.display_name or w.name
+        try:
+            _w, what = wl.create_dataflow(c.store, pid, client, workspace, w.id, apply=False)
+            if what == "exists":
+                target = clash
+            elif stage == "deploy_apply":
+                wl.create_dataflow(c.store, pid, client, workspace, w.id, apply=True, resolutions=res)
+                log(f"created Dataflow Gen2 {label} in the workspace (set its sign-in and output destination in Fabric)")
+                continue
+            else:
+                target = pending
+        except (wl.LifecycleError, DeployError) as exc:
+            raise StageError(f"Dataflow Gen2 '{label}' could not be prepared for this workspace: {getattr(exc, 'detail', None) or exc}") from None
         for u in w.used_by:
             pipe = names.get(u.split("/", 1)[0].lower())
             if pipe:

@@ -233,8 +233,17 @@ a model draft only for what they cannot map).
   cell (with the defaults the `parameters{}` block declares).
 * **Not mapped, never guessed:** any other transformation (pivot, unpivot, alter row, flatten, rank, assert, parse, flowlets ...),
   column patterns (`each`, `match`, `$$`), an unknown function, an inline dataset, a sink with row-level writes. Each such step is a
-  finding (`dataflow_untranslated`) and its cell raises `NotImplementedError` naming it, so the flow still has a notebook; drafting
-  those steps with a model (approved by a person) is the next step to build.
+  finding (`dataflow_untranslated`) and its cell raises `NotImplementedError` naming it, so the flow still has a notebook.
+* **A model draft for such a step (optional, 2026-11-17, `agent/assist/dataflow_steps.py`).** With `ADF2FABRIC_LLM=on`,
+  `adf2fabric assist-dataflow --project <p> --dataflow <name>` lists the untranslated transformation steps (never a source or a
+  sink: storage I/O is never model-written), `--draft <step>` asks Claude (the Claude Code CLI with no tools) for that one step's
+  PySpark, given the script, the input DataFrame variable(s) and the output variable, and stores it under
+  `projects/<p>/assist/dataflow/<data flow>/<step>.json`; `--show <step>` prints it and `--accept <step>` records the person who
+  accepted it. A draft the model says is incomplete (`unconverted`) is refused, and a draft is pinned to a hash of the script, so a
+  changed data flow stops using it. The next `workloads-generate` puts an accepted draft in place of the raising cell, marked
+  `MODEL-DRAFTED` with who accepted it and when, and reports a review finding (`dataflow_step_model_drafted`); the notebook still
+  needs its normal approval before Deploy, and only a run compared with ADF proves it. What leaves the machine: the data flow script
+  and the step's name.
 
 The notebook is approved by a person and created in the workspace by Deploy, like any generated notebook. Conversion then runs it
 from the pipeline: the *Execute data flow* activity becomes a Notebook activity (`notebook:<data flow>`), and the parameters it
