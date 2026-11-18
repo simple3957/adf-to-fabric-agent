@@ -6,12 +6,8 @@ For every runtime-bound activity the converter states its DISPOSITION:
   Azure Data Explorer) is called from Fabric through a Fabric activity + connection.
 * ``replace``          - the work moves to a Fabric component (notebook, Spark job, Dataflow Gen2).
   The target item must be authored/migrated; the pipeline gets a bound scaffold.
-* ``redesign``         - Fabric has no equivalent (retired services), or the package / job cannot run there
-  as it is; the activity is blocked with documented alternatives and a fail-fast placeholder.
-
-SSIS: Fabric's Invoke SSIS package activity (preview) runs a package from OneLake, but Microsoft does not
-document the JSON of its package location, so the activity is not generated; the placeholder says how
-ready the package is (workloads-assess, agent/workloads/ssis.py) and how to add the activity by hand.
+* ``redesign``         - Fabric has no equivalent (SSIS, retired services); the activity is blocked
+  with documented alternatives and a fail-fast placeholder.
 
 Fabric items that do not exist yet (notebooks, dataflows, Spark job definitions) are referenced by
 a placeholder id and listed as prerequisites; this tool never invents an item id.
@@ -764,34 +760,124 @@ def _dataflow_gen2(cx: ActivityBuilder, df: str) -> None:
     cx.summary = f"{a.type} '{a.name}' -> Fabric Dataflow activity (scaffold) refreshing a Dataflow Gen2 for '{df}'."
 
 
-_SSIS_READY = {"directly_convertible", "convertible_with_changes"}
-
-
 def convert_ssis(cx: ActivityBuilder) -> None:
-    """Fabric's Invoke SSIS package (preview) can run the package from OneLake, but its package location JSON is not documented, so a
-    placeholder stands in. It says how ready the package is, from the workload assessment (agent/workloads/ssis.py)."""
-    w = cx.pc.project.ssis_packages.get(f"{cx.pc.pipeline.name}/{cx.act.name}".lower())
-    if w is None:
-        ready = ("The package has not been assessed yet: run workloads-assess to find it (embedded, file share, SSISDB or package store) "
-                 "and check what Fabric cannot run.")
-    else:
-        cls = getattr(w.classification, "value", w.classification)
-        ready = f"Package '{w.name}' is assessed {cls.replace('_', ' ')}: " + " ".join(w.classification_reasons[:2])
-    fits = w is not None and getattr(w.classification, "value", w.classification) in _SSIS_READY
-    _block(cx, "ssis_invoke_pending",
-           "Fabric's Invoke SSIS package activity (preview) runs a package stored in OneLake, but Microsoft does not document the JSON of "
-           f"its package location, so this tool does not generate it yet. {ready}".strip(),
-           "Upload the .dtsx to a lakehouse (workloads-generate writes it, with its child packages) and add an Invoke SSIS package activity "
-           "in the Fabric portal, with the connection manager and property overrides the workload report lists.",
-           "Keep the package on the Azure-SSIS integration runtime in ADF and invoke the ADF pipeline from Fabric "
-           "with the Invoke pipeline activity (it can call ADF pipelines).",
-           "Re-implement the package's data flow as Copy / Dataflow Gen2 / notebook activities.",
-           disposition="replace" if fits else "redesign")
+    """An Execute SSIS package activity runs as the Fabric notebook its package was translated into (agent/workloads/ssis.py), once a person has
+    approved it and it is in this workspace; until then that notebook is an item the workspace needs and Deploy creates. Fabric's own Invoke
+    SSIS package activity has no documented JSON, so the package is translated instead (the user's decision, 2026-11-18)."""
+    from adf2fabric.agent.workloads import ssis
+
+    a, raw = cx.act, cx.act.raw_properties
+    ltype, path = ssis.package_location(raw)
+    inline = ltype == "InlinePackage" or path.lstrip().startswith("<")
+    if not path and not inline:
+        return _block(cx, "ssis_unsupported", "The Execute SSIS package activity names no literal package path (or computes it at run time).",
+                      "Give the activity a literal packageLocation path so its package can be translated to a Fabric notebook.", disposition="redesign")
+    base = a.name if inline else re.split(r"[\\/]", path)[-1]
+    name = re.sub(r"\.dtsx$", "", base or a.name, flags=re.I)
+    entry = cx.pc.project.workloads.get(("inline:" + cx.pc.pipeline.name + "/" + a.name if inline else path).lower())
+    if not _bound_notebook_name(cx, name):
+        cx.item("notebook", name, f"The Fabric notebook translated from SSIS package '{path if not inline else a.name}'; it is not in this workspace yet.")
+        return _block(cx, "ssis_notebook_pending",
+                      f"SSIS package '{path if not inline else a.name}' runs as the Fabric notebook translated from it, which is not in this Fabric workspace yet "
+                      "(Fabric's Invoke SSIS package activity has no documented JSON).",
+                      "Translate it (workloads-generate with the .dtsx supplied), have a person approve the notebook (workloads-approve), then Deploy: it creates the "
+                      "notebook in this workspace first and converts again.", disposition="replace")
+    tp: dict[str, Any] = {"notebookId": cx.item("notebook", name, f"The Fabric notebook translated from SSIS package '{path}'."), "workspaceId": cx.workspace()}
+    read = {p.name for p in (entry.parameters if entry is not None else []) if p.mapped}
+    params: dict[str, Any] = {}
+
+    def give(adf_name: str, target: Optional[str], v: Any, source: str) -> None:
+        value = v.get("value") if isinstance(v, dict) and "value" in v else v
+        if isinstance(value, dict) and value.get("type") == "Expression":
+            value = cx.tree(value, source, f"typeProperties.parameters.{target}.value")
+        if target is None or target not in read:
+            cx.dropped(source, "the translated notebook has no parameter for it (the package does not declare it, or a notebook cannot take it)")
+        elif isinstance(value, dict) and value.get("type") in ("SecureString", "AzureKeyVaultSecret"):
+            cx.manual("ssis_secret_parameter", f"'{adf_name}' is a secret; it cannot be passed as a notebook parameter value from the pipeline.",
+                      f"Pass '{target}' from Azure Key Vault when the notebook runs (notebookutils.credentials.getSecret).")
+        elif not isinstance(value, (str, int, float, bool, dict)):
+            cx.manual("ssis_parameter_value", f"'{adf_name}' has a value the converter cannot pass.", f"Pass '{target}' on the Notebook activity.")
+        else:
+            params[target] = {"value": value, "type": "string"}
+            cx.mapping(source, f"typeProperties.parameters.{target}", "ssis_parameter_to_parameter")
+
+    for key in ("packageParameters", "projectParameters"):
+        for k, v in (raw.get(key) or {}).items():
+            give(k, ssis.package_param(k), v, f"typeProperties.{key}.{k}")
+    for k, v in (raw.get("propertyOverrides") or {}).items():
+        give(k, ssis.variable_param(k), v, f"typeProperties.propertyOverrides.{k}")
+    for key in ("packageConnectionManagers", "projectConnectionManagers"):
+        for cmname, props in (raw.get(key) or {}).items():
+            for prop, v in (props or {}).items():
+                give(f"{cmname}.{prop}", ssis.cm_param(cmname, prop), v, f"typeProperties.{key}.{cmname}.{prop}")
+    if params:
+        tp["parameters"] = params
+    handled = ("packageLocation", "packageParameters", "projectParameters", "propertyOverrides", "packageConnectionManagers", "projectConnectionManagers")
+    for key in raw:
+        if key not in handled:
+            cx.dropped(f"typeProperties.{key}", "the Azure-SSIS integration runtime's own settings (runtime, logging level, execution credential, environment, log "
+                       "location) do not apply to a Fabric notebook")
+    if a.linked_service_refs:
+        cx.dropped("connectVia", "the Azure-SSIS integration runtime is not used by the notebook")
+    name_ = cx.add(cx.envelope(a.name, "TridentNotebook", tp))
+    cx.mapping("typeProperties.packageLocation", "typeProperties.notebookId", "ssis_translated_to_notebook")
+    cx.cover(Op.external_execution, name_)
+    cx.strategy = ConversionStrategy.alternative
+    cx.disposition = "replace"
+    cx.summary = f"ExecuteSSISPackage '{a.name}' -> Fabric Notebook activity running the notebook translated from SSIS package '{path if not inline else a.name}'."
 
 
 def convert_usql(cx: ActivityBuilder) -> None:
-    _block(cx, "usql_retired", "Azure Data Lake Analytics (U-SQL) is retired.",
-           "Re-implement the U-SQL job as a Fabric notebook (Spark) or Dataflow Gen2.", disposition="redesign")
+    """A U-SQL activity runs as the Fabric notebook its script was translated into (agent/workloads/usql.py), once a person has approved
+    it and it is in this workspace; until then that notebook is an item the workspace needs and Deploy creates. Azure Data Lake Analytics
+    itself is retired, so nothing else can run the script."""
+    from adf2fabric.agent.workloads import usql
+
+    a, raw = cx.act, cx.act.raw_properties
+    path = raw.get("scriptPath") if isinstance(raw.get("scriptPath"), str) else None
+    if not path:
+        return _block(cx, "usql_retired", "Azure Data Lake Analytics (U-SQL) is retired and this activity's script path is computed at run time.",
+                      "Give the activity a literal scriptPath so its script can be translated to a Fabric notebook.", disposition="redesign")
+    name = re.sub(r"\.usql$", "", databricks_jobs.notebook_name(path) or a.name, flags=re.I)
+    entry = cx.pc.project.workloads.get(path.lower())
+    if not _bound_notebook_name(cx, name):
+        cx.item("notebook", name, f"The Fabric notebook translated from U-SQL script '{path}'; it is not in this workspace yet.")
+        return _block(cx, "usql_notebook_pending",
+                      f"U-SQL script '{path}' runs as the Fabric notebook translated from it, which is not in this Fabric workspace yet "
+                      "(Azure Data Lake Analytics is retired).",
+                      "Translate it (workloads-generate), have a person approve the notebook (workloads-approve), then Deploy: it creates the "
+                      "notebook in this workspace first and converts again.", disposition="replace")
+    tp: dict[str, Any] = {"notebookId": cx.item("notebook", name, f"The Fabric notebook translated from U-SQL script '{path}'."),
+                          "workspaceId": cx.workspace()}
+    read = {p.name for p in (entry.parameters if entry is not None else []) if p.mapped}
+    params: dict[str, Any] = {}
+    for k, v in (raw.get("parameters") or {}).items():
+        target = usql.param_name(k)
+        value = v if isinstance(v, (str, int, float, bool)) else (cx.tree(v, f"typeProperties.parameters.{k}", f"typeProperties.parameters.{target}.value")
+                                                                 if isinstance(v, dict) and v.get("type") == "Expression" else None)
+        if target not in read:
+            cx.dropped(f"typeProperties.parameters.{k}", "the translated notebook has no parameter of that name (the script does not declare it)")
+        elif value is None:
+            cx.manual("usql_parameter_expression", f"U-SQL parameter '{k}' has a value the converter cannot pass.",
+                      f"Pass '{k}' as a literal or a pipeline expression on the Notebook activity.")
+        else:
+            params[target] = {"value": value, "type": "string"}
+            cx.mapping(f"typeProperties.parameters.{k}", f"typeProperties.parameters.{target}", "usql_parameter_to_parameter")
+    if params:
+        tp["parameters"] = params
+    for key in raw:
+        if key not in ("scriptPath", "scriptLinkedService", "parameters"):
+            cx.dropped(f"typeProperties.{key}", "Azure Data Lake Analytics' own settings (degree of parallelism, priority, runtime version, "
+                       "compilation mode) do not apply to a Fabric notebook")
+    if a.linked_service_refs:
+        cx.dropped("linkedServiceName", "the retired Data Lake Analytics account is not used by the notebook; the script's storage is read "
+                   "through the OneLake shortcut")
+    name_ = cx.add(cx.envelope(a.name, "TridentNotebook", tp))
+    cx.mapping("typeProperties.scriptPath", "typeProperties.notebookId", "usql_translated_to_notebook")
+    cx.cover(Op.external_execution, name_)  # discovery reads a U-SQL activity as external execution (not as a transform)
+    cx.strategy = ConversionStrategy.alternative
+    cx.disposition = "replace"
+    cx.summary = f"DataLakeAnalyticsU-SQL '{a.name}' -> Fabric Notebook activity running the notebook translated from U-SQL script '{path}'."
 
 
 for _rule in (

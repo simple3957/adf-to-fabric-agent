@@ -99,14 +99,25 @@ def test_copy_staging_linked_service_becomes_an_external_reference():
                   "enableCompression": True}
 
 
-def test_copy_logging_is_reported_not_silently_dropped():
+def test_copy_log_settings_are_carried_with_their_store_as_a_connection():
+    """Microsoft's upgrade module's mapping (FabricPipelineUpgrade, CopyActivityUpgrader.AddLogSettings)."""
     c = copy_activity(logSettings={"enableCopyActivityLog": True,
-                                   "logLocationSettings": {"linkedServiceName": ref("LinkedService", "LS_LAKE")}})
+                                   "copyActivityLogSettings": {"logLevel": "Warning", "enableReliableLogging": False},
+                                   "logLocationSettings": {"linkedServiceName": ref("LinkedService", "LS_LAKE"), "path": "logs/copy"}})
     _, content, a = one(c, **ESTATE)
-    assert "logSettings" not in find(content, "Copy")["typeProperties"]
-    assert any(m.source == "typeProperties.logSettings" and not m.preserved for m in a.property_mappings)
+    log = find(content, "Copy")["typeProperties"]["logSettings"]
+    assert log["enableCopyActivityLog"] is True and log["copyActivityLogSettings"] == {"logLevel": "Warning", "enableReliableLogging": False}
+    assert log["logLocationSettings"]["path"] == "logs/copy" and "linkedServiceName" not in log["logLocationSettings"]
+    assert log["logLocationSettings"]["externalReferences"]["connection"]  # the LS_LAKE connection (a token until bound)
+    assert "copy_logging_reconfigure" not in codes(a)
+
+
+def test_copy_incompatible_row_redirection_is_reported_not_silently_dropped():
+    """Its Fabric shape is not documented anywhere (2026-11-17), so it stays a manual step."""
+    c = copy_activity(redirectIncompatibleRowSettings={"linkedServiceName": ref("LinkedService", "LS_LAKE"), "path": "bad"})
+    _, content, a = one(c, **ESTATE)
+    assert "redirectIncompatibleRowSettings" not in find(content, "Copy")["typeProperties"]
     assert a.status is S.manual_required and "copy_logging_reconfigure" in codes(a)
-    assert any("logSettings" in s for s in a.manual_steps)
 
 
 def test_copy_diu_below_the_documented_minimum_is_flagged():
@@ -260,6 +271,23 @@ def test_validation_minimum_size_and_child_items_carry_documented_differences():
     assert "greaterOrEquals(activity('V_check').output.size, 1024)" in expression
     assert "greater(length(activity('V_check').output.childItems), 0)" in expression
     assert a.status is S.converted_with_differences and a.limitations
+
+
+@pytest.mark.parametrize("size,expected", [
+    (expr("@pipeline().parameters.minBytes"), "greaterOrEquals(activity('V_check').output.size, pipeline().parameters.minBytes)"),
+    (expr("@{pipeline().parameters.minBytes}"), "greaterOrEquals(activity('V_check').output.size, int(pipeline().parameters.minBytes))"),
+])
+def test_a_dynamic_minimum_size_is_converted_into_the_check_not_left_manual(size, expected):
+    v = act("V", "Validation", {"dataset": ref("Dataset", "DS_SQL"), "minimumSize": size})
+    _, content, a = one(v, **ESTATE)
+    assert expected in find(content, "V")["typeProperties"]["expression"]["value"]
+    assert a.status is not S.manual_required and not a.manual_steps or all("readiness check" not in m for m in a.manual_steps)
+
+
+def test_a_minimum_size_made_of_several_parts_stays_manual():
+    v = act("V", "Validation", {"dataset": ref("Dataset", "DS_SQL"), "minimumSize": expr("@{pipeline().parameters.a}@{pipeline().parameters.b}")})
+    _, _, a = one(v, **ESTATE)
+    assert any("Rewrite the readiness check" in m for m in a.manual_steps)
 
 
 # =============================================================================
@@ -810,16 +838,37 @@ def test_a_wrangling_data_flow_still_becomes_a_dataflow_gen2_refresh():
     assert find(content, "Wr")["type"] == "RefreshDataFlow" and find(content, "Wr")["typeProperties"]["dataflowId"] == "<item:dataflow:PQ1>"
 
 
-def test_ssis_and_usql_are_blocked_with_documented_alternatives():
-    ss = act("Ss", "ExecuteSSISPackage", {"packageLocation": {"type": "SSISDB"}})
+def test_ssis_and_usql_wait_for_their_translated_notebooks():
+    """A U-SQL script (agent/workloads/usql.py, 2026-11-17) and an SSIS package (agent/workloads/ssis.py, 2026-11-18) are translated to notebooks:
+    until a notebook is in the workspace the activity is a stand-in that names it."""
+    ss = act("Ss", "ExecuteSSISPackage", {"packageLocation": {"type": "File", "typeProperties": {"packagePath": "\\share\etl\orders.dtsx"}}})
     us = act("Us", "DataLakeAnalyticsU-SQL", {"scriptPath": "a.usql", "scriptLinkedService": ref("LinkedService", "S")},
              linkedServiceName=ref("LinkedService", "ADLA"))
     rec, content = convert_one(pipe(ss, us))
     r = by_name(rec)
-    assert r["Ss"].status is S.blocked and r["Ss"].runtime_disposition == "redesign"
-    assert any("Invoke pipeline" in x for x in r["Ss"].alternatives)
+    assert r["Ss"].status is S.blocked and r["Ss"].runtime_disposition == "replace" and "ssis_notebook_pending" in {i.code for i in r["Ss"].warnings}
+    assert "notebook:orders" in {q.name for q in rec.prerequisites if q.kind == "workspace_item"}
     assert r["Us"].status is S.blocked and any("notebook" in x.lower() for x in r["Us"].alternatives)
+    assert "usql_notebook_pending" in {i.code for i in r["Us"].warnings} and r["Us"].runtime_disposition == "replace"
+    assert "notebook:a" in {q.name for q in rec.prerequisites if q.kind == "workspace_item"}
     assert find(content, "Ss")["type"] == "Fail" and find(content, "Us")["type"] == "Fail"
+
+
+def test_usql_bound_to_its_deployed_notebook_converts_without_a_manual_step():
+    us = act("Us", "DataLakeAnalyticsU-SQL", {"scriptPath": "c/usql/sales.usql", "scriptLinkedService": ref("LinkedService", "S"),
+                                              "degreeOfParallelism": 1, "parameters": {"in": "/a.csv"}}, linkedServiceName=ref("LinkedService", "ADLA"))
+    rec, content = convert([pipe(us, name="PL")], resolutions=[{"type": "ItemToId", "key": "notebook:sales",
+                                                               "value": "99999999-0000-0000-0000-000000000009"}])["PL"]
+    r = by_name(rec)["Us"]
+    assert find(content, "Us")["type"] == "TridentNotebook" and find(content, "Us")["typeProperties"]["notebookId"] == "99999999-0000-0000-0000-000000000009"
+    assert r.status is S.converted_with_differences or r.status is S.converted
+    assert "operation_not_covered" not in {i.code for i in r.warnings} and not r.manual_steps
+
+
+def test_usql_with_a_computed_script_path_stays_a_redesign():
+    us = act("Us", "DataLakeAnalyticsU-SQL", {"scriptPath": expr("@pipeline().parameters.p"), "scriptLinkedService": ref("LinkedService", "S")})
+    rec, _ = convert_one(pipe(us, parameters=["p"]))
+    assert by_name(rec)["Us"].runtime_disposition == "redesign" and "usql_retired" in {i.code for i in by_name(rec)["Us"].warnings}
 
 
 def test_unknown_activity_type_is_blocked_not_dropped():

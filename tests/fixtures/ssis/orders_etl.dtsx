@@ -1,0 +1,210 @@
+<?xml version="1.0"?>
+<DTS:Executable xmlns:DTS="www.microsoft.com/SqlServer/Dts" DTS:refId="Package" DTS:CreationName="Microsoft.Package" DTS:DTSID="{3D6C1A52-7A4B-4C11-9E2B-1F0A5C7B2D01}" DTS:ExecutableType="Microsoft.Package" DTS:LocaleID="1033" DTS:ObjectName="OrdersEtl" DTS:PackageType="5" DTS:VersionBuild="1">
+  <DTS:Property DTS:Name="PackageFormatVersion">8</DTS:Property>
+  <DTS:ConnectionManagers>
+    <DTS:ConnectionManager DTS:refId="Package.ConnectionManagers[Orders.csv]" DTS:CreationName="FLATFILE" DTS:DTSID="{A1000000-0000-4000-8000-000000000001}" DTS:ObjectName="Orders.csv">
+      <DTS:ObjectData>
+        <DTS:ConnectionManager DTS:Format="Delimited" DTS:LocaleID="1033" DTS:HeaderRowDelimiter="_x000D__x000A_" DTS:ColumnNamesInFirstDataRow="True" DTS:RowDelimiter="" DTS:TextQualifier="_x003C_none_x003E_" DTS:CodePage="65001" DTS:ConnectionString="C:\data\ssis\orders.csv">
+          <DTS:FlatFileColumns>
+          <DTS:FlatFileColumn DTS:ColumnType="Delimited" DTS:ColumnDelimiter="," DTS:DataType="3" DTS:TextQualified="True"  DTS:ObjectName="OrderId" DTS:DTSID="{06191525-0000-4000-8000-000000000000}" DTS:CreationName="" />
+          <DTS:FlatFileColumn DTS:ColumnType="Delimited" DTS:ColumnDelimiter="," DTS:DataType="130" DTS:TextQualified="True" DTS:MaximumWidth="20" DTS:ObjectName="Region" DTS:DTSID="{65943157-0000-4000-8000-000000000000}" DTS:CreationName="" />
+          <DTS:FlatFileColumn DTS:ColumnType="Delimited" DTS:ColumnDelimiter="," DTS:DataType="130" DTS:TextQualified="True" DTS:MaximumWidth="30" DTS:ObjectName="Product" DTS:DTSID="{42753823-0000-4000-8000-000000000000}" DTS:CreationName="" />
+          <DTS:FlatFileColumn DTS:ColumnType="Delimited" DTS:ColumnDelimiter="," DTS:DataType="3" DTS:TextQualified="True"  DTS:ObjectName="Quantity" DTS:DTSID="{68152111-0000-4000-8000-000000000000}" DTS:CreationName="" />
+          <DTS:FlatFileColumn DTS:ColumnType="Delimited" DTS:ColumnDelimiter="_x000D__x000A_" DTS:DataType="5" DTS:TextQualified="True"  DTS:ObjectName="UnitPrice" DTS:DTSID="{49967198-0000-4000-8000-000000000000}" DTS:CreationName="" />
+          </DTS:FlatFileColumns>
+        </DTS:ConnectionManager>
+      </DTS:ObjectData>
+    </DTS:ConnectionManager>
+    <DTS:ConnectionManager DTS:refId="Package.ConnectionManagers[Big.csv]" DTS:CreationName="FLATFILE" DTS:DTSID="{A1000000-0000-4000-8000-000000000002}" DTS:ObjectName="Big.csv">
+      <DTS:ObjectData>
+        <DTS:ConnectionManager DTS:Format="Delimited" DTS:LocaleID="1033" DTS:HeaderRowDelimiter="_x000D__x000A_" DTS:ColumnNamesInFirstDataRow="True" DTS:RowDelimiter="" DTS:TextQualifier="_x003C_none_x003E_" DTS:CodePage="65001" DTS:ConnectionString="C:\data\ssis\out\big.csv">
+          <DTS:FlatFileColumns>
+          <DTS:FlatFileColumn DTS:ColumnType="Delimited" DTS:ColumnDelimiter="," DTS:DataType="130" DTS:TextQualified="True" DTS:MaximumWidth="20" DTS:ObjectName="Region" DTS:DTSID="{19653269-0000-4000-8000-000000000000}" DTS:CreationName="" />
+          <DTS:FlatFileColumn DTS:ColumnType="Delimited" DTS:ColumnDelimiter="," DTS:DataType="5" DTS:TextQualified="True"  DTS:ObjectName="BigTotal" DTS:DTSID="{65300227-0000-4000-8000-000000000000}" DTS:CreationName="" />
+          <DTS:FlatFileColumn DTS:ColumnType="Delimited" DTS:ColumnDelimiter="_x000D__x000A_" DTS:DataType="20" DTS:TextQualified="True"  DTS:ObjectName="Orders" DTS:DTSID="{70445088-0000-4000-8000-000000000000}" DTS:CreationName="" />
+          </DTS:FlatFileColumns>
+        </DTS:ConnectionManager>
+      </DTS:ObjectData>
+    </DTS:ConnectionManager>
+    <DTS:ConnectionManager DTS:refId="Package.ConnectionManagers[Small.csv]" DTS:CreationName="FLATFILE" DTS:DTSID="{A1000000-0000-4000-8000-000000000003}" DTS:ObjectName="Small.csv">
+      <DTS:ObjectData>
+        <DTS:ConnectionManager DTS:Format="Delimited" DTS:LocaleID="1033" DTS:HeaderRowDelimiter="_x000D__x000A_" DTS:ColumnNamesInFirstDataRow="True" DTS:RowDelimiter="" DTS:TextQualifier="_x003C_none_x003E_" DTS:CodePage="65001" DTS:ConnectionString="C:\data\ssis\out\small.csv">
+          <DTS:FlatFileColumns>
+          <DTS:FlatFileColumn DTS:ColumnType="Delimited" DTS:ColumnDelimiter="," DTS:DataType="3" DTS:TextQualified="True"  DTS:ObjectName="OrderId" DTS:DTSID="{50793887-0000-4000-8000-000000000000}" DTS:CreationName="" />
+          <DTS:FlatFileColumn DTS:ColumnType="Delimited" DTS:ColumnDelimiter="," DTS:DataType="130" DTS:TextQualified="True" DTS:MaximumWidth="20" DTS:ObjectName="RegionUpper" DTS:DTSID="{57307551-0000-4000-8000-000000000000}" DTS:CreationName="" />
+          <DTS:FlatFileColumn DTS:ColumnType="Delimited" DTS:ColumnDelimiter="," DTS:DataType="130" DTS:TextQualified="True" DTS:MaximumWidth="30" DTS:ObjectName="Product" DTS:DTSID="{47724288-0000-4000-8000-000000000000}" DTS:CreationName="" />
+          <DTS:FlatFileColumn DTS:ColumnType="Delimited" DTS:ColumnDelimiter="_x000D__x000A_" DTS:DataType="5" DTS:TextQualified="True"  DTS:ObjectName="Total" DTS:DTSID="{22209837-0000-4000-8000-000000000000}" DTS:CreationName="" />
+          </DTS:FlatFileColumns>
+        </DTS:ConnectionManager>
+      </DTS:ObjectData>
+    </DTS:ConnectionManager>
+  </DTS:ConnectionManagers>
+  <DTS:Variables>
+    <DTS:Variable DTS:Namespace="User" DTS:ObjectName="Threshold" DTS:DTSID="{B2000000-0000-4000-8000-000000000001}" DTS:CreationName="">
+      <DTS:VariableValue DTS:DataType="3">100</DTS:VariableValue>
+    </DTS:Variable>
+  </DTS:Variables>
+  <DTS:Executables>
+    <DTS:Executable DTS:refId="Package\Process orders" DTS:CreationName="Microsoft.Pipeline" DTS:DTSID="{C3000000-0000-4000-8000-000000000001}" DTS:ExecutableType="Microsoft.Pipeline" DTS:ObjectName="Process orders">
+      <DTS:ObjectData>
+        <pipeline version="1">
+          <components>
+        <component refId="Package\Process orders\Orders" componentClassID="Microsoft.FlatFileSource" contactInfo="Flat File Source;Microsoft Corporation; Microsoft SQL Server; (C) Microsoft Corporation; All Rights Reserved; http://www.microsoft.com/sql/support;1" name="Orders" version="1">
+          <properties>
+            <property dataType="System.String" name="RetainNulls">false</property>
+          </properties>
+          <connections>
+            <connection refId="Package\Process orders\Orders.Connections[FlatFileConnection]" connectionManagerID="Package.ConnectionManagers[Orders.csv]" connectionManagerRefId="Package.ConnectionManagers[Orders.csv]" name="FlatFileConnection" />
+          </connections>
+          <outputs>
+            <output refId="Package\Process orders\Orders.Outputs[Flat File Source Output]" name="Flat File Source Output">
+          <outputColumns>
+            <outputColumn refId="Package\Process orders\Orders.Outputs[Flat File Source Output].Columns[OrderId]" dataType="i4" lineageId="Package\Process orders\Orders.Outputs[Flat File Source Output].Columns[OrderId]" name="OrderId"></outputColumn>
+            <outputColumn refId="Package\Process orders\Orders.Outputs[Flat File Source Output].Columns[Region]" dataType="wstr" lineageId="Package\Process orders\Orders.Outputs[Flat File Source Output].Columns[Region]" name="Region"></outputColumn>
+            <outputColumn refId="Package\Process orders\Orders.Outputs[Flat File Source Output].Columns[Product]" dataType="wstr" lineageId="Package\Process orders\Orders.Outputs[Flat File Source Output].Columns[Product]" name="Product"></outputColumn>
+            <outputColumn refId="Package\Process orders\Orders.Outputs[Flat File Source Output].Columns[Quantity]" dataType="i4" lineageId="Package\Process orders\Orders.Outputs[Flat File Source Output].Columns[Quantity]" name="Quantity"></outputColumn>
+            <outputColumn refId="Package\Process orders\Orders.Outputs[Flat File Source Output].Columns[UnitPrice]" dataType="r8" lineageId="Package\Process orders\Orders.Outputs[Flat File Source Output].Columns[UnitPrice]" name="UnitPrice"></outputColumn>
+          </outputColumns>
+            </output>
+            <output refId="Package\Process orders\Orders.Outputs[Flat File Source Error Output]" isErrorOut="true" name="Flat File Source Error Output" />
+          </outputs>
+        </component>
+        <component refId="Package\Process orders\Add total" componentClassID="Microsoft.DerivedColumn" contactInfo="Derived Column;Microsoft Corporation; Microsoft SQL Server; (C) Microsoft Corporation; All Rights Reserved; http://www.microsoft.com/sql/support;1" name="Add total" version="1">
+          <inputs>
+            <input refId="Package\Process orders\Add total.Inputs[Derived Column Input]" name="Derived Column Input">
+          <inputColumns>
+            <inputColumn refId="Package\Process orders\Add total.Inputs[Derived Column Input].Columns[OrderId]" cachedName="OrderId" lineageId="Package\Process orders\x.Outputs[x].Columns[OrderId]"></inputColumn>
+            <inputColumn refId="Package\Process orders\Add total.Inputs[Derived Column Input].Columns[Region]" cachedName="Region" lineageId="Package\Process orders\x.Outputs[x].Columns[Region]"></inputColumn>
+            <inputColumn refId="Package\Process orders\Add total.Inputs[Derived Column Input].Columns[Product]" cachedName="Product" lineageId="Package\Process orders\x.Outputs[x].Columns[Product]"></inputColumn>
+            <inputColumn refId="Package\Process orders\Add total.Inputs[Derived Column Input].Columns[Quantity]" cachedName="Quantity" lineageId="Package\Process orders\x.Outputs[x].Columns[Quantity]"></inputColumn>
+            <inputColumn refId="Package\Process orders\Add total.Inputs[Derived Column Input].Columns[UnitPrice]" cachedName="UnitPrice" lineageId="Package\Process orders\x.Outputs[x].Columns[UnitPrice]"></inputColumn>
+          </inputColumns>
+            </input>
+          </inputs>
+          <outputs>
+            <output refId="Package\Process orders\Add total.Outputs[Derived Column Output]" name="Derived Column Output" exclusionGroup="1" synchronousInputId="Package\Process orders\Add total.Inputs[Derived Column Input]">
+          <outputColumns>
+            <outputColumn refId="Package\Process orders\Add total.Outputs[Derived Column Output].Columns[Total]" dataType="r8" lineageId="Package\Process orders\Add total.Outputs[Derived Column Output].Columns[Total]" name="Total"><properties><property dataType="System.String" name="Expression">(DT_R8)(#{Package\Process orders\x.Outputs[x]}[Quantity] * #{Package\Process orders\x.Outputs[x]}[UnitPrice])</property><property dataType="System.String" name="FriendlyExpression">(DT_R8)(Quantity * UnitPrice)</property></properties></outputColumn>
+            <outputColumn refId="Package\Process orders\Add total.Outputs[Derived Column Output].Columns[RegionUpper]" dataType="wstr" lineageId="Package\Process orders\Add total.Outputs[Derived Column Output].Columns[RegionUpper]" name="RegionUpper"><properties><property dataType="System.String" name="Expression">UPPER(#{Package\Process orders\x.Outputs[x]}[Region])</property><property dataType="System.String" name="FriendlyExpression">UPPER(Region)</property></properties></outputColumn>
+          </outputColumns>
+            </output>
+          </outputs>
+        </component>
+        <component refId="Package\Process orders\Split by size" componentClassID="Microsoft.ConditionalSplit" contactInfo="Conditional Split;Microsoft Corporation; Microsoft SQL Server; (C) Microsoft Corporation; All Rights Reserved; http://www.microsoft.com/sql/support;1" name="Split by size" version="1">
+          <inputs>
+            <input refId="Package\Process orders\Split by size.Inputs[Conditional Split Input]" name="Conditional Split Input">
+          <inputColumns>
+            <inputColumn refId="Package\Process orders\Split by size.Inputs[Conditional Split Input].Columns[OrderId]" cachedName="OrderId" lineageId="Package\Process orders\x.Outputs[x].Columns[OrderId]"></inputColumn>
+            <inputColumn refId="Package\Process orders\Split by size.Inputs[Conditional Split Input].Columns[Region]" cachedName="Region" lineageId="Package\Process orders\x.Outputs[x].Columns[Region]"></inputColumn>
+            <inputColumn refId="Package\Process orders\Split by size.Inputs[Conditional Split Input].Columns[Product]" cachedName="Product" lineageId="Package\Process orders\x.Outputs[x].Columns[Product]"></inputColumn>
+            <inputColumn refId="Package\Process orders\Split by size.Inputs[Conditional Split Input].Columns[Quantity]" cachedName="Quantity" lineageId="Package\Process orders\x.Outputs[x].Columns[Quantity]"></inputColumn>
+            <inputColumn refId="Package\Process orders\Split by size.Inputs[Conditional Split Input].Columns[UnitPrice]" cachedName="UnitPrice" lineageId="Package\Process orders\x.Outputs[x].Columns[UnitPrice]"></inputColumn>
+            <inputColumn refId="Package\Process orders\Split by size.Inputs[Conditional Split Input].Columns[Total]" cachedName="Total" lineageId="Package\Process orders\x.Outputs[x].Columns[Total]"></inputColumn>
+            <inputColumn refId="Package\Process orders\Split by size.Inputs[Conditional Split Input].Columns[RegionUpper]" cachedName="RegionUpper" lineageId="Package\Process orders\x.Outputs[x].Columns[RegionUpper]"></inputColumn>
+          </inputColumns>
+            </input>
+          </inputs>
+          <outputs>
+            <output refId="Package\Process orders\Split by size.Outputs[Big]" name="Big" exclusionGroup="1" synchronousInputId="x">
+              <properties>
+                <property name="Expression">#{Package\Process orders\x.Outputs[x]}[Total] &gt;= @[User::Threshold]</property>
+                <property name="FriendlyExpression">Total &gt;= @[User::Threshold]</property>
+                <property name="EvaluationOrder">0</property>
+              </properties>
+            </output>
+            <output refId="Package\Process orders\Split by size.Outputs[Conditional Split Default Output]" name="Conditional Split Default Output" exclusionGroup="1" synchronousInputId="x">
+              <properties>
+                <property name="IsDefaultOut">true</property>
+              </properties>
+            </output>
+            <output refId="Package\Process orders\Split by size.Outputs[Conditional Split Error Output]" name="Conditional Split Error Output" isErrorOut="true" exclusionGroup="1" synchronousInputId="x" />
+          </outputs>
+        </component>
+        <component refId="Package\Process orders\Totals by region" componentClassID="Microsoft.Aggregate" contactInfo="Aggregate;Microsoft Corporation; Microsoft SQL Server; (C) Microsoft Corporation; All Rights Reserved; http://www.microsoft.com/sql/support;1" name="Totals by region" version="1">
+          <properties>
+            <property dataType="System.String" name="KeyScale">0</property>
+          </properties>
+          <inputs>
+            <input refId="Package\Process orders\Totals by region.Inputs[Aggregate Input 1]" name="Aggregate Input 1">
+          <inputColumns>
+            <inputColumn refId="Package\Process orders\Totals by region.Inputs[Aggregate Input 1].Columns[Region]" cachedName="Region" lineageId="Package\Process orders\x.Outputs[x].Columns[Region]"></inputColumn>
+            <inputColumn refId="Package\Process orders\Totals by region.Inputs[Aggregate Input 1].Columns[Total]" cachedName="Total" lineageId="Package\Process orders\x.Outputs[x].Columns[Total]"></inputColumn>
+          </inputColumns>
+            </input>
+          </inputs>
+          <outputs>
+            <output refId="Package\Process orders\Totals by region.Outputs[Aggregate Output 1]" name="Aggregate Output 1">
+          <outputColumns>
+            <outputColumn refId="Package\Process orders\Totals by region.Outputs[Aggregate Output 1].Columns[Region]" dataType="wstr" lineageId="Package\Process orders\Totals by region.Outputs[Aggregate Output 1].Columns[Region]" name="Region"><properties><property dataType="System.String" name="AggregationColumnId">#{Package\Process orders\x.Outputs[x]}.Columns[Region]</property><property dataType="System.String" name="AggregationType">0</property></properties></outputColumn>
+            <outputColumn refId="Package\Process orders\Totals by region.Outputs[Aggregate Output 1].Columns[BigTotal]" dataType="r8" lineageId="Package\Process orders\Totals by region.Outputs[Aggregate Output 1].Columns[BigTotal]" name="BigTotal"><properties><property dataType="System.String" name="AggregationColumnId">#{Package\Process orders\x.Outputs[x]}.Columns[Total]</property><property dataType="System.String" name="AggregationType">4</property></properties></outputColumn>
+            <outputColumn refId="Package\Process orders\Totals by region.Outputs[Aggregate Output 1].Columns[Orders]" dataType="ui8" lineageId="Package\Process orders\Totals by region.Outputs[Aggregate Output 1].Columns[Orders]" name="Orders"><properties><property dataType="System.String" name="AggregationColumnId">#{Package\Process orders\x.Outputs[x]}.Columns[Region]</property><property dataType="System.String" name="AggregationType">2</property></properties></outputColumn>
+          </outputColumns>
+            </output>
+          </outputs>
+        </component>
+        <component refId="Package\Process orders\Order regions" componentClassID="Microsoft.Sort" contactInfo="Sort;Microsoft Corporation; Microsoft SQL Server; (C) Microsoft Corporation; All Rights Reserved; http://www.microsoft.com/sql/support;1" name="Order regions" version="1">
+          <properties>
+            <property dataType="System.String" name="EliminateDuplicates">false</property>
+          </properties>
+          <inputs>
+            <input refId="Package\Process orders\Order regions.Inputs[Sort Input]" name="Sort Input">
+          <inputColumns>
+            <inputColumn refId="Package\Process orders\Order regions.Inputs[Sort Input].Columns[Region]" cachedName="Region" lineageId="Package\Process orders\x.Outputs[x].Columns[Region]"><properties><property dataType="System.Int32" name="NewSortKeyPosition">2</property></properties></inputColumn>
+            <inputColumn refId="Package\Process orders\Order regions.Inputs[Sort Input].Columns[BigTotal]" cachedName="BigTotal" lineageId="Package\Process orders\x.Outputs[x].Columns[BigTotal]"><properties><property dataType="System.Int32" name="NewSortKeyPosition">-1</property></properties></inputColumn>
+            <inputColumn refId="Package\Process orders\Order regions.Inputs[Sort Input].Columns[Orders]" cachedName="Orders" lineageId="Package\Process orders\x.Outputs[x].Columns[Orders]"></inputColumn>
+          </inputColumns>
+            </input>
+          </inputs>
+          <outputs>
+            <output refId="Package\Process orders\Order regions.Outputs[Sort Output]" name="Sort Output" />
+          </outputs>
+        </component>
+        <component refId="Package\Process orders\Big file" componentClassID="Microsoft.FlatFileDestination" contactInfo="Flat File Destination;Microsoft Corporation; Microsoft SQL Server; (C) Microsoft Corporation; All Rights Reserved; http://www.microsoft.com/sql/support;1" name="Big file" version="1">
+          <properties>
+            <property dataType="System.String" name="Overwrite">true</property>
+          </properties>
+          <connections>
+            <connection refId="Package\Process orders\Big file.Connections[FlatFileConnection]" connectionManagerID="Package.ConnectionManagers[Big.csv]" connectionManagerRefId="Package.ConnectionManagers[Big.csv]" name="FlatFileConnection" />
+          </connections>
+          <inputs>
+            <input refId="Package\Process orders\Big file.Inputs[Flat File Destination Input]" name="Flat File Destination Input">
+          <inputColumns>
+            <inputColumn refId="Package\Process orders\Big file.Inputs[Flat File Destination Input].Columns[Region]" cachedName="Region" externalMetadataColumnId="Package\Process orders\Big file.Inputs[Flat File Destination Input].ExternalColumns[Region]" lineageId="Package\Process orders\x.Outputs[x].Columns[Region]" />
+            <inputColumn refId="Package\Process orders\Big file.Inputs[Flat File Destination Input].Columns[BigTotal]" cachedName="BigTotal" externalMetadataColumnId="Package\Process orders\Big file.Inputs[Flat File Destination Input].ExternalColumns[BigTotal]" lineageId="Package\Process orders\x.Outputs[x].Columns[BigTotal]" />
+            <inputColumn refId="Package\Process orders\Big file.Inputs[Flat File Destination Input].Columns[Orders]" cachedName="Orders" externalMetadataColumnId="Package\Process orders\Big file.Inputs[Flat File Destination Input].ExternalColumns[Orders]" lineageId="Package\Process orders\x.Outputs[x].Columns[Orders]" />
+          </inputColumns>
+            </input>
+          </inputs>
+        </component>
+        <component refId="Package\Process orders\Small file" componentClassID="Microsoft.FlatFileDestination" contactInfo="Flat File Destination;Microsoft Corporation; Microsoft SQL Server; (C) Microsoft Corporation; All Rights Reserved; http://www.microsoft.com/sql/support;1" name="Small file" version="1">
+          <properties>
+            <property dataType="System.String" name="Overwrite">true</property>
+          </properties>
+          <connections>
+            <connection refId="Package\Process orders\Small file.Connections[FlatFileConnection]" connectionManagerID="Package.ConnectionManagers[Small.csv]" connectionManagerRefId="Package.ConnectionManagers[Small.csv]" name="FlatFileConnection" />
+          </connections>
+          <inputs>
+            <input refId="Package\Process orders\Small file.Inputs[Flat File Destination Input]" name="Flat File Destination Input">
+          <inputColumns>
+            <inputColumn refId="Package\Process orders\Small file.Inputs[Flat File Destination Input].Columns[OrderId]" cachedName="OrderId" externalMetadataColumnId="Package\Process orders\Small file.Inputs[Flat File Destination Input].ExternalColumns[OrderId]" lineageId="Package\Process orders\x.Outputs[x].Columns[OrderId]" />
+            <inputColumn refId="Package\Process orders\Small file.Inputs[Flat File Destination Input].Columns[RegionUpper]" cachedName="RegionUpper" externalMetadataColumnId="Package\Process orders\Small file.Inputs[Flat File Destination Input].ExternalColumns[RegionUpper]" lineageId="Package\Process orders\x.Outputs[x].Columns[RegionUpper]" />
+            <inputColumn refId="Package\Process orders\Small file.Inputs[Flat File Destination Input].Columns[Product]" cachedName="Product" externalMetadataColumnId="Package\Process orders\Small file.Inputs[Flat File Destination Input].ExternalColumns[Product]" lineageId="Package\Process orders\x.Outputs[x].Columns[Product]" />
+            <inputColumn refId="Package\Process orders\Small file.Inputs[Flat File Destination Input].Columns[Total]" cachedName="Total" externalMetadataColumnId="Package\Process orders\Small file.Inputs[Flat File Destination Input].ExternalColumns[Total]" lineageId="Package\Process orders\x.Outputs[x].Columns[Total]" />
+          </inputColumns>
+            </input>
+          </inputs>
+        </component>
+          </components>
+          <paths>
+          <path refId="Package\Process orders.Paths[p1]" name="p1" startId="Package\Process orders\Orders.Outputs[Flat File Source Output]" endId="Package\Process orders\Add total.Inputs[Derived Column Input]" />
+          <path refId="Package\Process orders.Paths[p2]" name="p2" startId="Package\Process orders\Add total.Outputs[Derived Column Output]" endId="Package\Process orders\Split by size.Inputs[Conditional Split Input]" />
+          <path refId="Package\Process orders.Paths[p3]" name="p3" startId="Package\Process orders\Split by size.Outputs[Big]" endId="Package\Process orders\Totals by region.Inputs[Aggregate Input 1]" />
+          <path refId="Package\Process orders.Paths[p4]" name="p4" startId="Package\Process orders\Totals by region.Outputs[Aggregate Output 1]" endId="Package\Process orders\Order regions.Inputs[Sort Input]" />
+          <path refId="Package\Process orders.Paths[p5]" name="p5" startId="Package\Process orders\Order regions.Outputs[Sort Output]" endId="Package\Process orders\Big file.Inputs[Flat File Destination Input]" />
+          <path refId="Package\Process orders.Paths[p6]" name="p6" startId="Package\Process orders\Split by size.Outputs[Conditional Split Default Output]" endId="Package\Process orders\Small file.Inputs[Flat File Destination Input]" />
+          </paths>
+        </pipeline>
+      </DTS:ObjectData>
+    </DTS:Executable>
+  </DTS:Executables>
+</DTS:Executable>

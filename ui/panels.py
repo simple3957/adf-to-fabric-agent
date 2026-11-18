@@ -108,6 +108,13 @@ def _editor(api: ApiClient, pid: str, card: dict, known: dict[str, str], sibling
     st.caption(f"{card.get('adf_type') or '?'} → {card.get('connector_label') or 'no matching Fabric connector'}"
                f"{' (' + card['fabric_connection_type'] + ')' if card.get('fabric_connection_type') else ''}"
                f" · authored auth: {card.get('authentication_type') or '-'}")
+    if card["state"] == "not_needed":  # what replaced its activities is made by the tool: nothing to set up, nothing to ask
+        st.success(" ".join(card.get("next_steps") or ["No converted activity uses it, so no Fabric connection is needed."]))
+        return
+    if card.get("planned"):  # the tool decided by itself (a matching connection, or ADF's own sign-in); Create in Fabric carries it out
+        st.success(f"**The tool does this:** {card['planned']} Press **Create in Fabric** below; nothing to fill in.")
+        if not st.toggle("Choose differently", key=f"diff-{name}"):
+            return
     if not card.get("supported"):
         # one message: the card's own missing/warning/next-step lines say the same thing for a type with no connector
         st.warning("No automatic Fabric connector for this type. Create the connection in Fabric, then choose "
@@ -252,6 +259,22 @@ def _editor(api: ApiClient, pid: str, card: dict, known: dict[str, str], sibling
             st.dataframe(card["used_by_activities"], hide_index=True)
 
 
+def _what_happens(card: dict) -> str:
+    """One line for the table: what the tool does for this linked service, or what it needs from the person."""
+    if card["state"] == "not_needed":
+        return "Nothing to set up: " + (card.get("next_steps") or [""])[0].removeprefix("No Fabric connection is needed: ")
+    if card.get("planned"):
+        return card["planned"]
+    choice = card.get("choice") or {}
+    if choice.get("method") == "skip":
+        return "Skipped by choice"
+    if card["state"] in ("connection_configured", "connection_tested"):
+        cid = (choice.get("values") or {}).get("connection_id")
+        named = next((m.get("display_name") for m in card.get("existing_matches", []) if cid and m.get("id") == cid), None)
+        return f"Uses the Fabric connection '{named}'" if named else "Set: " + (choice.get("method") or "").replace("_", " ")
+    return "Needs you: choose how Fabric signs in (select the row)"
+
+
 def _apply_table(res: dict) -> None:
     made = sum(1 for i in res.get("items", []) if i.get("action") == "created")
     bound = sum(1 for i in res.get("items", []) if i.get("bound"))
@@ -290,8 +313,13 @@ def connect(api: ApiClient, pid: str, cards: list[dict] | None, workspace_id: st
                 "Use a service principal or a key (or Key Vault) below.")
     ready = sum(1 for c in cards if c["state"] in READY)
     problems = sum(1 for c in cards if c["state"] in PROBLEM)
-    st.markdown(f"**{len(cards)} linked services** · {ready} ready" + (f" · {problems} need attention" if problems else "")
-                + f" · {len(cards) - ready - problems} to do")
+    unused = sum(1 for c in cards if c["state"] == "not_needed")
+    auto = sum(1 for c in cards if c.get("planned"))
+    st.markdown(f"**{len(cards)} linked services** · {len(cards) - unused} need a Fabric connection"
+                + (f" · {unused} not needed (the tool creates what replaced them)" if unused else "")
+                + (f" · {auto} set up by the tool" if auto else "")
+                + (f" · {problems} need attention" if problems else "")
+                + (f" · {len(cards) - ready - problems} need you" if len(cards) - ready - problems else ""))
     # Existing Fabric connections seen on any card, keyed by Fabric connection type so a storage linked service is never
     # offered a SQL connection (and vice versa).
     known: dict[str, dict[str, str]] = {}
@@ -299,15 +327,18 @@ def connect(api: ApiClient, pid: str, cards: list[dict] | None, workspace_id: st
         for m in c.get("existing_matches", []):
             known.setdefault(c.get("fabric_connection_type") or "?", {})[m["display_name"]] = m["id"]
 
-    rows = [{"Linked service": c["name"], "Fabric connector": c.get("connector_label") or "none", "Status": state_text(c)} for c in cards]
+    rows = [{"Linked service": c["name"], "Fabric connector": c.get("connector_label") or "none", "Status": state_text(c),
+             "What happens": _what_happens(c)} for c in cards]
     event = st.dataframe(rows, hide_index=True, on_select="rerun", selection_mode="single-row", key="conn-table", width="stretch",
-                         column_config={"Linked service": st.column_config.TextColumn(width="large"),
+                         column_config={"Linked service": st.column_config.TextColumn(width="medium"),
                                         "Fabric connector": st.column_config.TextColumn(width="medium"),
-                                        "Status": st.column_config.TextColumn(width="medium")})
+                                        "Status": st.column_config.TextColumn(width="small"),
+                                        "What happens": st.column_config.TextColumn(width="large")})
     picked = event.selection.rows
     todo = [i for i, c in enumerate(cards) if c["state"] not in READY]
     first_open = next((i for i in todo if cards[i]["state"] != "manual_action_required"), todo[0] if todo else None)  # start where something can be done
-    card = cards[picked[0] if picked else (first_open or 0)]
+    needed = next((i for i, c in enumerate(cards) if c["state"] != "not_needed"), 0)  # open on one that matters, not on a "not needed" one
+    card = cards[picked[0] if picked else (first_open if first_open is not None else needed)]
     if not picked:
         st.caption("Showing the first one still to do. Select a row above to set up another." if first_open is not None
                    else "Every linked service is set. Select a row above to change one.")
@@ -321,11 +352,7 @@ def connect(api: ApiClient, pid: str, cards: list[dict] | None, workspace_id: st
     if not workspace_id:
         st.warning("Connect a Fabric workspace on the **Connections** page first.")
     names = st.session_state.get("apply-names", [])
-    matching = [c["name"] for c in cards if c.get("existing_matches") and c["state"] not in READY]
-    if matching:
-        st.info(f"{len(matching)} linked service(s) match a connection that already exists in Fabric: {', '.join(matching[:4])}{' …' if len(matching) > 4 else ''}. "
-                "Preview below binds them without creating anything.")
-    auto = st.checkbox("Reuse matching connections that already exist in Fabric", value=True, key="apply-auto")
+    auto = True  # the tool's own decisions (a matching connection, ADF's own sign-in) are what Create in Fabric carries out
     sig = (tuple(sorted(names)), auto, workspace_id)
     prev = st.session_state.get("apply_preview")
     valid = bool(prev and prev["sig"] == sig)
@@ -371,6 +398,25 @@ def connect(api: ApiClient, pid: str, cards: list[dict] | None, workspace_id: st
             st.markdown(st.session_state.conn_report)
 
 
+def convert_verdict(result: dict) -> tuple[str, str]:
+    """One plain sentence for a conversion, from its counts: 'partial' was shown whenever any activity had a difference to check, which read as
+    'not everything is converted' although nothing was blocked or left manual (changed 2026-11-18)."""
+    counts = result.get("status_counts") or {}
+    pipes = result.get("pipelines") or []
+    blocked, manual, failed = counts.get("blocked", 0), counts.get("manual_required", 0), counts.get("failed", 0)
+    diff = counts.get("converted_with_differences", 0)
+    total = sum(counts.values())
+    invalid = [p["name"] for p in pipes if not p.get("structurally_valid")]
+    if not total:
+        return "Nothing was converted", "warning"
+    if not (blocked or manual or failed or invalid):
+        return (f"Everything is converted: {len(pipes)} pipeline(s), {total} activities"
+                + (f"; {diff} activit{'y has' if diff == 1 else 'ies have'} differences to check" if diff else ""), "success")
+    left = ", ".join(x for x in (f"{blocked} blocked" if blocked else "", f"{manual} need manual work" if manual else "",
+                                 f"{failed} failed" if failed else "", f"{len(invalid)} pipeline(s) not valid" if invalid else "") if x)
+    return f"Not everything is converted: {left} (of {total} activities)", "warning"
+
+
 # ---- 3. convert -----------------------------------------------------------------------------------------------------------
 def convert(api: ApiClient, pid: str, result: dict | None) -> None:
     st.caption("'Converted' is not the same as 'ready to run': a pipeline is ready only when all its connections are bound. "
@@ -411,7 +457,9 @@ def convert(api: ApiClient, pid: str, result: dict | None) -> None:
     if not result:
         panels_assist.section(api, pid)
         return
-    st.markdown(f"Overall: {status_badge(result.get('status'))} · connection bindings "
+    verdict, kind = convert_verdict(result)
+    st.markdown(theme.badge(verdict, kind), unsafe_allow_html=True)
+    st.markdown(f"Connection bindings "
                 f"{'used' if result.get('resolutions_used') else '**not applied yet**'} · "
                 f"{result.get('compatibility_findings', 0)} compatibility finding(s)")
     counts = result.get("status_counts") or {}
@@ -546,6 +594,7 @@ def deploy(api: ApiClient, pid: str, dest: dict, conversion: dict | None, result
     panels_results.results(api, pid, key="dep-res")
     _approvals(api, pid)
     _notebooks(api, pid)
+    _compare(api, pid)  # read-only: compare the latest runs (it sat inside the package section until 2026-11-17, so it was hidden until a package was built)
     _package(api, pid)
 
 
@@ -649,7 +698,6 @@ def _package(api: ApiClient, pid: str) -> None:
         st.caption("Set per target in parameter.yml: " + "; ".join(got["parameters"]))
     st.download_button("Download the package (ZIP)", base64.b64decode(got["zip"]), file_name=got["file_name"], mime="application/zip",
                        key="pkg-dl", type="primary")
-    _compare(api, pid)
 
 
 def _notebooks(api: ApiClient, pid: str) -> None:

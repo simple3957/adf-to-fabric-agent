@@ -118,7 +118,7 @@ def done_count(steps: list[StepStatus]) -> int:
 
 
 # ---- facts from API payloads ---------------------------------------------------------------------------------------------
-READY_STATES = {"connection_tested", "connection_configured", "skipped"}
+READY_STATES = {"connection_tested", "connection_configured", "skipped", "not_needed"}
 PROBLEM_STATES = {"manual_action_required", "validation_failed"}
 
 

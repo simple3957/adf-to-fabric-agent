@@ -10,7 +10,7 @@ authorised by the server (see [security.md](security.md)).
 | 1 | Discover | `discovery`, `semantic` stages | semantic record exists |
 | 2 | Review | `GET /inventory`, `/compatibility`; `dependencies`, `workloads` stages | the person has read the inventory |
 | 3 | Consult | `GET/PUT /brief`, submit, approve | the current answers are approved; the run follows the brief |
-| 4 | Connect | connection cards, tests, apply; `GET/PUT /pipeline-connection` (the Invoke pipeline connection, chosen from the tenant's FabricDataPipelines connections; apply sets it by itself when exactly one exists) | every linked service has a verdict |
+| 4 | Connect | connection cards (only linked services a converted activity still uses; the rest "Not needed", with what replaced them; a "What happens" column says what the tool does by itself), tests, apply; `GET/PUT /pipeline-connection` (the Invoke pipeline connection, chosen from the tenant's FabricDataPipelines connections; apply sets it by itself when exactly one exists) | every linked service has a verdict |
 | 5 | Plan target | `/provisioning` plan, approve, dry run, apply, verify | a current plan exists; apply only after approval and a dry run |
 | 6 | Convert | `convert` stage | pipelines generated |
 | 7 | Deploy | `deploy_dry_run`, `deploy_apply`; `GET /workloads/approvals`, `.../{ref}/code`, `POST /workloads/approve` (read and approve generated notebooks, Spark jobs and Environments as the signed-in person; Deploy creates only approved ones); `GET /package` (Fabric package ZIP, [fabric-package.md](fabric-package.md)) | dry run done; apply confirmed |
@@ -168,8 +168,9 @@ Checked against the API routes and the CLI on 2026-10-29. Everything the API exp
 
 ## No dead ends (found by running the real workflow, 2026-10-29)
 
-* **Connect**: a matching connection that already exists in Fabric is bound by *Preview / Create* with "reuse" ticked (the default), and the choice is
-  saved, so the card reads "ready" and the step can finish. The step opens on the first service that can be set up, not on an unsupported one.
+* **Connect**: a matching connection that already exists in Fabric is bound by *Preview / Create* (always: the "reuse" box was removed on
+  2026-11-17 because the tool's own decisions are what Create carries out), and the choice is saved, so the card reads "ready" and the
+  step can finish. A linked service no converted activity uses reads "Not needed" and asks nothing ([connections.md](connections.md)). The step opens on the first service that can be set up, not on an unsupported one.
 * **Plan target**: creating a Spark pool or environment is optional for pipelines, so unapplied items let the step be passed with a warning; real
   blockers still stop it.
 * **Deploy**: a dry run that refuses pipelines (an unbound connection) offers "Leave out the refused and dry-run the other N". A dry run on its own
@@ -200,3 +201,20 @@ dropdowns (`test_ui_validation_stages.py`), redaction (`test_api_views.py`), and
 ## Limits
 
 Provisioning has created a Spark pool and an environment live (workspace `Practise`, 2026-11-03, verified by reading them back). Its other writes (workspace creation, capacity assignment, role assignments, lakehouses, Azure capacity creation) were only ever exercised against the in-memory demo target (removed 2026-11-11), never a live tenant, so nothing tests them now.
+
+
+## Changes of 2026-11-18
+
+* **Convert says plainly what happened.** The line `Overall: partial` (shown whenever any activity had a difference to check) is replaced by one
+  sentence from the counts (`ui/panels.convert_verdict`): "Everything is converted: 16 pipeline(s), 63 activities; 3 activities have differences to
+  check", or "Not everything is converted: 1 blocked, 2 need manual work (of N activities)" (also when a pipeline is not structurally valid).
+* **Compare latest runs** (read-only: nothing is started) is on the Deploy step at all times; it sat inside the package section, hidden until a
+  package had been built.
+* **Review > Compute** *Read the code with my Azure sign-in* now covers U-SQL scripts and HDInsight Python files as well as Databricks notebooks
+  (workload-migration.md).
+* **Consult shows "Nothing saved"** when the facts a saved brief was agreed on changed (here: U-SQL stopped being an activity with no Fabric
+  equivalent, so that question no longer applies). The saved choices are not followed until they are saved again; one save on the Consult step.
+* **Review > Compute: Supply the file.** An SSIS package or U-SQL script the tool could not read (not in storage it can reach, no sign-in that can read it)
+  gets an uploader (`POST /projects/{id}/workloads/code`, permission `plans:generate`, audited as `workloads.code_supplied`, confirmed, a package must be a valid
+  `.dtsx`); the file is kept under `workloads/code/` and the next *Generate* translates it. Views name the workload by its short name only: the compute view
+  showed a Windows package path whole until 2026-11-18 (it split on `/` only).

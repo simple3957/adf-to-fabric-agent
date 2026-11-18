@@ -598,9 +598,14 @@ def connections_and_secrets(inp: Inputs, c: Collector) -> None:
                 states.append(f"{pname}/{aname}: runs as Fabric notebooks (no connection needed)")
                 continue
             if ta is None or _is_placeholder(ta):
-                states.append(f"{pname}/{aname}: not converted")
+                # the activity's own check reports it; a connection would not make it run, so it does not block the linked service
+                states.append(f"{pname}/{aname}: not converted (reported by the activity checks)")
                 continue
             vals = _connection_values(ta.raw)
+            if not vals and ta.type.lower() not in CONNECTION_ACTIVITIES:
+                # a Fabric notebook, Spark job definition ... the tool made: the generated activity uses no connection
+                states.append(f"{pname}/{aname}: runs as a Fabric {ta.type} (no connection needed)")
+                continue
             lake = [v for v in vals if _lakehouse_artifact_value(v, ta.raw)]
             loose = [v for v in lake if _TOKEN.match(v)]
             if loose:  # a repointed dataset whose lakehouse is not bound is a placeholder, whatever other connections the activity holds
@@ -613,10 +618,20 @@ def connections_and_secrets(inp: Inputs, c: Collector) -> None:
                 states.append(f"{pname}/{aname}: unbound ({', '.join(vals)})")
             else:
                 states.append(f"{pname}/{aname}: bound")
-        unbound = [x for x in states if "unbound" in x or "not converted" in x]
+        unbound = [x for x in states if "unbound" in x]
         absent = [x for x in states if "no connection reference" in x]
         repointed = [x for x in states if "repointed to the lakehouse" in x]
-        if repointed and not absent and not unbound and len(repointed) == len(states):
+        replaced = [x for x in states if "no connection needed" in x]
+        open_ = [x for x in states if "not converted" in x]
+        if not unbound and not absent and states and len(replaced) + len(open_) == len(states):
+            if replaced:
+                c.add("connections_secrets.linked_service", K.connections_secrets, R.PASS,
+                      f"Linked service '{lsf.name}' needs no Fabric connection: what replaced its activities uses none.", component=comp,
+                      evidence=replaced + open_)
+                c.comp(comp, "linked_service", S.transformed, note="not needed: its activities run as items the tool creates")
+            else:
+                c.comp(comp, "linked_service", S.not_applicable, note="its activities are not converted (see the activity checks)")
+        elif repointed and not absent and not unbound and len(repointed) == len(states):
             c.add("connections_secrets.linked_service", K.connections_secrets, R.PASS,
                   f"Every generated activity that used linked service '{lsf.name}' now reads its storage through a lakehouse shortcut.", component=comp,
                   evidence=repointed + ["This is the opt-in repointing (convert --lakehouse): the lakehouse is bound by id and the storage connection is the shortcut's."])

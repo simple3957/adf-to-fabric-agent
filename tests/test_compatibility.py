@@ -155,7 +155,7 @@ def test_blocked_by_handler_components_get_no_duplicate_compat_issue():
     ss = act("Ss", "ExecuteSSISPackage", {"packageLocation": {"type": "SSISDB"}})
     rec = convert([pipe(ss, name="PL")])["PL"][0]
     codes = {i.code for i in rec.activities[0].warnings}
-    assert "ssis_invoke_pending" in codes and not any(c.startswith("compat_") for c in codes)
+    assert "ssis_unsupported" in codes and not any(c.startswith("compat_") for c in codes)
 
 
 # --- project scan + record + report -------------------------------------------------------------------------

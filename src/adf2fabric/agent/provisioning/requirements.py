@@ -58,8 +58,10 @@ def load_compute_plan(store: ProjectStore, pid: str) -> Optional[ComputePlan]:
 
 class Inputs:
     def __init__(self, compute: Optional[ComputePlan], workloads: Optional[WorkloadManifest], inventory: Optional[DependencyInventory],
-                 storage_map: Optional[dict] = None, connections: Optional[dict[str, str]] = None):
+                 storage_map: Optional[dict] = None, connections: Optional[dict[str, str]] = None,
+                 unneeded: Optional[set[str]] = None):
         self.compute, self.workloads, self.inventory = compute, workloads, inventory
+        self.unneeded = unneeded or set()  # linked services (lower case) no converted activity uses (connections/needs.py): no connection planned
         self.storage_map = storage_map or {}  # storage/storage-map.json: the lakehouse name a person chose and the shortcuts it plans
         self.connections = connections or {}  # linked service (lower case) -> the Fabric connection id bound to it
 
@@ -100,7 +102,11 @@ def load_inputs(store: ProjectStore, pid: str) -> Inputs:
                 connections.setdefault(str(ls).lower(), str(cid))
     except (OSError, ValueError, TypeError, AttributeError, yaml.YAMLError):
         pass
-    return Inputs(load_compute_plan(store, pid), wl, inv, storage_map if isinstance(storage_map, dict) else {}, connections)
+    from adf2fabric.connections import needs as N
+
+    told = N.needs(store, pid) or {}
+    unneeded = {k for k, v in told.items() if not v.needed}
+    return Inputs(load_compute_plan(store, pid), wl, inv, storage_map if isinstance(storage_map, dict) else {}, connections, unneeded)
 
 
 def estimates(inputs: Inputs) -> dict[str, Any]:
@@ -230,7 +236,8 @@ def build_requirements(spec: TargetSpec, inputs: Inputs) -> tuple[list[Requireme
     inv = inputs.inventory
     if inv is not None:
         for d in inv.dependencies:
-            if d.type.value == "linked_service" and d.migration.category is MigrationCategory.needs_connection:
+            if d.type.value == "linked_service" and d.migration.category is MigrationCategory.needs_connection \
+                    and d.name.lower() not in inputs.unneeded:
                 add(T.connection, connection_name(d.name), f"A Fabric connection is needed for linked service '{d.name}'.", [d.name],
                     {"linked_service": d.name}, depends=[ws.id])
     return list(reqs.values()), notes

@@ -252,51 +252,91 @@ value; another data flow expression is a manual step). Until the notebook is in 
 names it (`dataflow_notebook_pending`), so the Convert step lists it. Wrangling (Power Query) data flows still become a Dataflow
 Gen2 refresh. The data flow's own compute, staging and trace settings do not apply to a notebook and are reported as dropped.
 
-## SSIS packages
+## U-SQL scripts (2026-11-17)
 
-Since 2026-11-18 an ADF *Execute SSIS Package* activity is a workload (kind `ssis_package`, `agent/workloads/ssis.py`), for Fabric's
-**Invoke SSIS package activity (preview)**. That activity runs a `.dtsx` (and an optional `.dtsConfig`) stored in OneLake, with no
-on-premises or private-network endpoints and no custom or third-party components (Microsoft's preview limitations, page updated
-2026-06-02). So the work per activity is: find the package wherever ADF keeps it, check it against those limits, and put it in OneLake.
+Azure Data Lake Analytics is retired, but the script an ADF *U-SQL* activity runs is still a file in storage (`scriptPath` in
+`scriptLinkedService`). Each script is a workload (kind `adf_usql`) translated to a PySpark notebook by fixed rules
+(`agent/workloads/usql.py`, the user's decision), generated, approved and created by Deploy like a data flow notebook; the activity
+becomes a Notebook activity with its parameters.
 
-**Finding the package** (`typeProperties.packageLocation.type`, from the ADF REST spec):
+* **Getting the script:** a file you pass (`--source <path>=<file>`), one already cached in the project (`workloads/code/usql/`), or, with
+  *fetch code* on (UI: Review > Compute) / `--fetch`, a read-only download with the token of each account signed in to `az` (your own
+  storage access; the script is cached, never changed). A script that cannot be read is a blocker finding naming the permission.
+* **Translated:** `DECLARE EXTERNAL @p type = literal` (a notebook parameter the activity's `parameters` override by name; a Python keyword
+  such as `in` becomes `in_`, and the pipeline passes it under that name; typed parameters are cast), `EXTRACT ... FROM path USING
+  Extractors.Csv/Tsv/Text` (`skipFirstNRows` 0 or 1, `delimiter`, `silent`, `quoting`, `encoding`; a bad row fails as in U-SQL, or is
+  dropped with `silent: true`), `SELECT [DISTINCT]` with `WHERE`, `GROUP BY`, `HAVING` (on aliases), `ORDER BY`, `FETCH n`, and
+  `INNER` / `LEFT` / `RIGHT` / `FULL [OUTER]` / `CROSS JOIN ... ON`, and `OUTPUT ... TO path USING Outputters.Csv/Tsv/Text` (one file, as
+  U-SQL writes; the Spark part file is moved to the path). Expressions: `? :`, `??`, `==`, `&&` / `||` / `AND` / `OR` / `NOT`, `IS [NOT]
+  NULL`, `IN`, `LIKE`, `+` (string concatenation when an operand is a string), `SUM` / `COUNT` / `COUNT(*)` / `COUNT(DISTINCT)` / `MIN` /
+  `MAX` / `AVG`, `ToUpper` / `ToLower` / `Trim` / `Contains` / `StartsWith` / `EndsWith` / `Length` / literal `Substring` / `Replace`,
+  `string.IsNullOrEmpty`.
+* **Also translated since 2026-11-18:** window functions (`ROW_NUMBER` / `RANK` / `DENSE_RANK`, and `SUM` / `COUNT` / `MIN` / `MAX` / `AVG ... OVER (PARTITION BY ... ORDER BY ...)`) and
+  `UNION [ALL | DISTINCT]` (by column name).
+* **Not translated, never guessed:** `PROCESS` / `REDUCE` / `COMBINE`, user-defined extractors, outputters and assemblies, `CREATE TABLE` and other DDL, other window
+  functions (`NTILE`, `LAG` ...), casts, `DateTime` and other .NET calls, a select expression without `AS`. Each is a finding (`usql_untranslated`, keyed `@rowset` or
+  `OUTPUT#n`) and its cell raises `NotImplementedError` naming it, so the script still has a notebook. `adf2fabric assist-script --kind usql --item <scriptPath>
+  [--draft <key> | --show <key> | --accept <key>]` lists them and, with `ADF2FABRIC_LLM=on`, drafts one statement that a person reads and accepts (pinned to the
+  script's hash; marked `MODEL-DRAFTED` in the notebook; the same rules as data flow steps).
+* **Review items (always listed):** paths in a U-SQL script are relative to the ADLA account's default store, which is not in the ADF
+  source: the notebook reads them from the script's own container, so check the data is there; empty fields read as null in Spark and as
+  empty strings in U-SQL; `/` is C# integer division on integers; OUTPUT quoting follows Spark's rules.
+* **The pipeline:** until the notebook is in the workspace the activity is a stand-in naming it (`usql_notebook_pending`); a script path
+  that is an expression stays blocked (`usql_retired`).
+* **Proven live (2026-11-18, workspace adf2fabric-ui-check):** the real `sales_by_product.usql` ran as a notebook from `PL_USQL_Test`; its output file
+  (4 product / band groups) equals an independent computation from the input CSV, row for row. The first run failed in the last step
+  (`notebookutils.fs.rm` raises on a path that is not there): the output step now checks `notebookutils.fs.exists` first. ADF never ran this script
+  successfully (the account is retired), so there is no ADF baseline: the run is recorded as `no_baseline`, and the correctness evidence is the
+  independent computation. **A stronger check, 2026-11-18:** the script's header says it gives the same result as the data flow `DF_Sales_By_Product`, which ADF
+  did run, so `output_check` compared the notebook's CSV with ADF's own Parquet output (read cross-format: rows, column names and an order-independent
+  hash): `matches`, 4 rows, the same content. It is recorded for `PL_USQL_Test`, and validation's runtime stage accepts it as the pipeline's evidence
+  ("vouched for by its output").
 
-| ADF location | What the tool does |
-|---|---|
-| `InlinePackage` (embedded) | Reads it from the pipeline JSON (`packageContent`, and `childPackages`). The encoding is not documented ("compressed"), so plain XML and base64 of XML / gzip / zip / zlib / deflate are all tried; an unreadable one is reported. |
-| `File` with a `.dtsx` | A file share the tool does not read: pass the file with `--source "<packagePath>=<local .dtsx>"`. |
-| `File` with a `.ispac` + `packageName` (File System (Project)) | Pass the project with `--source "<packagePath>=<local .ispac>"`: the package and the project's connection managers and parameters are read from it. |
-| `SSISDB` | Export the project from the catalog (SSMS: right-click the project > Export) and pass the `.ispac` with `--source "<packagePath>=<file>"`. |
-| `PackageStore` | Export the package from the store and pass the `.dtsx` with `--source`. |
-| a path or content set by an expression | `dynamic`: known only at run time; never guessed. |
+## SSIS packages (2026-11-18)
 
-**Checking it.** The package is parsed with the standard library after refusing any DTD or entity declaration (a `.dtsx` never has
-one), within a size limit. Findings:
+An ADF *Execute SSIS package* activity is a workload (kind `adf_ssis`): its package (`.dtsx`) is translated to a Fabric notebook by fixed rules
+(`agent/workloads/ssis.py`, expressions in `ssis_expr.py`), generated, approved and created by Deploy like a data flow or U-SQL notebook, and the
+activity becomes a Notebook activity. Why not Fabric's own *Invoke SSIS package* activity: Microsoft's pipeline definition page lists the type
+`ExecuteSSISPackage` and property names (`packageLocation`, `packageName`, `runtime`, parameters, connection managers, `propertyOverrides`, `logLocation`)
+but no values. A live probe on 2026-11-18 (a removable pipeline, a minimal `.dtsx` in the lakehouse) showed that Fabric accepts that type and no other
+spelling, takes the SSIS runtime to be the workspace itself (error 2109: the runtime named by the workspace id "can't be found"), validates a File
+location's `accessCredential` at create time (`'Domain' cannot be null`, so the schema follows ADF's), and then fails every location shape tried
+(File with an abfss or relative OneLake path, OneLake, SSISDB, an activity-level connection) with `Value cannot be null. Parameter name: o`. The JSON is
+therefore not built; the package is translated instead (the user's decision).
 
-* **Protection level:** `EncryptAllWithUserKey` / `EncryptAllWithPassword` block it (re-save it with DontSaveSensitive);
-  `EncryptSensitiveWithUserKey` and `EncryptSensitiveWithPassword` need the secrets as overrides (Fabric shows no package password).
-* **Components:** a task or data flow component that is not built-in (`Microsoft.*`, `STOCK:*`) is third-party, which Fabric cannot
-  run (a managed component is judged by its `UserComponentTypeName`). Script tasks and components, Execute Package (child packages),
-  mail, FTP and web service tasks are review items; Execute Process, WMI and MSMQ tasks must change.
-* **Connections** (package and project connection managers), after applying the ADF activity's own overrides
-  (`packageConnectionManagers`, `projectConnectionManagers`, `propertyOverrides` on `ConnectionString`): a host that is the machine itself
-  (`.`, `localhost`), a single-label name, a private IP or a private DNS suffix cannot be reached (`ssis_private_source`, as in the
-  connections analysis); an unrecognised host is a review item; Windows authentication must change to Microsoft Entra or SQL
-  authentication; a local or network-share file path must point at ADLS Gen2 / OneLake. A connection string is read in memory only and
-  never stored.
-* **The activity and its Azure-SSIS runtime:** 32-bit runtime, Windows execution credentials, an SSISDB environment, a configuration
-  file, Key Vault values; the runtime's on-premises proxy (`dataProxyProperties`, cannot be reached from Fabric), virtual network,
-  custom setup (extra components) and Enterprise edition.
+* **Getting the package:** a file you supply (Review > Compute > *Supply the file*, or `--source <packagePath>=<file.dtsx>`; for an inline package
+  `--source '<pipeline>/<activity>'=<file>`), one already kept in the project (`workloads/code/ssis/`), or, for an ADLS Gen2 path with *fetch code* on, a
+  read-only download with the signed-in Azure accounts' own storage access. A package in the SSISDB catalog must be exported as `.dtsx` first. A project
+  connection manager (`{GUID}:external`) is defined in the project's `.conmgr` file: supply it too (`--source x.conmgr=<file>`). The file is parsed as XML
+  with entities and DOCTYPE refused.
+* **Control flow translated:** Sequence container, Foreach Loop over files (classic and modern forms, the file into a variable, the folder may be an
+  expression), For Loop, Execute SQL Task (direct statement, no parameter or result bindings), Expression Task, precedence constraints (order, and an
+  expression as a condition; a failure constraint is named).
+* **Data flow translated:** Flat File Source and Destination (delimited), OLE DB Source (table or SQL command) and Destination (table), Derived Column,
+  Conditional Split, Aggregate, Sort, Union All, Lookup (reference query, match / no-match / fail), Multicast, Data Conversion, Row Count.
+* **Variables and parameters:** a literal variable or a package parameter is a notebook parameter (`v_<name>`, `p_<name>`), a variable with an
+  expression is computed, each connection string is a parameter (`cm_<name>`), the SQL user and password are `cm_user` / `cm_password` (never stored). The
+  activity's `packageParameters`, `projectParameters`, variable `propertyOverrides` and `packageConnectionManagers` overrides are passed by name; a secret is
+  not passed from the pipeline (a manual step: Key Vault), and an override of something a notebook cannot take (an engine setting) is dropped and listed.
+* **Not translated, never guessed:** Script Task and Script Component, Execute Process / Package / Web Service / FTP / Send Mail / File System tasks, other
+  enumerators, Merge Join, Fuzzy components, Excel and other sources and destinations, a task bound to a result set, a failure constraint. Each is a
+  finding (`ssis_untranslated`) and its cell raises, so the package still has a notebook; `adf2fabric assist-script --kind ssis ...` lists them and, with
+  `ADF2FABRIC_LLM=on`, drafts one step that a person accepts (the same rules as data flow steps).
+* **Review items:** paths in a package are paths on the machine that ran it: the notebook reads them under the parameter `ssis_root` (folders kept, drive
+  dropped); SQL connections go through JDBC and Windows authentication has no equivalent; flat file empty fields and code pages; `/` on integers.
+* **Evidence:** the translator was run against 15 real packages from public repositories (SSIS tutorial and learning projects) and the generated Python
+  compiles for every one; each non-translated step is named (mostly Excel sources, Script Tasks and project connection managers). One package in the
+  format SQL Server Data Tools writes (`tests/fixtures/ssis/orders_etl.dtsx`: flat file, derived columns, split, aggregate, sort, two destinations) was
+  translated, created in the test workspace and run in Fabric; both output files equal an independent computation, row for row and in order.
+  The translator has not run a package that reads or writes SQL (no SQL source in the test tenant), a Foreach loop, or a Lookup in Fabric.
 
-**Writing it.** `workloads-generate` writes the package, its embedded child packages and a supplied configuration file under
-`workloads/artifacts/<package>/ssis/`, with a suggested lakehouse folder (`Files/ssis/<package>`). Two packages with one name get
-separate folders. Approval works as for any workload. Deploy does not upload SSIS packages yet, and the converter does not generate
-the Fabric activity: Microsoft does not document the JSON of its package location. The activity is a placeholder
-(`ssis_invoke_pending`) that states the package's classification and reasons; a person uploads the files and adds the activity in
-the Fabric portal. Reading the JSON of one portal-made activity is the next step, before the converter can generate it.
+## An HDInsight Spark job's Python file is read and scanned (2026-11-18)
 
-Not proven yet: no package has run on Fabric's Invoke SSIS package from this tool, and the embedded-package encoding has not been
-confirmed against a package embedded by ADF Studio (the tests use Microsoft's sample package in several encodings).
+The Spark job definition generated for an HDInsight Spark activity only references its main file. A Python main file is now also read (a file
+you pass, one cached under `workloads/code/hdinsight/`, or with *fetch code* a read-only download with the signed-in Azure accounts' own storage
+access) and scanned like any Spark job (for `dbutils` / `notebookutils`, which a Spark job definition cannot use). Before, its record said
+"source code not available", which kept it "generated with open issues" and held validation's compute check at BLOCKED although nothing was open.
+A JVM job or an unreadable file is still only referenced.
 
 ## What Microsoft documents, and what is still unverified
 

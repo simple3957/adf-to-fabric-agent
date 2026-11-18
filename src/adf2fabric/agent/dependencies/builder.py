@@ -765,10 +765,7 @@ def _runtime_implication(dep: Dependency, d: AdfSemanticDiscovery) -> None:
     if rt is None:  # the implicit Azure runtime
         dep.migration = _impl(C.informational, "The default Azure runtime: Fabric runs on its own capacity.")
     elif rt.is_ssis:
-        dep.migration = _impl(C.unsupported, "An Azure-SSIS runtime is not migrated; Fabric's Invoke SSIS package (preview) runs packages on its "
-                              "own runtime, from OneLake, without on-premises or private-network access.",
-                              ["Check each package with workloads-assess, upload it to a lakehouse and add the Invoke SSIS package activity; "
-                               "or keep the packages on Azure-SSIS in ADF."], blocks=True)
+        dep.migration = _impl(C.unsupported, "Azure-SSIS runtimes have no Fabric equivalent.", ["Move the packages to another service."], blocks=True)
     elif rt.kind == "self_hosted":
         dep.migration = _impl(C.needs_gateway, "A self-hosted runtime is not reusable by Fabric.", [
             "Install an on-premises data gateway on a machine that can reach the source, and create the connection through it."])

@@ -23,6 +23,11 @@ documentation changes, edit the JSON and the source's `read_on` date, not the co
 activity type discovery reads has exactly one capability, every option has a valid status and names only documented Fabric
 activities, every cited source exists with a date, and that the modules read the file.
 
+A workaround's `source` says where it comes from: `compatibility` (Microsoft's comparison pages), `handler` (what the converter
+reports), `manual` (a person does it) or `tool` (the tool does it by itself; since 2026-11-17 the entries that the code already
+automates say so, instead of describing a manual step: Databricks JAR / Python / job / notebook, HDInsight Spark, Synapse Spark job
+and notebook, wrangling data flow, data flow steps, U-SQL scripts, SSIS packages, the 120-activity split).
+
 ## The project's activity mapping
 
 `adf2fabric mapping-export --project P` writes `projects/P/conversion/activity-mapping.json`, and **Convert writes it again before every

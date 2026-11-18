@@ -438,8 +438,15 @@ def test_reassessment_keeps_generated_artifacts_approvals_and_evidence(tmp_path)
     again = build_manifest(store, pid, Options(generate=False, **opts), NOW)  # an assessment must not forget the artifact or approval
     w = _w(again, "nb_clean")
     assert w.artifact.kind == "fabric_notebook" and w.approval.status == "approved" and w.approval.by == "Pat"
+    # the notebook was created in a workspace: a regenerate with identical output keeps where it is, per workspace (it dropped the per-workspace
+    # map on 2026-11-17, so Deploy refused to replace notebooks that were already there)
+    m = store.load_workload_manifest(pid)
+    _w(m, "nb_clean").artifact.fabric_item_id = "99999999-0000-0000-0000-000000000001"
+    _w(m, "nb_clean").artifact.fabric_item_ids = {"26d52d4c-da88-4aa7-abec-31ee1e5a5dbd": "99999999-0000-0000-0000-000000000001"}
+    store.save_workload_manifest(pid, m)
     regenerated = build_manifest(store, pid, Options(generate=True, **opts), NOW)
     assert _w(regenerated, "nb_clean").approval.status == "approved"  # identical output keeps the approval
+    assert _w(regenerated, "nb_clean").artifact.fabric_item_ids == {"26d52d4c-da88-4aa7-abec-31ee1e5a5dbd": "99999999-0000-0000-0000-000000000001"}
 
 
 def test_generating_again_without_the_code_keeps_the_generated_record(tmp_path):

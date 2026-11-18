@@ -52,6 +52,7 @@ from adf2fabric.project.conversion import (
     InferredElement,
     IssueSeverity,
     PipelineConversion,
+    SplitChild,
     Prerequisite,
     TriggerNote,
     ValidationResult,
@@ -87,6 +88,7 @@ def worst(*statuses: ConversionStatus) -> ConversionStatus:
 class ConversionEngine:
     def __init__(self, project: ProjectContext, inferences: Optional[dict[str, list]] = None):
         self.project = project
+        self.split_contents: dict[str, dict[str, dict]] = {}  # pipeline -> {child name: content} split off over the activity limit
         # activity id -> reconstruction proposals applied to it (empty unless --apply-reconstruction)
         self.inferences = inferences or {}
 
@@ -102,6 +104,12 @@ class ConversionEngine:
         records: list[ActivityConversion] = [r for r in pc.registry if r is not None]
 
         content, added, notes = self._assemble(p, pc, top_json)
+        authored, children, child_issues = content, [], []
+        from adf2fabric.agent.conversion import split as SP
+        from adf2fabric.agent.conversion.fabric_schema import ACTIVITY_LIMIT
+
+        if SP.count((content.get("properties") or {}).get("activities")) > ACTIVITY_LIMIT:
+            content, children, child_issues = self._split(p, content, notes, SP, ACTIVITY_LIMIT)
         validation = validate_content(content)
         self._apply_validation(records, validation)
 
@@ -113,12 +121,12 @@ class ConversionEngine:
                                and not validation.unbound.get(r.source_name)
                                and not any(validation.unbound.get(c.name) for c in r.components))
 
-        structural = [i for _, i in validation.issues]
-        graph_issues = verify_graph(p, records, content)  # source graph vs the generated JSON
+        structural = [i for _, i in validation.issues] + child_issues
+        graph_issues = verify_graph(p, records, authored)  # source graph vs the generated JSON (split-off children put back)
         structural += graph_issues
         notes.extend(outcome_notes(p))
         pipeline_validation = ValidationResult(
-            valid=not validation.errors and not any(i.severity is IssueSeverity.error for i in graph_issues),
+            valid=not validation.errors and not any(i.severity is IssueSeverity.error for i in graph_issues + child_issues),
             issues=structural)
         status = worst(*(r.status for r in records)) if records else ConversionStatus.converted
         if not coverage.complete:
@@ -132,6 +140,11 @@ class ConversionEngine:
         for r in records:
             for q in r.prerequisites:
                 prereqs.setdefault((q.kind, q.name.lower()), q)
+        for ch in children:  # the Invoke pipeline calls the split added: the child itself, the workspace, the pipeline connection
+            for key in (("workspace_item", f"pipeline:{ch.name}".lower()), ("workspace_item", "workspace"), ("connection", "invoke-pipeline")):
+                q = self.project.prereqs.get(key)
+                if q is not None:
+                    prereqs.setdefault(key, q)
         strategy_counts: dict[str, int] = {}
         status_counts: dict[str, int] = {}
         for r in records:
@@ -146,7 +159,31 @@ class ConversionEngine:
             triggers=self._triggers(p), notes=notes,
             structural_valid=pipeline_validation.valid,
             runtime_ready=bool(records) and all(r.runtime_ready for r in records) and pipeline_validation.valid,
+            split_children=[SplitChild(name=ch.name, container=ch.container, branch=ch.branch, activities=ch.activities) for ch in children],
         ), content
+
+    def _split(self, p: AdfPipeline, content: dict, notes: list[str], SP, limit: int):
+        """Move self-contained inner blocks to child pipelines until the pipeline fits (agent/conversion/split.py)."""
+        def invoke(child: str, act: str) -> dict:
+            tp = {"pipelineId": self.project.item_ref("pipeline", child, act, f"The child pipeline split off '{p.name}' (activity limit)"),
+                  "workspaceId": self.project.workspace_ref(act), "waitOnCompletion": True, "operationType": "InvokeFabricPipeline"}
+            conn = self.project.free_connection_ref("invoke-pipeline", "A Fabric connection used by Invoke pipeline activities "
+                                                    "(authentication: organizational account, service principal or workspace identity).", act)
+            return {"name": act, "type": "InvokePipeline", "dependsOn": [], "typeProperties": tp, "policy": {"secureInput": False},
+                    "externalReferences": {"connection": conn}}
+
+        taken = {n.lower() for n in self.project.pipelines} | {c.lower() for v in self.split_contents.values() for c in v}
+        res = SP.split(p.name, content, limit, invoke, taken)
+        issues = []
+        for ch in res.children:
+            notes.append(f"Over Fabric's {limit}-activity limit: the {ch.branch} of '{ch.container}' ({ch.activities} activities) moved to "
+                         f"child pipeline '{ch.name}', called with Invoke pipeline (wait on completion). Deploy creates it first.")
+            for _, issue in validate_content(ch.content).issues:
+                issues.append(issue.model_copy(update={"message": f"[child {ch.name}] {issue.message}"}))
+        for k in res.kept:
+            notes.append(f"Could not move to a child pipeline: {k}.")
+        self.split_contents[p.name] = {ch.name: ch.content for ch in res.children}
+        return res.content, res.children, issues
 
     # -- scope -----------------------------------------------------------------------------------------------
     def _scope(self, activities: list[AdfActivity], pc: PipelineContext) -> list[dict]:

@@ -25,7 +25,7 @@ Answer one question per activity:
 
 | Situation | What the agent does | Where it shows up |
 |---|---|---|
-| No Fabric equivalent (U-SQL, classic ML, unknown type), or not generated yet (SSIS: Fabric's Invoke SSIS package is preview, its JSON undocumented) | blocker plus a fail-fast placeholder activity, alternatives listed | status `blocked`, "Needs attention" |
+| No Fabric equivalent (SSIS, U-SQL, classic ML, unknown type) | blocker plus a fail-fast placeholder activity, alternatives listed | status `blocked`, "Needs attention" |
 | Needs redesign (Mapping Data Flow, Wrangling Data Flow, Synapse notebooks) | a scaffold bound to a Fabric item you create, alternatives listed | status `manual_required` |
 | Retired / removed connector or connector version | dated finding; blocker if no replacement exists, manual if a current version exists | "Compatibility findings" section, issue `compat_*` |
 | Deprecated or preview feature | dated finding with limitations | `compat_*` issue, `converted_with_differences` or `manual_required` |

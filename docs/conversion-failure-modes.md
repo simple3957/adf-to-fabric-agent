@@ -16,7 +16,7 @@ Covered by the **compatibility catalog** (`agent/conversion/compatibility.py`), 
 
 | Component | Microsoft's status | Agent behavior |
 |---|---|---|
-| SSIS package activity / Azure-SSIS runtime | Fabric's Invoke SSIS package is preview and its package location JSON is not documented | blocker, fail-fast placeholder that states the package's readiness (workloads-assess), alternatives |
+| SSIS package activity / Azure-SSIS runtime | not in Fabric yet | blocker, fail-fast placeholder, alternatives |
 | U-SQL / Data Lake Analytics | retired | blocker, alternatives |
 | ML Batch Execution, ML Update Resource | deprecated, not in Fabric | blocker, alternatives |
 | Wrangling Data Flow (Power Query in ADF) | deprecated | scaffold bound to a Dataflow Gen2 item; dated finding |

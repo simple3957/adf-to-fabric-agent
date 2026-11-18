@@ -27,7 +27,8 @@ discovery command create nothing.
 
 Only what the migration needs: a Spark pool and Environment per compute-plan proposal (none when the project has no Spark
 compute); a notebook / Spark job definition per generated workload; a Fabric connection per linked service the dependency
-inventory marks `needs_connection`; a lakehouse when workloads need one, with the OneLake shortcuts the generated notebooks read
+inventory marks `needs_connection` and a converted activity still uses (`connections/needs.py`; one whose activities became
+notebooks or a Spark job definition gets none, 2026-11-17); a lakehouse when workloads need one, with the OneLake shortcuts the generated notebooks read
 storage through; and whatever you ask for explicitly (capacity, workspace, identity, role assignments, warehouses).
 
 The lakehouse is named by a person, never invented: the name you give (`--lakehouse`, Plan target), or else the name chosen for the

@@ -212,6 +212,16 @@ class ConnectorCoverage(_Strict):
     note: str = ""
 
 
+class SplitChild(_Strict):
+    """A child pipeline the converter split off because the pipeline was over Fabric's activity limit (agent/conversion/split.py)."""
+
+    name: str
+    artifact_path: Optional[str] = None  # relative to projects/<id>/conversion/
+    container: str  # the activity whose inner block moved
+    branch: str  # activities | ifTrueActivities | ifFalseActivities | defaultActivities | case_<n>
+    activities: int
+
+
 class PipelineConversion(_Strict):
     source_pipeline: str
     source_path: str
@@ -229,6 +239,7 @@ class PipelineConversion(_Strict):
     notes: list[str] = Field(default_factory=list)
     structural_valid: bool = True
     runtime_ready: bool = False
+    split_children: list[SplitChild] = Field(default_factory=list)  # deployed with it (children first); compared as one pipeline
 
 
 class PreflightFinding(_Strict):

@@ -133,7 +133,7 @@ def test_fabric_execution_configuration_gaps_are_reported(tmp_path):
 
 
 def test_unsupported_functionality_is_not_confused_with_incompleteness(tmp_path):
-    ss = act("Ss", "ExecuteSSISPackage", {"packageLocation": {"type": "SSISDB"}})
+    ss = act("Ss", "AzureMLBatchExecution", {"webServiceInputs": {}})  # retired, no Fabric equivalent (SSIS and U-SQL are translated now)
     gen1 = linked_service("LS_G1", "AzureDataLakeStore")
     ds = dataset("DS_G1", "AzureDataLakeStoreFile", "LS_G1", {"folderPath": "x"})
     cp = copy_activity("Copy")
@@ -149,7 +149,7 @@ def test_unsupported_functionality_is_not_confused_with_incompleteness(tmp_path)
 
 
 def test_all_four_classes_are_counted_separately(tmp_path):
-    files = with_estate(pl(act("W", "Wait", {}), act("Ss", "ExecuteSSISPackage", {"packageLocation": {}}),
+    files = with_estate(pl(act("W", "Wait", {}), act("Ss", "AzureMLBatchExecution", {"webServiceInputs": {}}),
                            _missing_ds_copy()),
                         **{"pipeline/Broken.json": "{"})
     _, rec = reconstruct(tmp_path, files)

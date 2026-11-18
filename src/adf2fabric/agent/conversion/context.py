@@ -143,9 +143,6 @@ class ProjectContext:
     # Spark workloads that were approved AND deployed to Fabric (workloads-deploy): source item (lower) -> manifest entry.
     # Empty unless the user opted in; conversion then still defaults to running the source compute.
     workloads: dict[str, Any] = field(default_factory=dict)
-    # SSIS packages assessed by workloads-assess (approved or not): "<pipeline>/<activity>" (lower) -> manifest entry. Read only to say how ready
-    # the package is for Fabric's Invoke SSIS package; the activity itself is not generated.
-    ssis_packages: dict[str, Any] = field(default_factory=dict)
     # Databricks job structures read by workloads-assess (projects/<p>/databricks/jobs): job id -> structure. Empty otherwise.
     databricks_jobs: dict[str, dict] = field(default_factory=dict)
     # Opt-in Lakehouse repointing: (account, container) -> shortcut name under Files, from the storage map; the lakehouse's name.

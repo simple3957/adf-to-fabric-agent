@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 from typing import Any, Optional
 
 from adf2fabric.agent.conversion.context import ActivityBuilder
@@ -89,6 +91,27 @@ def convert_copy(cx: ActivityBuilder) -> None:
                 if k not in ("linkedServiceName", "path", "enableCompression"):
                     cx.dropped(f"typeProperties.stagingSettings.{k}", "not a documented Fabric staging property")
             tp["stagingSettings"] = out
+        elif key == "logSettings" and isinstance(value, dict):
+            # Copy activity log (2026-11-17): Microsoft's own ADF->Fabric upgrade module (github.com/microsoft/FabricPipelineUpgrade,
+            # CopyActivityUpgrader.AddLogSettings, test E2ePipelineWithCopy_StagingAndLogging.json) keeps the ADF object and replaces
+            # logLocationSettings.linkedServiceName with logLocationSettings.externalReferences.connection, as for staging. Not a
+            # Learn page; the shape was checked by a live run before relying on it (docs/conversion.md).
+            out = cx.tree({k: v for k, v in value.items() if k != "logLocationSettings"}, "typeProperties.logSettings",
+                          "typeProperties.logSettings")
+            loc = value.get("logLocationSettings")
+            if isinstance(loc, dict):
+                lsn = loc.get("linkedServiceName")
+                ls = lsn.get("referenceName") if isinstance(lsn, dict) else None
+                place = cx.tree({k: v for k, v in loc.items() if k != "linkedServiceName"},
+                                "typeProperties.logSettings.logLocationSettings", "typeProperties.logSettings.logLocationSettings")
+                if ls:
+                    place["externalReferences"] = {"connection": cx.connection(ls, "copy activity log store")}
+                    cx.mapping("typeProperties.logSettings.logLocationSettings.linkedServiceName",
+                               "typeProperties.logSettings.logLocationSettings.externalReferences.connection", "linked_service_to_connection")
+                out["logLocationSettings"] = place
+            tp["logSettings"] = out
+            cx.mapping("typeProperties.logSettings", "typeProperties.logSettings", "copy_log_settings",
+                       "the Copy activity log, with its store as a Fabric connection (Microsoft's upgrade module's mapping)")
         elif key in _COPY_LOGGING:
             cx.dropped(f"typeProperties.{key}",
                        "its Fabric structure is not documented and it references a linked service (a connection in "
@@ -240,7 +263,19 @@ def convert_validation(cx: ActivityBuilder) -> None:
     conds = [f"equals({ref}.exists, true)"]
     min_size = raw.get("minimumSize")
     if min_size is not None:
-        inner = _inner(min_size)
+        # an expression goes through the expression converter first (global parameters, functions Fabric renames ...), so the check
+        # reads the Fabric form; a whole-string interpolation '@{X}' is a number written as text and is read back with int() (2026-11-17,
+        # the catalog's workaround for validation_dynamic_minimum_size, done by the tool)
+        value = cx.conv(min_size, "typeProperties.minimumSize", f"{chk}.minimumSize") if is_expression(min_size) else min_size
+        inner = _inner(value)
+        if inner is None and is_expression(value):
+            whole = re.fullmatch(r"@\{(.+)\}", str(value["value"]).strip(), re.S)
+            if whole and "@{" not in whole.group(1):  # one interpolation and nothing around it
+                inner = f"int({whole.group(1)})"
+        if is_expression(min_size) and inner is not None:
+            cx.difference("validation_dynamic_minimum_size_converted",
+                          f"minimumSize is dynamic ({min_size['value']}); the converted expression is used in the readiness check.",
+                          "Run it once with the parameter values you use in production.")
         if inner is None:
             cx.manual("validation_dynamic_minimum_size", "minimumSize is dynamic content that cannot be reused safely.",
                       "Rewrite the readiness check by hand.")

@@ -16,12 +16,9 @@ issue on the activity) or listed only (the handler already blocks or redesigns i
 ## Activities
 
 ### activity.ssis
-`ExecuteSSISPackage`. **preview**, blocker (listed only). Fabric runs packages with its Invoke SSIS package activity (preview), from
-OneLake only, with no on-premises or private-network endpoints and no custom or third-party components. Its package location JSON is
-not documented, so the converter writes a placeholder that states the package's readiness (`ssis_invoke_pending`).
-Do: run `workloads-assess` (it finds the package: embedded, file share, SSISDB or package store, and checks it), `workloads-generate`
-to write the `.dtsx` files, upload them to a lakehouse and add the activity in the Fabric portal. Otherwise keep the package on the
-Azure-SSIS runtime in ADF and call that ADF pipeline from Fabric, or re-implement the logic with Copy, Dataflow Gen2 or a notebook.
+`ExecuteSSISPackage`. **not_available**, blocker (listed only). Fabric has no SSIS execution and no Azure-SSIS runtime yet.
+Do: keep the package on the Azure-SSIS runtime in ADF and call that ADF pipeline from Fabric, or re-implement the logic with
+Copy, Dataflow Gen2 or a notebook. Do not expect a conversion.
 
 ### activity.usql
 `DataLakeAnalyticsU-SQL`. **removed** (Azure Data Lake Analytics is retired), blocker (listed only).

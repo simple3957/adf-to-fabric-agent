@@ -22,20 +22,10 @@ def render_report(m: WorkloadManifest) -> str:
         out.append(f"| {_c(w.source_item)} | {w.kind.value} | {w.classification.value} | {w.code.status.value} | {w.generation.status} | "
                    f"{w.approval.status} | {w.execution.status} |")
     for w in m.workloads:
-        if w.kind.value == "ssis_package":  # no Spark: the Azure-SSIS runtime it ran on, and what it reads from the package
-            env = (f"- Environment: Azure-SSIS runtime '{w.environment.source_ref or 'not named'}' -> Fabric Invoke SSIS package (preview)"
-                   + (f". Not checked: {' '.join(w.environment.gaps)}" if w.environment.gaps else ""))
-        else:
-            env = (f"- Environment: {w.environment.platform} {w.environment.mode}, runtime {w.environment.runtime_version or 'unknown'} "
-                   f"(Spark {w.environment.spark_version or 'unknown'}) -> suggested Fabric runtime {w.environment.fabric_runtime or 'unknown'}")
-        out += ["", f"### {w.source_item}", "", f"- Used by: {', '.join(w.used_by)}", env,
+        out += ["", f"### {w.source_item}", "", f"- Used by: {', '.join(w.used_by)}",
+                f"- Environment: {w.environment.platform} {w.environment.mode}, runtime {w.environment.runtime_version or 'unknown'} "
+                f"(Spark {w.environment.spark_version or 'unknown'}) -> suggested Fabric runtime {w.environment.fabric_runtime or 'unknown'}",
                 f"- Classification: **{w.classification.value}**. " + " ".join(w.classification_reasons)]
-        if w.kind.value == "ssis_package":
-            if w.code.detail and w.code.status.value in ("in_project", "supplied"):
-                out.append(f"- Package: {_c(w.code.detail)}")
-            review = [f for f in w.findings if f.severity.value in ("review", "info")]
-            if review:
-                out += ["- To check:"] + [f"  - {_c(f.message)}" + (f" {_c(f.action)}" if f.action else "") for f in review]
         if w.artifact.kind != "none":
             sha = w.artifact.sha256[:12] if w.artifact.sha256 else ""
             out.append(f"- Artifact: {w.artifact.kind} `{w.artifact.file}` (sha256 {sha})"

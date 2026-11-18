@@ -28,6 +28,29 @@ ADF linked service. The UI is a thin client of the FastAPI backend (`python -m a
 | Integration runtimes | azure / managed VNet / self-hosted / SSIS -> Fabric path | unit + parser |
 | Report | `conversion/connections-report.{md,json}` | unit |
 
+## Only what the converted pipelines use, decided by the tool (2026-11-17)
+
+The user's rule: wherever a Fabric notebook or another workaround replaces an activity, the tool shows that and does not ask a person
+to create anything. `connections/needs.py` decides, per linked service, whether a converted Fabric activity still uses it: from the
+conversion record when it is current, else from the converter run in memory (`ConversionAgent.forecast`, nothing written, about half
+a second on the real estate), so Connect knows before Convert has run.
+
+* **Not needed** (state `not_needed`, counted as ready): no converted activity points at it. Its activities became something the tool
+  creates (a Fabric notebook, a Spark job definition, a lakehouse read through a OneLake shortcut), are not convertible at all (U-SQL:
+  a connection would not help), or nothing uses it. The card says which activity became what, and has no form; an earlier choice stays
+  saved but is not shown. Plan does not plan a connection for it and validation does not count it as missing.
+* **Set up by the tool** (`card.planned`, origin `auto_matched` / `auto`), when nobody has chosen: exactly one existing Fabric
+  connection with the same type and address is reused; ADF's managed identity becomes the workspace identity (no secret; the identity
+  still needs a role on the source); ADF's Key Vault secret is read from the same vault with the person's Azure sign-in when Apply runs.
+  *Create in Fabric* carries it out and saves it as the choice; *Choose differently* opens the form.
+* **Needs you**: none of the above applies. Typically ADF keeps the secret encrypted inside the factory (no tool can read it) and no
+  existing connection has the address. Two connections with the same address are never picked between.
+
+On the real estate (adf2fabricv1, 2026-11-17) only `Sathvik_ADF` is needed (Copy, Lookup and Get Metadata activities) and is set to
+reuse `storagebrr`; `AzureDatabricks1` (jobs became notebooks), `LS_HDInsight_Test` (became a Spark job definition) and
+`ADLA_Retired` (U-SQL, not convertible) are not needed. A Databricks notebook activity left on Databricks (the default without a
+Spark choice) still needs its connection.
+
 ## Applying again
 
 A create looks up the connection's display name (case-insensitive) in what Fabric lists first. The same name with the same type and
