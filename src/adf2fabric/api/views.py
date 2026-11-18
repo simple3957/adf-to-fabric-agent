@@ -269,6 +269,18 @@ def waves(store: ProjectStore, pid: str, roots: tuple[Path, ...] = (), workspace
     }, roots)
 
 
+def workload_label(w: Any) -> str:
+    """A workload's short name for a view: the last part of its source path, split on either separator (a Windows package path must not come out whole)."""
+    return re.split(r"[\\/]", w.source_item)[-1] or w.name
+
+
+def code_ref(workload_id: str) -> str:
+    """An opaque handle for a workload whose id holds a path (views never carry paths)."""
+    import hashlib
+
+    return hashlib.sha1(workload_id.encode(), usedforsecurity=False).hexdigest()[:12]
+
+
 def _compute(store: ProjectStore, pid: str) -> dict[str, Any]:
     from adf2fabric.agent.provisioning.requirements import estimates, load_compute_plan
 
@@ -282,9 +294,14 @@ def _compute(store: ProjectStore, pid: str) -> dict[str, Any]:
         out["gaps"] = [{"code": g.code, "message": g.message, "action": g.action} for g in plan.gaps[:30]]
         out["estimate"] = estimates(type("I", (), {"compute": plan, "workloads": None, "inventory": None})())
     if wm is not None:
-        out["workloads"] = [{"name": w.source_item.rsplit("/", 1)[-1], "kind": w.kind.value, "classification": w.classification.value, "code": w.code.status.value,
+        out["workloads"] = [{"name": workload_label(w), "kind": w.kind.value, "classification": w.classification.value, "code": w.code.status.value,
                              "generation": w.generation.status, "approval": w.approval.status, "execution": w.execution.status,
                              "open_issues": len(w.unresolved)} for w in wm.workloads]
+        # an SSIS package or a U-SQL script the tool could not read: the person supplies the file (POST /workloads/code); the ref is opaque
+        out["needs_code"] = [{"ref": code_ref(w.id), "name": w.name, "kind": w.kind.value, "why": w.code.detail or w.code.status.value,
+                              "accept": ".dtsx" if w.kind.value == "adf_ssis" else ".usql,.txt"}
+                             for w in wm.workloads if w.kind.value in ("adf_ssis", "adf_usql")
+                             and w.code.status.value in ("not_requested", "missing_credential", "denied", "not_found", "error", "dynamic", "unreachable")]
     if not out["available"]:
         out["needs"] = "No Spark compute was found, or the compute plan has not been built yet (run convert)."
     return out
@@ -308,7 +325,7 @@ def compatibility(store: ProjectStore, pid: str, roots: tuple[Path, ...] = ()) -
                           "strategy": a.strategy.value, "disposition": a.runtime_disposition or "", "summary": a.summary,
                           "limitations": a.limitations[:5], "manual_steps": a.manual_steps[:5], "alternatives": a.alternatives[:5]})
     wm = _try(lambda: store.load_workload_manifest(pid)) if store.has_workload_manifest(pid) else None
-    workloads = [] if wm is None else [{"name": w.source_item.rsplit("/", 1)[-1], "kind": w.kind.value, "classification": w.classification.value,
+    workloads = [] if wm is None else [{"name": workload_label(w), "kind": w.kind.value, "classification": w.classification.value,
                                         "reasons": w.classification_reasons[:3], "alternatives": [{"summary": x.summary, "limitations": x.limitations} for x in w.alternatives]}
                                        for w in wm.workloads if w.classification.value != "directly_convertible"]
     counts = {"converted": 0, "converted_with_differences": 0, "manual_required": 0, "blocked": 0}

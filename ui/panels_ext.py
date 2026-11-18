@@ -125,15 +125,23 @@ def _compute(api: ApiClient, pid: str, comp: dict) -> None:
         st.markdown("**Notebooks, jobs and JARs**")
         _table([{"Workload": w["name"], "Kind": w["kind"], "Classification": w["classification"].replace("_", " "), "Code": w["code"].replace("_", " "),
                  "Generated": w["generation"].replace("_", " "), "Open issues": w["open_issues"]} for w in comp["workloads"]], "")
+    for n in comp.get("needs_code") or []:  # an SSIS package / U-SQL script the tool cannot read by itself: the person supplies the file
+        with st.expander(f"Supply the file for {n['name']} ({'SSIS package' if n['kind'] == 'adf_ssis' else 'U-SQL script'})"):
+            st.caption(f"Not read yet: {n['why']}. Supply the file; the next *Generate* translates it to a Fabric notebook (nothing is sent anywhere).")
+            up = st.file_uploader("File", type=[x.lstrip(".") for x in n["accept"].split(",")], key=f"rv-code-{n['ref']}")
+            if up is not None and st.button(f"Use this file for {n['name']}", key=f"rv-code-go-{n['ref']}", disabled=not can("plans:generate")):
+                if (got := call(api.supply_code, pid, n["ref"], up.getvalue().decode("utf-8-sig", errors="replace"))):
+                    st.success(f"{got['lines']} lines kept. {got['next']}")
+                    st.rerun()
     if st.button("Assess Spark workloads", key="rv-workloads", disabled=not can("plans:generate"),
                  help="Read-only: classifies each notebook / job. No code is fetched without a credential and nothing is sent to Fabric."):
         if (job := run_job(lambda: api.run_stage(pid, "workloads", idempotency_key=intent("workloads")), "Assessing workloads", intent_name="workloads")) \
                 and job["state"] == "succeeded":
             st.rerun()
     if comp.get("workloads"):
-        fetch = st.checkbox("Read the code from Databricks with my Azure sign-in", key="rv-wl-fetch",
-                            help="Uses an Entra ID token from the Azure CLI sign-in for the Databricks workspace; read-only. Without it, only code "
-                                 "already in the project is used.")
+        fetch = st.checkbox("Read the code with my Azure sign-in (Databricks notebooks, U-SQL scripts, SSIS packages in ADLS)", key="rv-wl-fetch",
+                            help="Uses the Azure CLI sign-in: an Entra ID token for the Databricks workspace, and the signed-in accounts' own storage access "
+                                 "to read a U-SQL script; read-only. Without it, only code already in the project is used.")
         if st.button("Generate Fabric notebooks", key="rv-wl-generate", disabled=not can("plans:generate"),
                      help="Writes the Fabric notebooks, Spark jobs and Environments into the project (nothing is sent to Fabric). Approve them "
                           "on the Deploy step; Deploy creates the approved ones."):

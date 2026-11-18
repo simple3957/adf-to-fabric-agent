@@ -25,7 +25,7 @@ from adf2fabric.agent.dependencies.access import TokenSource
 from adf2fabric.agent.deployment import sjd_deploy
 from adf2fabric.agent.deployment.fabric_deploy import DeployError
 from adf2fabric.agent.discovery.adf_semantic.pipeline_analysis import walk
-from adf2fabric.agent.workloads import analyzer, databricks_jobs, dataflow, environments, notebook_format, transform
+from adf2fabric.agent.workloads import analyzer, databricks_jobs, dataflow, environments, notebook_format, ssis, transform, usql
 from adf2fabric.agent.workloads.source import Code, SourceResolver
 from adf2fabric.project.compute import ComputeUse
 from adf2fabric.project.discovery import AdfActivity, AdfSemanticDiscovery
@@ -96,6 +96,9 @@ class _Spec:
     main_file: Optional[str] = None  # an HDInsight Spark job: the abfss URI of its main file (rootPath + entryFilePath on its storage)
     main_class: Optional[str] = None  # an HDInsight Spark job: className (JVM jobs)
     file_reason: str = ""  # an HDInsight Spark job: why the main file's URI is not known
+    script_ls: Optional[str] = None  # a U-SQL activity: the linked service (ADLS Gen2) that holds its script
+    script_params: list[str] = field(default_factory=list)  # a U-SQL activity: the parameters it passes
+    location_type: str = ""  # an SSIS activity: packageLocation type (SSISDB | File | InlinePackage | PackageStore)
 
 
 def _literal_args(raw: Any) -> tuple[list[str], bool]:
@@ -193,6 +196,29 @@ def _specs(d: AdfSemanticDiscovery, plan: Any, selected: Optional[set[str]], rea
                     spec = specs.setdefault(wid, _Spec(wid, W.adf_dataflow, df, df, a, p.name))
                     spec.used_by.append(f"{p.name}/{a.name}")
                 continue
+            if t == "DataLakeAnalyticsU-SQL":  # the script runs as the Fabric notebook it is translated into (agent/workloads/usql.py)
+                path = _text(raw.get("scriptPath"))
+                item = path or f"(dynamic: {p.name}/{a.name})"
+                name = databricks_jobs.notebook_name(path) if path else a.name
+                wid = f"{W.adf_usql.value}:{item.lower()}"
+                spec = specs.setdefault(wid, _Spec(wid, W.adf_usql, re.sub(r"\.usql$", "", name or a.name, flags=re.I), item, a, p.name,
+                                                   script_ls=_ref(raw.get("scriptLinkedService"))))
+                spec.used_by.append(f"{p.name}/{a.name}")
+                spec.script_params = sorted(set(spec.script_params) | (set(raw["parameters"]) if isinstance(raw.get("parameters"), dict) else set()))
+                continue
+            if t == "ExecuteSSISPackage":  # the package runs as the Fabric notebook it is translated into (agent/workloads/ssis.py)
+                ltype, path = ssis.package_location(raw)
+                inline = ltype == "InlinePackage" or path.lstrip().startswith("<")
+                item = f"inline:{p.name}/{a.name}" if inline else (path or f"(dynamic: {p.name}/{a.name})")
+                base = re.split(r"[\\/]", item)[-1] if not inline else a.name
+                name = re.sub(r"\.dtsx$", "", base or a.name, flags=re.I)
+                wid = f"{W.adf_ssis.value}:{item.lower()}"
+                spec = specs.setdefault(wid, _Spec(wid, W.adf_ssis, name, item, a, p.name, location_type=ltype))
+                spec.used_by.append(f"{p.name}/{a.name}")
+                over = [str(k) for k in (raw.get("propertyOverrides") or {})] if isinstance(raw.get("propertyOverrides"), dict) else []
+                names = [str(k) for key in ("packageParameters", "projectParameters") for k in (raw.get(key) or {})]
+                spec.script_params = sorted(set(spec.script_params) | set(names) | set(over))
+                continue
             if t == "ExecuteWranglingDataflow":  # a wrangling data flow runs as the Dataflow Gen2 generated from its Power Query script
                 df = _ref(raw.get("dataflow"))
                 if df:
@@ -271,6 +297,10 @@ def _specs(d: AdfSemanticDiscovery, plan: Any, selected: Optional[set[str]], rea
 def _environment(spec: _Spec, d: AdfSemanticDiscovery, plan: Any) -> ExecutionEnvironment:
     if spec.kind is W.adf_dataflow:  # ADF's own Spark runs a data flow; in Fabric it is a notebook on the workspace's runtime
         return ExecutionEnvironment(platform="adf_dataflow")
+    if spec.kind is W.adf_usql:  # Azure Data Lake Analytics ran it; in Fabric it is a notebook on the workspace's runtime
+        return ExecutionEnvironment(platform="adf_usql")
+    if spec.kind is W.adf_ssis:  # the Azure-SSIS integration runtime ran it; in Fabric it is a notebook on the workspace's runtime
+        return ExecutionEnvironment(platform="adf_ssis")
     if spec.kind is W.adf_wrangling:  # Power Query: in Fabric a Dataflow Gen2
         return ExecutionEnvironment(platform="adf_wrangling")
     use: Optional[ComputeUse] = next((u for u in plan.inventory if u.id == spec.compute_id), None)
@@ -451,7 +481,8 @@ _KEEP_ON_SOURCE = AlternativeOption(
 # =====================================================================================================================
 
 
-_MISSING_INPUT = {"incomplete_definition", "unreadable_notebook"}  # blocker findings that mean "supply the input", not "no equivalent"
+_MISSING_INPUT = {"incomplete_definition", "unreadable_notebook", "usql_script_unavailable", "usql_storage_unknown", "ssis_package_unavailable",
+                  "ssis_package_unreadable"}  # blocker findings that mean "supply the input", not "no equivalent"
 
 
 def _classify(entry: WorkloadEntry, an: Optional[analyzer.Analysis]) -> tuple[K, list[str]]:
@@ -678,7 +709,7 @@ def build_manifest(store: ProjectStore, project_id: str, opts: Optional[Options]
     now = now or datetime.now(timezone.utc)
     d = store.load_adf_semantic_discovery(project_id)
     plan = build_compute_plan(d, opts.pipelines, _sources(opts))
-    if plan is None and any(a.type in ("ExecuteDataFlow", "ExecuteWranglingDataflow", "HDInsightSpark") for p in d.pipelines for a in walk(p.activities)):
+    if plan is None and any(a.type in ("ExecuteDataFlow", "ExecuteWranglingDataflow", "HDInsightSpark", "DataLakeAnalyticsU-SQL", "ExecuteSSISPackage") for p in d.pipelines for a in walk(p.activities)):
         plan = _NoCompute()  # data flows / HDInsight Spark only: nothing to size here, but each one is still translated or generated
     previous = store.load_workload_manifest(project_id) if store.has_workload_manifest(project_id) else None
     prior = {w.id: w for w in previous.workloads} if previous else {}
@@ -703,6 +734,9 @@ def build_manifest(store: ProjectStore, project_id: str, opts: Optional[Options]
                     entry.artifact, entry.generation = old.artifact, old.generation  # an assessment does not forget what was generated
                 if entry.artifact.sha256 is not None and entry.artifact.sha256 == old.artifact.sha256:
                     entry.approval, entry.artifact.fabric_item_id, entry.execution = old.approval, old.artifact.fabric_item_id, old.execution
+                    # the item per Fabric workspace too: without it Deploy thinks the notebook is not in the workspace and refuses to replace
+                    # the one that is (found 2026-11-18, regenerating the UI-test project)
+                    entry.artifact.fabric_item_ids = dict(old.artifact.fabric_item_ids)
             entries.append(entry)
     envs: list = []
     if plan is not None:
@@ -792,6 +826,212 @@ def _assess_dataflow(spec: _Spec, d: AdfSemanticDiscovery, project_dir: Path, op
     return Code(source, text), an, tr, findings
 
 
+def _hdinsight_code(spec: _Spec, project_dir: Path, opts: Options) -> Optional[Code]:
+    """An HDInsight Spark job's Python main file, when it can be read: a file the person supplied, one cached in the project, or (with
+    ``fetch``) a read-only download with the signed-in Azure accounts' own storage access. None for a JVM job or when it cannot be read
+    (the definition still references the file in place; its code is then simply not scanned)."""
+    m = re.match(r"abfss://([^@/]+)@([^/]+)/(.+\.py)$", spec.main_file or "", re.I)
+    if not m or spec.main_class:
+        return None
+    container, host, path = m.groups()
+    cache = project_dir / "workloads" / "code" / "hdinsight" / container / Path(*path.split("/"))
+
+    def found(text: str, status: C) -> Code:
+        src = CodeSource(status=status, location=spec.main_file, language="python", sha256=hashlib.sha256(text.encode()).hexdigest(),
+                         lines=text.count("\n") + 1, detail="Read for analysis; the job definition still references the file in place.")
+        return Code(src, text)
+
+    for key in (spec.main_file, path, path.rsplit("/", 1)[-1]):
+        f = opts.local_files.get(key)
+        if f and Path(f).is_file():
+            return found(Path(f).read_text(encoding="utf-8", errors="replace"), C.supplied)
+    if cache.is_file():
+        return found(cache.read_text(encoding="utf-8", errors="replace"), C.cached)
+    if not opts.fetch:
+        return None
+    text, _why = usql.fetch_script(host, container, path)
+    if text is None:
+        return None
+    cache.parent.mkdir(parents=True, exist_ok=True)
+    cache.write_text(text, encoding="utf-8")
+    return found(text, C.retrieved)
+
+
+def _usql_script(spec: _Spec, d: AdfSemanticDiscovery, project_dir: Path, opts: Options) -> tuple[Optional[str], CodeSource, str]:
+    """(the U-SQL script, how it was obtained, the storage root its paths are read from). The script is a file in the storage of its
+    ``scriptLinkedService``: a file the person supplied, one already cached in the project, or (with ``fetch``) a read-only download with
+    the signed-in Azure accounts' own storage access. Never a guess."""
+    path = spec.source_item
+    ls = next((x for x in d.linked_services if x.name.lower() == (spec.script_ls or "").lower()), None)
+    host = urlparse(ls.endpoint or "").hostname if ls is not None else None
+    container, _, inner = (path or "").partition("/")
+    root = f"abfss://{container}@{host}/" if host and host.endswith(".dfs.core.windows.net") and container else ""
+    loc = f"usql/{path}"
+    if not path or path.startswith("(dynamic"):
+        return None, CodeSource(status=C.dynamic, location=path or "", detail="The script path is computed at run time.",
+                                action="Give the activity a literal scriptPath."), root
+    from adf2fabric.agent.assist.script_steps import cache_file
+
+    cache = cache_file(project_dir, "usql", path)
+    for key in (path, path.rsplit("/", 1)[-1]):
+        f = opts.local_files.get(key)
+        if f and Path(f).is_file():
+            text = Path(f).read_text(encoding="utf-8", errors="replace")
+            return text, CodeSource(status=C.supplied, location=path, language="usql", sha256=hashlib.sha256(text.encode()).hexdigest(),
+                                    lines=text.count("\n") + 1), root
+    if cache.is_file():
+        text = cache.read_text(encoding="utf-8", errors="replace")
+        return text, CodeSource(status=C.cached, location=path, language="usql", sha256=hashlib.sha256(text.encode()).hexdigest(),
+                                lines=text.count("\n") + 1), root
+    perm = "Storage: a data-plane read role (for example Storage Blob Data Reader) on the container"
+    if not opts.fetch:
+        return None, CodeSource(status=C.not_requested, location=path, permission=perm, detail="Retrieval was not requested.",
+                                action="Generate with 'fetch code' on (it reads the script with your Azure sign-in), or pass the file with --source."), root
+    if not host or not root:
+        return None, CodeSource(status=C.error, location=path, detail="The script's linked service is not an ADLS Gen2 account with a literal URL.",
+                                action="Pass the script file with --source."), root
+    text, why = usql.fetch_script(host, container, inner)
+    if text is None:
+        return None, CodeSource(status=C.denied, location=path, permission=perm, detail=why,
+                                action="Sign in (az login) with an account that can read the container, or pass the file with --source."), root
+    cache.parent.mkdir(parents=True, exist_ok=True)
+    cache.write_text(text, encoding="utf-8")
+    return text, CodeSource(status=C.retrieved, location=path, language="usql", sha256=hashlib.sha256(text.encode()).hexdigest(),
+                            lines=text.count("\n") + 1), root
+
+
+def _assess_usql(spec: _Spec, d: AdfSemanticDiscovery, project_dir: Path, opts: Options):
+    """(code, analysis, notebook, findings) for a U-SQL script, translated by fixed rules (usql.py). A statement the rules do not map is a
+    finding (and a cell that raises), never a guess."""
+    text, source, root = _usql_script(spec, d, project_dir, opts)
+    if text is None:
+        return Code(source), None, None, [_finding("usql_script_unavailable", F.source, S.blocker, f"The U-SQL script is not available ({source.status.value}).",
+                                                   source.action or "Pass the script file with --source.")]
+    if not root:
+        return Code(source, text), None, None, [_finding("usql_storage_unknown", F.source, S.blocker, "The script's storage account is not known from the linked service.",
+                                                         "Give the U-SQL activity a scriptLinkedService on ADLS Gen2 with a literal URL.")]
+    from adf2fabric.agent.assist import script_steps
+
+    tr_ = usql.translate(text, root, script_steps.accepted(project_dir, "usql", spec.source_item, text))
+    findings = [_finding("usql_untranslated", F.api, S.change, f"U-SQL statement {u} is not translated by the fixed rules.",
+                         "Draft it with a model (adf2fabric assist-script, a person accepts it) or write it by hand in the generated notebook; "
+                         "until then its cell raises NotImplementedError.", u.split(":")[0])
+                for u in tr_.untranslated]
+    findings += [_finding("usql_statement_model_drafted", F.api, S.review, f"U-SQL statement {k} runs model-drafted code a person accepted.",
+                          "Review the cell before approving the notebook; a run compared with an independent result is the proof.", k)
+                 for k in tr_.drafted]
+    findings += [_finding("usql_review", F.contract, S.review, n, "Check it against the U-SQL script and a run in ADF.") for n in tr_.notes]
+    missing = [p for p in spec.script_params if p not in tr_.param_map]
+    findings += [_finding("usql_parameter_not_declared", F.contract, S.review, f"The activity passes parameter '{p}', which the script does not declare (DECLARE EXTERNAL).",
+                          "It is not passed to the notebook.", p) for p in missing]
+    code_cells = [c for c in tr_.cells if c["cell_type"] == "code"]
+    an = analyzer.analyze([notebook_format.Cell(i, "python", "".join(c["source"]), 1) for i, c in enumerate(code_cells)], "databricks")
+    findings += an.findings
+    tr = transform.Transformed(cells=tr_.cells, parameters=list(tr_.parameters), source_parameters={n for n, _ in tr_.parameters})
+    if opts.storage_routes:
+        _route_storage(tr, findings, opts.storage_routes)
+    return Code(source, text), an, tr, findings
+
+
+def cache_file_for(project_dir: Path, kind: str, item: str) -> Path:
+    from adf2fabric.agent.assist.script_steps import cache_file
+
+    return cache_file(project_dir, kind, item)
+
+
+def _ssis_package(spec: _Spec, project_dir: Path, opts: Options) -> tuple[Optional[str], CodeSource, tuple[str, ...]]:
+    """(the package XML, how it was obtained, the project connection manager files). An inline package is its own text; otherwise a file the
+    person supplied (``--source <path>=<file.dtsx>``), one cached in the project (``workloads/code/ssis/``), or (with ``fetch``, for an ADLS Gen2
+    path) a read-only download with the signed-in Azure accounts' own storage access. An SSISDB package lives in the SSISDB catalog database: export
+    it (``.dtsx``) and supply it. Never a guess."""
+    path = spec.source_item
+    conmgrs = tuple(Path(f).read_text(encoding="utf-8", errors="replace") for k, f in opts.local_files.items() if k.lower().endswith(".conmgr") and Path(f).is_file())
+    if path.startswith("inline:"):
+        cached = cache_file_for(project_dir, "ssis", path)
+        if cached.is_file():
+            text = cached.read_text(encoding="utf-8-sig", errors="replace")
+            return text, CodeSource(status=C.cached, location=path, language="ssis", sha256=hashlib.sha256(text.encode()).hexdigest(), lines=text.count("\n") + 1), conmgrs
+        for key in (path, f"{spec.pipeline}/{spec.activity.name}", spec.activity.name):  # an inline package's text is redacted in the discovery record (it can hold secrets): supply the file
+            f = opts.local_files.get(key)
+            if f and Path(f).is_file():
+                text = Path(f).read_text(encoding="utf-8-sig", errors="replace")
+                return text, CodeSource(status=C.supplied, location=path, language="ssis", sha256=hashlib.sha256(text.encode()).hexdigest(), lines=text.count("\n") + 1), conmgrs
+        text = ssis.package_location(spec.activity.raw_properties)[1]
+        if text.lstrip().startswith("<"):
+            return text, CodeSource(status=C.in_project, location=path, language="ssis", sha256=hashlib.sha256(text.encode()).hexdigest(), lines=text.count("\n") + 1), conmgrs
+        return None, CodeSource(status=C.not_requested, location=path, detail="The package is embedded in the activity, and discovery does not keep its text.",
+                                action=f"Pass the package file with --source '{spec.pipeline}/{spec.activity.name}'=<file.dtsx>."), conmgrs
+    if path.startswith("(dynamic"):
+        return None, CodeSource(status=C.dynamic, location=path, detail="The package path is computed at run time.", action="Give the activity a literal packagePath."), conmgrs
+
+    def found(text: str, status: C) -> tuple[str, CodeSource, tuple[str, ...]]:
+        return text, CodeSource(status=status, location=path, language="ssis", sha256=hashlib.sha256(text.encode()).hexdigest(), lines=text.count("\n") + 1), conmgrs
+
+    for key in (path, re.split(r"[\\/]", path)[-1]):
+        f = opts.local_files.get(key)
+        if f and Path(f).is_file():
+            return found(Path(f).read_text(encoding="utf-8-sig", errors="replace"), C.supplied)
+    from adf2fabric.agent.assist.script_steps import cache_file
+
+    cache = cache_file(project_dir, "ssis", path)
+    if cache.is_file():
+        return found(cache.read_text(encoding="utf-8-sig", errors="replace"), C.cached)
+    perm = "Storage: a data-plane read role (for example Storage Blob Data Reader) on the container"
+    m = re.match(r"^(?:abfss://([^@/]+)@([^/]+)|https://([^/]+\.dfs\.core\.windows\.net)/([^/]+))/(.+)$", path, re.I)
+    if not opts.fetch or m is None:
+        action = ("Pass the package file with --source <packagePath>=<file.dtsx> (an SSISDB package: export it from the catalog first)."
+                  if m is None else "Generate with 'fetch code' on (it reads the package with your Azure sign-in), or pass the file with --source.")
+        return None, CodeSource(status=C.not_requested, location=path, permission=perm if m else None,
+                                detail="The package file is not available to the tool." if m is None else "Retrieval was not requested.", action=action), conmgrs
+    host, container = (m.group(2), m.group(1)) if m.group(1) else (m.group(3), m.group(4))
+    text, why = usql.fetch_script(host, container, m.group(5))
+    if text is None:
+        return None, CodeSource(status=C.denied, location=path, permission=perm, detail=why,
+                                action="Sign in (az login) with an account that can read the container, or pass the file with --source."), conmgrs
+    cache.parent.mkdir(parents=True, exist_ok=True)
+    cache.write_text(text, encoding="utf-8")
+    return found(text, C.retrieved)
+
+
+def _assess_ssis(spec: _Spec, d: AdfSemanticDiscovery, project_dir: Path, opts: Options):
+    """(code, analysis, notebook, findings) for an SSIS package, translated by fixed rules (ssis.py). A task or component the rules do not map is a
+    finding (and a cell that raises), never a guess."""
+    text, source, conmgrs = _ssis_package(spec, project_dir, opts)
+    if text is None:
+        return Code(source), None, None, [_finding("ssis_package_unavailable", F.source, S.blocker, f"The SSIS package is not available ({source.status.value}).",
+                                                   source.action or "Pass the package file with --source.")]
+    from adf2fabric.agent.assist import script_steps
+
+    try:
+        tr_ = ssis.translate(text, "Files/ssis/", script_steps.accepted(project_dir, "ssis", spec.source_item, text), conmgrs)
+    except ssis.Untranslated as exc:
+        return Code(source, text), None, None, [_finding("ssis_package_unreadable", F.source, S.blocker, f"The SSIS package cannot be read: {exc}.",
+                                                         "Pass a valid .dtsx file (not a .ispac or a .dtsx protected by a password).")]
+    findings = [_finding("ssis_untranslated", F.api, S.change, f"SSIS step {u} is not translated by the fixed rules.",
+                         "Draft it with a model (adf2fabric assist-script, a person accepts it) or write it by hand in the generated notebook; "
+                         "until then its cell raises NotImplementedError.", u.split(": ")[0])
+                for u in tr_.untranslated]
+    findings += [_finding("ssis_step_model_drafted", F.api, S.review, f"SSIS step {k} runs model-drafted code a person accepted.",
+                          "Review the cell before approving the notebook; a run compared with an independent result is the proof.", k) for k in tr_.drafted]
+    findings += [_finding("ssis_review", F.contract, S.review, n, "Check it against the package and a run.") for n in tr_.notes]
+    missing = [p for p in spec.script_params if not _ssis_param_known(p, tr_.param_map)]
+    findings += [_finding("ssis_parameter_not_declared", F.contract, S.review,
+                          f"The activity sets '{p}', which the package does not declare (or sets something a notebook cannot take).", "It is not passed to the notebook.", p)
+                 for p in missing]
+    code_cells = [c for c in tr_.cells if c["cell_type"] == "code"]
+    an = analyzer.analyze([notebook_format.Cell(i, "python", "".join(c["source"]), 1) for i, c in enumerate(code_cells)], "databricks")
+    findings += an.findings
+    tr = transform.Transformed(cells=tr_.cells, parameters=list(tr_.parameters), source_parameters={n for n, _ in tr_.parameters})
+    return Code(source, text), an, tr, findings
+
+
+def _ssis_param_known(name: str, param_map: dict[str, str]) -> bool:
+    if name in param_map or f"$Package::{name}" in param_map:
+        return True
+    target = ssis.variable_param(name)
+    return bool(target and target in param_map.values())
+
+
 def _sources(opts: Options) -> ComputeSources:
     from adf2fabric.agent.conversion.compute_plan import load_sources
 
@@ -830,6 +1070,12 @@ def _assess(spec: _Spec, d: AdfSemanticDiscovery, plan: Any, resolver: SourceRes
     if spec.kind is W.adf_dataflow:
         code, an, tr, fs = _assess_dataflow(spec, d, project_dir, opts)
         findings += fs
+    elif spec.kind is W.adf_usql:
+        code, an, tr, fs = _assess_usql(spec, d, project_dir, opts)
+        findings += fs
+    elif spec.kind is W.adf_ssis:
+        code, an, tr, fs = _assess_ssis(spec, d, project_dir, opts)
+        findings += fs
     elif spec.kind is W.databricks_notebook:
         code = (resolver.databricks_python(env.workspace, spec.notebook_path) if spec.dbfs_file else
                 resolver.databricks_notebook(env.workspace, spec.notebook_path or _text(raw.get("notebookPath")), file=spec.python_file))
@@ -850,6 +1096,9 @@ def _assess(spec: _Spec, d: AdfSemanticDiscovery, plan: Any, resolver: SourceRes
                                detail=("The job's file is referenced in place by the Spark job definition; its code is not read."
                                        if spec.main_file else f"The main file is not known: {spec.file_reason}."),
                                action="" if spec.main_file else "Give the activity a literal rootPath / entryFilePath on an ADLS Gen2 linked service."))
+        read = _hdinsight_code(spec, project_dir, opts)  # a Python main file is read (cached, or with fetch) so it can be scanned like any Spark job
+        if read is not None:
+            code = read
         if spec.main_file and opts.storage_routes:  # the file, and any storage path among its arguments, go through the OneLake shortcut
             routed = opts.storage_routes.rewrite(spec.main_file)
             if routed.routed:
@@ -858,14 +1107,14 @@ def _assess(spec: _Spec, d: AdfSemanticDiscovery, plan: Any, resolver: SourceRes
     else:
         code = resolver.synapse_artifact("sparkJobDefinition", _ref(raw.get("sparkJob")))
     # 2. analysis
-    if spec.kind is W.adf_dataflow:
+    if spec.kind in (W.adf_dataflow, W.adf_usql, W.adf_ssis):
         pass  # translated above
     elif spec.kind in (W.databricks_notebook, W.synapse_notebook):
         an, tr, fs, cells = _assess_notebook(spec, code, env, opts)
         findings += fs
         if spec.kind is W.synapse_notebook and code.data is not None:
             findings += _synapse_session(code, env)
-    elif spec.kind is W.databricks_python and code.text is not None:
+    elif spec.kind in (W.databricks_python, W.hdinsight_spark) and code.text is not None:
         an = analyzer.analyze([notebook_format.Cell(0, "python", code.text, 1)], "databricks")
         findings += an.findings
         if any(f.code.startswith(("dbutils", "mssparkutils")) or f.code == "dbutils_secrets" for f in an.findings):
@@ -884,7 +1133,7 @@ def _assess(spec: _Spec, d: AdfSemanticDiscovery, plan: Any, resolver: SourceRes
     if spec.kind is W.databricks_jar and jar_uri is None:
         findings.append(_finding("jar_not_uploaded", F.source, S.change, "The JAR must be uploaded to OneLake/ADLS: a Fabric Spark job definition stores a reference to it.",
                                  "Upload it and pass --artifact <main class>=<abfss URI>."))
-    if spec.kind is not W.adf_dataflow:
+    if spec.kind not in (W.adf_dataflow, W.adf_usql, W.adf_ssis):
         findings += _runtime_findings(env, spec.kind is W.databricks_jar)
     libs = _resolve_libraries(spec, an, env)
     params = _parameters(spec, an, tr)
@@ -1049,7 +1298,7 @@ def _generate(entry: WorkloadEntry, spec: _Spec, code: Code, tr: Optional[transf
     used_names[display.lower()] = entry.id
     base = f"workloads/artifacts/{slug}"
     try:
-        if spec.kind in (W.databricks_notebook, W.synapse_notebook, W.adf_dataflow) and tr is not None and an is not None:
+        if spec.kind in (W.databricks_notebook, W.synapse_notebook, W.adf_dataflow, W.adf_usql, W.adf_ssis) and tr is not None and an is not None:
             ipynb = transform.to_ipynb(tr.cells)
             rel, sha = _write(project_dir, f"{base}/{display}.ipynb", json.dumps(ipynb, indent=1, ensure_ascii=False).encode("utf-8"))
             entry.artifact = GeneratedArtifact(kind="fabric_notebook", file=rel, sha256=sha, display_name=display,

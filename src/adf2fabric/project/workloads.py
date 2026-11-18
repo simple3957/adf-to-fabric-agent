@@ -38,6 +38,8 @@ class WorkloadKind(str, Enum):
     synapse_spark_job = "synapse_spark_job"
     databricks_job = "databricks_job"  # a Databricks job whose tasks cannot all become Fabric notebooks (or that was not read)
     adf_dataflow = "adf_dataflow"  # an ADF mapping data flow, translated to a Fabric notebook (agent/workloads/dataflow.py)
+    adf_usql = "adf_usql"  # an ADF U-SQL activity's script (Azure Data Lake Analytics is retired), translated to a Fabric notebook (agent/workloads/usql.py)
+    adf_ssis = "adf_ssis"  # an ADF Execute SSIS package activity's package (.dtsx), translated to a Fabric notebook (agent/workloads/ssis.py)
     adf_wrangling = "adf_wrangling"  # an ADF wrangling data flow (Power Query), run by a generated Fabric Dataflow Gen2
     hdinsight_spark = "hdinsight_spark"  # an HDInsight Spark activity's job, run by a Fabric Spark job definition on the same file
 

@@ -63,6 +63,12 @@ class WorkloadApproveBody(_In):
     confirm: bool = False
 
 
+class WorkloadCodeBody(_In):
+    ref: str = Field(min_length=12, max_length=12, pattern=r"^[0-9a-f]{12}$")  # from GET /workloads/compute (needs_code)
+    text: str = Field(min_length=1, max_length=3_000_000)
+    confirm: bool = False
+
+
 class NotebookBindBody(_In):
     workload: str = Field(max_length=200)
     item_id: str = Field(max_length=64)

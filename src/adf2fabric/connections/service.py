@@ -41,8 +41,8 @@ class _M(BaseModel):
 
 class ApplyItem(_M):
     linked_service: str
-    action: str  # created | reused | would_create | manual | skipped | failed
-    origin: str = "user"  # user | auto_matched
+    action: str  # created | reused | would_create | manual | skipped | not_needed | failed
+    origin: str = "user"  # user | auto_matched | auto
     connection_ids: list[str] = Field(default_factory=list)
     bound: bool = False  # written to resolutions.json (exactly one connection)
     fabric_validated: bool = False  # Fabric tested the credentials when it created the connection
@@ -182,8 +182,11 @@ class ConnectionService:
             if not held and supported is not None:
                 self._supported = (time.monotonic(), supported)
         states = {name: s for (p, name), s in self._states.items() if p == pid}
+        from adf2fabric.connections import needs as N
+
         cards = build_cards(d, choices=self.load_choices(pid), supported_types=supported, connections=conns, gateways=gws,
-                            secrets_held=self._held(session, d), network_hints=network_hints, states=states)
+                            secrets_held=self._held(session, d), network_hints=network_hints, states=states,
+                            needs=N.needs(self.store, pid))
         return cards, fabric_status(fabric is not None, conns, fabric_error or conn_error)
 
     # ---- testing -------------------------------------------------------------------------------------------------
@@ -225,9 +228,12 @@ class ConnectionService:
             result.items.append(item)
             if item.bound and not dry_run:
                 bindings[card.name] = item.connection_ids[0]
-                if card.choice is None and item.origin == "auto_matched":  # keep what was matched: without a choice the card would still say "not configured"
-                    self.set_choice(pid, ConnectionChoice(linked_service=card.name, method="existing_connection",
-                                                          values={"connection_id": item.connection_ids[0]}, origin="auto_matched"))
+                saved = self.load_choices(pid).get(card.name.lower())
+                if saved is None and card.choice is not None and card.choice.origin in ("auto_matched", "auto"):
+                    # keep what the tool decided once it worked: a later read shows it as the choice, not as a new decision
+                    keep = card.choice if card.choice.method != "existing_connection" else card.choice.model_copy(
+                        update={"values": {"connection_id": item.connection_ids[0]}})
+                    self.set_choice(pid, keep)
             self._states[(pid, card.name)] = item.state
         if bindings and not dry_run:
             result.resolutions_file = self._merge_resolutions(pid, bindings)
@@ -261,7 +267,10 @@ class ConnectionService:
 
     def _apply_one(self, pid, session, fabric, card: LinkedServiceCard, existing: dict, auto_match: bool, dry_run: bool) -> ApplyItem:
         item = ApplyItem(linked_service=card.name, action="skipped", state=card.state)
-        choice, origin = card.choice, "user"
+        if card.state == ConnectionState.not_needed:
+            item.action, item.detail = "not_needed", (card.next_steps or ["No converted activity uses it."])[0]
+            return item
+        choice, origin = card.choice, (card.choice.origin if card.choice is not None else "user")
         if choice is None and auto_match:
             exact = [m for m in card.existing_matches if m.match == "exact"]
             if len(exact) == 1 and card.connector:

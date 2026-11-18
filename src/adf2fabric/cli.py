@@ -1726,7 +1726,13 @@ def deploy_cmd(project_name: str, workspace_id: str, pipelines: tuple[str, ...],
             path = base / rel
             available[p.source_pipeline.lower()] = DeployItem(
                 p.fabric_pipeline_name, _json.loads(path.read_text(encoding="utf-8")), str(path), p.structural_valid)
+            for ch in p.split_children:  # split off over the activity limit: always deployed with their parent, children first
+                cpath = base / (ch.artifact_path or "")
+                if ch.artifact_path and cpath.exists():
+                    available[ch.name.lower()] = DeployItem(ch.name, _json.loads(cpath.read_text(encoding="utf-8")), str(cpath), p.structural_valid)
+    split_of = {p.source_pipeline.lower(): [ch.name.lower() for ch in p.split_children] for p in conversion.pipelines}
     wanted = [n.lower() for n in pipelines] or list(available)
+    wanted += [ch for n in list(wanted) for ch in split_of.get(n, []) if ch not in wanted]
     unknown = [n for n in pipelines if n.lower() not in available]
     if unknown:
         click.secho(f"Deploy failed: no converted pipeline named {', '.join(unknown)}. "
@@ -2205,7 +2211,8 @@ def verify_cmd(project_name: str, workspace_id: str, pipelines: tuple[str, ...],
         sys.exit(2)
     if factory and not no_adf:
         try:  # the factory's own subscription picks the signed-in account that owns it; the CLI default is not changed
-            adf = AdfRuns(factory, AzureCliProvider().token(subscription=factory.subscription))
+            _az = AzureCliProvider()
+            adf = AdfRuns(factory, lambda: _az.token(subscription=factory.subscription))  # a fresh token per read
         except ProviderError as exc:
             click.secho(f"  ADF run history not available ({exc}); comparing with earlier Fabric runs only.", fg="yellow")
     try:
@@ -2391,6 +2398,61 @@ def assist_dataflow_cmd(project_name: str, dataflow_name: str, draft_step: str |
                 state = (r["draft"] or {}).get("status") or "no draft"
                 click.echo(f"  {r['step']}: {r['why']}  [{state}]")
     except DS.StepDraftError as exc:
+        _assist_fail(exc)
+    except Exception as exc:  # the model wrapper's errors
+        from adf2fabric.agent.assist.model import ModelError
+        if isinstance(exc, ModelError):
+            _assist_fail(exc)
+        raise
+
+
+@cli.command(name="assist-script")
+@click.option("--project", "project_name", required=True)
+@click.option("--kind", "kind", type=click.Choice(["usql", "ssis"]), required=True, help="A U-SQL script or an SSIS package.")
+@click.option("--item", "item", required=True, help="The workload's source item: the U-SQL scriptPath, or the SSIS packagePath (inline: <pipeline>/<activity>).")
+@click.option("--source", "source", type=click.Path(exists=True, dir_okay=False), default=None, help="The script / package file (default: the copy a generate cached).")
+@click.option("--draft", "draft_step", default=None, help="Ask the model for this step's code (needs ADF2FABRIC_LLM=on).")
+@click.option("--accept", "accept_step", default=None, help="Accept the stored draft of this step after reading it.")
+@click.option("--show", "show_step", default=None, help="Print the stored draft of this step.")
+def assist_script_cmd(project_name: str, kind: str, item: str, source: str | None, draft_step: str | None, accept_step: str | None, show_step: str | None) -> None:
+    """Steps of a U-SQL script or an SSIS package the fixed rules do not translate: list them, draft one with the model, show or accept a draft.
+    An accepted draft is used by `workloads-generate` (marked model-drafted) while the script is unchanged."""
+    from adf2fabric.agent.assist import script_steps as SS
+    from adf2fabric.agent.workloads import ssis, usql
+
+    pdir, user = _dataflow_steps(project_name)
+    try:
+        text = Path(source).read_text(encoding="utf-8-sig", errors="replace") if source else SS.cached_script(pdir, kind, item)
+        if text is None:
+            raise SS.StepDraftError("The script is not cached in the project: pass it with --source <file>, or run workloads-generate with --fetch first.")
+        tr = usql.translate(text, "") if kind == "usql" else ssis.translate(text)
+        if draft_step:
+            why = next((u.split(": ", 1)[1] for u in tr.untranslated if u.split(": ", 1)[0] == draft_step), None)
+            if why is None:
+                raise SS.StepDraftError(f"'{draft_step}' is translated by the fixed rules (or is not in the {kind}); there is nothing to draft.")
+            d = SS.draft(pdir, kind, item, text, draft_step, why, tr.context.get(draft_step, {}))
+            click.echo(f"  {draft_step}: draft stored ({d['confidence']} confidence). Read it with --show, accept with --accept.")
+            for u in d["unconverted"]:
+                click.secho(f"      not converted: {u}", fg="yellow")
+        elif accept_step:
+            d = SS.accept(pdir, kind, item, text, accept_step, user)
+            click.secho(f"  {accept_step}: accepted by {d['accepted_by']}. Run `workloads-generate` again to use it.", fg="green")
+        elif show_step:
+            d = SS.load(pdir, kind, item, show_step)
+            if d is None:
+                raise SS.StepDraftError(f"There is no draft for '{show_step}'.")
+            click.echo(f"# {d['status']} ({d['confidence']} confidence)")
+            click.echo(d["code"])
+            for n in d.get("notes") or []:
+                click.echo(f"# note: {n}")
+        else:
+            if not tr.untranslated:
+                click.echo("  Every step is translated by the fixed rules.")
+            for u in tr.untranslated:
+                key, why = u.split(": ", 1)
+                d = SS.load(pdir, kind, item, key)
+                click.echo(f"  {key}: {why}  [{(d or {}).get('status') or 'no draft'}]")
+    except (SS.StepDraftError, ssis.Untranslated) as exc:
         _assist_fail(exc)
     except Exception as exc:  # the model wrapper's errors
         from adf2fabric.agent.assist.model import ModelError

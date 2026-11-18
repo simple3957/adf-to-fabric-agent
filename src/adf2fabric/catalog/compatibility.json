@@ -590,12 +590,21 @@
               }
             },
             {
-              "when": "logSettings or redirectIncompatibleRowSettings are used",
+              "when": "logSettings is used (the copy activity log)",
+              "fabric": [
+                "Copy"
+              ],
+              "status": "converted",
+              "how": "logSettings carried; logLocationSettings.linkedServiceName -> logLocationSettings.externalReferences.connection (Microsoft's FabricPipelineUpgrade module, CopyActivityUpgrader.AddLogSettings; a live run wrote the log, 2026-11-17)",
+              "code": ""
+            },
+            {
+              "when": "redirectIncompatibleRowSettings, logStorageSettings or sessionLog are used",
               "fabric": [
                 "Copy"
               ],
               "status": "manual_required",
-              "how": "copied without the logging settings (Fabric's structure is undocumented)",
+              "how": "dropped and reported: Microsoft documents no Fabric shape for them (the REST definition names the properties only)",
               "code": "copy_logging_reconfigure"
             },
             {
@@ -641,7 +650,7 @@
               "source": "handler"
             },
             {
-              "what": "Re-create copy and fault-tolerance logging on the Fabric Copy activity by hand.",
+              "what": "Re-create incompatible-row redirection (redirectIncompatibleRowSettings) and the session log by hand: Microsoft documents no Fabric shape for them. The copy activity log (logSettings) is carried by the tool.",
               "source": "manual"
             }
           ],
@@ -824,8 +833,8 @@
               "source": "handler"
             },
             {
-              "what": "Rebuild the job as a Fabric Spark job definition.",
-              "source": "manual"
+              "what": "Done by the tool when spark = fabric: the JAR becomes a Fabric Spark job definition (workloads-generate, approve, Deploy creates it) and the activity runs it.",
+              "source": "tool"
             }
           ],
           "lifecycle": []
@@ -875,8 +884,8 @@
               "source": "handler"
             },
             {
-              "what": "Run the file as a Fabric notebook or Spark job definition.",
-              "source": "manual"
+              "what": "Done by the tool when spark = fabric: the Python file becomes a Fabric notebook (sys.argv kept as notebook parameters) and the activity runs it.",
+              "source": "tool"
             }
           ],
           "lifecycle": []
@@ -976,8 +985,8 @@
               "source": "handler"
             },
             {
-              "what": "Migrate the job's notebook tasks to Fabric notebooks (workloads-assess / -generate / approve / Deploy) and convert again.",
-              "source": "handler"
+              "what": "Done by the tool: the job's notebook and Python file tasks become Fabric notebooks wired as the job's tasks, with its parameters and its environment's libraries (a Fabric Environment).",
+              "source": "tool"
             }
           ],
           "lifecycle": []
@@ -1119,8 +1128,8 @@
           ],
           "workarounds": [
             {
-              "what": "Migrate the notebook to Fabric (workloads-generate, approve on the Deploy step, Deploy creates it) to run it on Fabric Spark.",
-              "source": "manual"
+              "what": "Done by the tool when spark = fabric: the notebook is generated, approved on the Deploy step and created by Deploy, and the activity runs it on Fabric Spark.",
+              "source": "tool"
             }
           ],
           "lifecycle": []
@@ -1256,8 +1265,8 @@
               "source": "compatibility"
             },
             {
-              "what": "Finish an untranslated step by hand in the generated notebook before approving it.",
-              "source": "manual"
+              "what": "A step the fixed rules do not translate can get a model draft a person accepts (assist-dataflow, ADF2FABRIC_LLM=on); otherwise finish it by hand in the generated notebook before approving it.",
+              "source": "tool"
             }
           ],
           "lifecycle": [
@@ -1299,8 +1308,8 @@
           ],
           "workarounds": [
             {
-              "what": "Re-author the Power Query in a Dataflow Gen2 item and bind its id.",
-              "source": "compatibility"
+              "what": "Done by the tool: the Power Query script is generated into a Dataflow Gen2 definition that Deploy creates; a person signs in its connections and sets the output destination (undocumented, never guessed).",
+              "source": "tool"
             },
             {
               "what": "Re-implement the transformation as a Fabric notebook (Spark).",
@@ -1765,8 +1774,8 @@
           ],
           "workarounds": [
             {
-              "what": "Split a pipeline over Fabric's 120-activity limit into child pipelines called with Invoke pipeline.",
-              "source": "manual"
+              "what": "Done by the tool: a pipeline over Fabric's 120-activity limit gets its largest self-contained inner block moved to a child pipeline called with Invoke pipeline (wait on completion), with what the block reads passed as parameters; a block that sets a pipeline variable or reads run-level values stays, with the limit error.",
+              "source": "tool"
             }
           ],
           "lifecycle": []
@@ -1947,6 +1956,10 @@
           ],
           "workarounds": [
             {
+              "what": "Done by the tool: a Spark file on ADLS Gen2 runs as a Fabric Spark job definition that reads it through the OneLake shortcut (arguments routed the same way).",
+              "source": "tool"
+            },
+            {
               "what": "Recreate the job on the Fabric HDInsight activity using the original program settings.",
               "source": "handler"
             },
@@ -2017,8 +2030,8 @@
           ],
           "workarounds": [
             {
-              "what": "Split a pipeline over Fabric's 120-activity limit into child pipelines called with Invoke pipeline.",
-              "source": "manual"
+              "what": "Done by the tool: a pipeline over Fabric's 120-activity limit gets its largest self-contained inner block moved to a child pipeline called with Invoke pipeline (wait on completion), with what the block reads passed as parameters; a block that sets a pipeline variable or reads run-level values stays, with the limit error.",
+              "source": "tool"
             }
           ],
           "lifecycle": []
@@ -2445,8 +2458,8 @@
           ],
           "workarounds": [
             {
-              "what": "Move the Spark job definition into the Fabric workspace.",
-              "source": "compatibility"
+              "what": "Done by the tool: the Synapse Spark job definition is read from the imported source, generated as a Fabric Spark job definition, approved and created by Deploy.",
+              "source": "tool"
             }
           ],
           "lifecycle": [
@@ -2551,60 +2564,81 @@
       "adf_types": [
         "ExecuteSSISPackage"
       ],
-      "fabric_activities": [],
-      "strategy": "manual",
-      "runtime": "redesign",
+      "fabric_activities": [
+        {
+          "type": "TridentNotebook",
+          "name": "Fabric notebook",
+          "docs": "https://learn.microsoft.com/en-us/fabric/data-factory/notebook-activity"
+        }
+      ],
+      "strategy": "alternative",
+      "runtime": "replace",
       "variants": [
-        "SSISDB",
-        "file system"
+        "SSISDB / File / InlinePackage / PackageStore (the package file is supplied or read from ADLS Gen2)",
+        "package and project parameters",
+        "property overrides of variables"
       ],
       "carried": [
-        "not converted: no Fabric equivalent"
+        "the package's control flow (sequence, Foreach file loop, For Loop, Execute SQL, Expression task, precedence constraints) and data flows (flat file / OLE DB source and destination, Derived Column, Conditional Split, Aggregate, Sort, Union All, Lookup, Multicast, Data Conversion, Row Count) rebuilt as Python / PySpark by fixed rules (agent/workloads/ssis.py)",
+        "package parameters and variable overrides -> notebook parameters; connection strings -> notebook parameters"
       ],
       "inputs_outputs": [
-        "none"
+        "file paths are read under the notebook parameter ssis_root (folders kept, drive dropped); SQL connections go through JDBC"
       ],
       "expressions": [
-        "none"
+        "SSIS expressions (operators, casts, string / date / null functions) -> pyspark.sql functions or Python (ssis_expr.py); others are named, never guessed"
       ],
       "dependencies": [
-        "a fail-fast placeholder keeps the dependency graph intact"
+        "dependsOn mapped 1:1 to the Notebook activity"
       ],
       "parameters_variables": [
-        "none"
+        "package parameter p_<name>, variable v_<name>, connection string cm_<name>; the SQL user and password are cm_user and cm_password (never stored)"
       ],
       "not_carried": [
-        "SSIS package execution"
+        "the Azure-SSIS integration runtime's settings (runtime, logging level, execution credential, environment, log location); Script Task and Script Component, Execute Process / Package / Web Service / FTP / Send Mail / File System tasks, other enumerators, Merge Join, Excel and other sources and destinations (named in the notebook, which raises there)"
       ],
       "manual_configuration": [
-        "choose an alternative"
+        "supply the .dtsx (and any project .conmgr file); approve the generated notebook; set cm_user / cm_password for SQL connections; finish any step the rules do not translate"
       ],
       "validated_by": [
-        "placeholder Fail activity present"
+        "a Notebook activity bound to the deployed notebook",
+        "a run compared with an independent result (the package is not run by this tool)"
       ],
       "by_adf_type": {
         "ExecuteSSISPackage": {
           "microsoft_comparison": "N/A",
           "options": [
             {
-              "when": "always",
+              "when": "the package path is literal, the package file is available and the translated notebook is approved and in this workspace",
+              "fabric": [
+                "TridentNotebook"
+              ],
+              "status": "converted",
+              "how": "the activity runs the notebook translated from the package; its parameters are passed by name",
+              "code": ""
+            },
+            {
+              "when": "the translated notebook is not in this workspace yet",
               "fabric": [],
               "status": "blocked",
-              "how": "Fail placeholder: SSIS execution is not generated",
+              "how": "Fail placeholder naming the notebook: generate it (Review > Compute, with the .dtsx supplied), approve it, Deploy creates it",
+              "code": "ssis_notebook_pending"
+            },
+            {
+              "when": "the package path is computed or missing",
+              "fabric": [],
+              "status": "blocked",
+              "how": "Fail placeholder: the package cannot be found at conversion time",
               "code": "ssis_unsupported"
             }
           ],
           "workarounds": [
             {
-              "what": "Keep the package on the Azure-SSIS integration runtime in ADF and invoke the ADF pipeline from Fabric with Invoke pipeline.",
-              "source": "handler"
+              "what": "Done by the tool: the package is read (a file you supply, or an ADLS Gen2 path), translated to a Fabric notebook by fixed rules, approved by a person and created by Deploy; the activity runs it. Fabric's own Invoke SSIS package activity is not generated: Microsoft documents its type and property names but no JSON (a live probe on 2026-11-18 accepted the type and failed every shape with 'Value cannot be null').",
+              "source": "tool"
             },
             {
-              "what": "Re-implement the package's data flow as Copy / Dataflow Gen2 / notebook activities.",
-              "source": "handler"
-            },
-            {
-              "what": "Fabric's Invoke SSIS package activity (preview) runs a package stored in OneLake; not generated by this tool.",
+              "what": "A task or data flow component the fixed rules do not translate stays a cell that raises: a person can accept a model draft (assist-script) or write it by hand; Dataflow Gen2 or a Fabric notebook are the redesign options.",
               "source": "manual"
             }
           ],
@@ -2614,12 +2648,11 @@
               "status": "not_available",
               "summary": "SSIS package execution is not available in Fabric Data Factory, and Azure-SSIS integration runtimes have no Fabric equivalent yet.",
               "alternatives": [
-                "Keep the package on the Azure-SSIS runtime in ADF and call that pipeline from Fabric.",
-                "Re-implement the package logic with Copy, Dataflow Gen2 or a notebook."
+                "The tool translates the package to a Fabric notebook (Spark) by fixed rules; Fabric's Invoke SSIS package activity (preview, OneLake packages) is the other route and has no documented JSON."
               ],
               "source_url": "https://learn.microsoft.com/en-us/fabric/data-factory/compare-fabric-data-factory-and-azure-data-factory",
               "emit": false,
-              "impact": "blocker"
+              "impact": "difference"
             }
           ]
         }
@@ -2787,8 +2820,8 @@
           ],
           "workarounds": [
             {
-              "what": "Split a pipeline over Fabric's 120-activity limit into child pipelines called with Invoke pipeline.",
-              "source": "manual"
+              "what": "Done by the tool: a pipeline over Fabric's 120-activity limit gets its largest self-contained inner block moved to a child pipeline called with Invoke pipeline (wait on completion), with what the block reads passed as parameters; a block that sets a pipeline variable or reads run-level values stays, with the limit error.",
+              "source": "tool"
             }
           ],
           "lifecycle": []
@@ -2866,8 +2899,8 @@
               "source": "handler"
             },
             {
-              "what": "Move the notebook into the Fabric workspace and attach a lakehouse / Environment.",
-              "source": "compatibility"
+              "what": "Done by the tool: the Synapse notebook is read from the imported source, generated as a Fabric notebook, approved and created by Deploy; attach an Environment if it used pool libraries.",
+              "source": "tool"
             }
           ],
           "lifecycle": [
@@ -2944,8 +2977,8 @@
           ],
           "workarounds": [
             {
-              "what": "Split a pipeline over Fabric's 120-activity limit into child pipelines called with Invoke pipeline.",
-              "source": "manual"
+              "what": "Done by the tool: a pipeline over Fabric's 120-activity limit gets its largest self-contained inner block moved to a child pipeline called with Invoke pipeline (wait on completion), with what the block reads passed as parameters; a block that sets a pipeline variable or reads run-level values stays, with the limit error.",
+              "source": "tool"
             }
           ],
           "lifecycle": []
@@ -2956,63 +2989,92 @@
       "adf_types": [
         "DataLakeAnalyticsU-SQL"
       ],
-      "fabric_activities": [],
-      "strategy": "manual",
-      "runtime": "redesign",
+      "fabric_activities": [
+        {
+          "type": "TridentNotebook",
+          "name": "Fabric notebook",
+          "docs": "https://learn.microsoft.com/en-us/fabric/data-factory/notebook-activity"
+        }
+      ],
+      "strategy": "alternative",
+      "runtime": "replace",
       "variants": [
-        "script"
+        "script (Extractors.Csv/Tsv/Text, SELECT / JOIN / GROUP BY, OUTPUT)",
+        "script parameters"
       ],
       "carried": [
-        "not converted: service retired"
+        "the script's EXTRACT / SELECT / OUTPUT translated to PySpark by fixed rules (agent/workloads/usql.py)",
+        "DECLARE EXTERNAL parameters -> notebook parameters the activity's parameters override"
       ],
       "inputs_outputs": [
-        "none"
+        "the script's storage is read through the OneLake shortcut; OUTPUT writes one file as U-SQL does"
       ],
       "expressions": [
-        "none"
+        "C# expressions in the script (? :, ??, ==, &&, string methods, aggregates) -> pyspark.sql.functions; others are named, never guessed"
       ],
       "dependencies": [
-        "a fail-fast placeholder keeps the dependency graph intact"
+        "dependsOn mapped 1:1 to the Notebook activity"
       ],
       "parameters_variables": [
-        "none"
+        "DECLARE EXTERNAL @p -> notebook parameter p (a Python keyword such as in gets a trailing _)"
       ],
       "not_carried": [
-        "U-SQL"
+        "Data Lake Analytics' own settings (degree of parallelism, priority); PROCESS / REDUCE / COMBINE, user-defined operators and assemblies, CREATE TABLE, window functions, UNION, DateTime arithmetic (named in the notebook, which raises there)"
       ],
       "manual_configuration": [
-        "re-implement"
+        "approve the generated notebook (Deploy step); finish any statement the rules do not translate"
       ],
       "validated_by": [
-        "placeholder Fail activity present"
+        "a Notebook activity bound to the deployed notebook",
+        "a run compared with ADF's last run of the activity"
       ],
       "by_adf_type": {
         "DataLakeAnalyticsU-SQL": {
           "microsoft_comparison": "Not in the comparison; the upgrade guide calls Data Lake Analytics a deprecated Azure service to rebuild",
           "options": [
             {
-              "when": "always",
+              "when": "scriptPath is literal and the translated notebook is approved and in this workspace",
+              "fabric": [
+                "TridentNotebook"
+              ],
+              "status": "converted",
+              "how": "the activity runs the notebook translated from the script; its parameters are passed by name",
+              "code": ""
+            },
+            {
+              "when": "the translated notebook is not in this workspace yet",
               "fabric": [],
               "status": "blocked",
-              "how": "Fail placeholder: Azure Data Lake Analytics is retired",
+              "how": "Fail placeholder naming the notebook: generate it (Review > Compute, with 'fetch code'), approve it, Deploy creates it",
+              "code": "usql_notebook_pending"
+            },
+            {
+              "when": "scriptPath is an expression",
+              "fabric": [],
+              "status": "blocked",
+              "how": "Fail placeholder: the script cannot be found at conversion time",
               "code": "usql_retired"
             }
           ],
           "workarounds": [
             {
-              "what": "Re-implement the U-SQL job as a Fabric notebook (Spark) or Dataflow Gen2.",
-              "source": "handler"
+              "what": "Done by the tool: the script is read from its storage (a file you pass, one cached in the project, or a read with your az sign-in), translated to a Fabric notebook by fixed rules, approved by a person and created by Deploy; the activity runs it.",
+              "source": "tool"
+            },
+            {
+              "what": "A statement the fixed rules do not translate stays a cell that raises: write it by hand in the generated notebook, or re-implement the job as Dataflow Gen2.",
+              "source": "manual"
             }
           ],
           "lifecycle": [
             {
               "id": "activity.usql",
               "status": "removed",
-              "impact": "blocker",
+              "impact": "difference",
               "emit": false,
               "summary": "Azure Data Lake Analytics (U-SQL) is retired and is not in Fabric Data Factory's activity list.",
               "alternatives": [
-                "Re-implement the U-SQL job as a Fabric notebook (Spark) or Dataflow Gen2."
+                "The tool translates the script to a Fabric notebook (Spark) by fixed rules; Dataflow Gen2 is the other route."
               ],
               "source_url": "https://learn.microsoft.com/en-us/fabric/data-factory/compare-fabric-data-factory-and-azure-data-factory"
             }
@@ -3109,7 +3171,19 @@
               "code": "validation_size_check"
             },
             {
-              "when": "minimumSize is dynamic content",
+              "when": "minimumSize is one expression or one @{...} interpolation",
+              "fabric": [
+                "Until",
+                "GetMetadata",
+                "IfCondition",
+                "Wait"
+              ],
+              "status": "converted_with_differences",
+              "how": "the expression is converted and used in the readiness check (an interpolation is read back with int())",
+              "code": "validation_dynamic_minimum_size_converted"
+            },
+            {
+              "when": "minimumSize is dynamic content made of several parts (text around or between interpolations)",
               "fabric": [
                 "Until",
                 "GetMetadata",

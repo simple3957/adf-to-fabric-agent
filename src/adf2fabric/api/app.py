@@ -823,6 +823,35 @@ def create_app(settings: Optional[Settings] = None, live: Optional[Container] = 
                                                  for c in cells)
         return {"ref": ref, "code": text}
 
+    @app.post("/projects/{pid}/workloads/code")
+    def workloads_code(pid: str, body: S.WorkloadCodeBody, ctx: Ctx = Depends(), _: Principal = need(P.plans_generate)):
+        """Keep the file of an SSIS package or a U-SQL script the tool could not read, so the next generate translates it. The file is checked (a package must
+        be a valid .dtsx) and stored in the project under workloads/code/; nothing is sent anywhere."""
+        from adf2fabric.agent.assist.script_steps import cache_file
+        from adf2fabric.agent.workloads import ssis
+
+        slug = ctx.project(pid)
+        if not body.confirm:
+            raise HTTPException(422, "Supplying a file stores it in the project. Confirm it (confirm: true).")
+        if not ctx.c.store.has_workload_manifest(slug):
+            raise HTTPException(404, "Assess the workloads first.")
+        w = next((x for x in ctx.c.store.load_workload_manifest(slug).workloads if views.code_ref(x.id) == body.ref and x.kind.value in ("adf_ssis", "adf_usql")), None)
+        if w is None:
+            raise HTTPException(404, "No SSIS package or U-SQL script with that handle.")
+        if "\0" in body.text:
+            raise HTTPException(422, "The file is not text.")
+        if w.kind.value == "adf_ssis":
+            try:
+                ssis.parse(body.text)
+            except ssis.Untranslated as exc:
+                raise HTTPException(422, f"That is not a usable SSIS package: {exc}.")
+        target = cache_file(ctx.c.store.project_dir(slug), "ssis" if w.kind.value == "adf_ssis" else "usql", w.source_item)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(body.text, encoding="utf-8")
+        ctx.audit("workloads.code_supplied", "ok", resource="project", resource_id=slug, kind=w.kind.value, lines=body.text.count("\n") + 1)
+        return {"saved": True, "name": w.name, "kind": w.kind.value, "lines": body.text.count("\n") + 1,
+                "next": "Generate the Fabric notebooks again (Review > Compute): the file is translated, then approved on the Deploy step."}
+
     @app.post("/projects/{pid}/workloads/approve")
     def workloads_approve(pid: str, body: S.WorkloadApproveBody, ctx: Ctx = Depends(), _: Principal = need(P.provision_approve)):
         """Approve generated workloads and Environments as the signed-in person (the CLI's workloads-approve). Approving records the

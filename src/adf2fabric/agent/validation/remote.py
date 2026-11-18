@@ -198,6 +198,10 @@ def _deployed(inp: Inputs, c: Collector, fab: FabricGateway, workspace: str, pip
         if item is None:
             c.add("deployment.pipeline_deployed", K.deployment, R.FAIL, f"Pipeline '{tp.name}' is not in the workspace.", stage=Stage.deployment, component=comp,
                   remediation="Deploy it: `adf2fabric deploy --apply` (dry run first).")
+        for child in tp.split_children:  # split off over the activity limit: the parent cannot run without it
+            if child not in pipes:
+                c.add("deployment.pipeline_deployed", K.deployment, R.FAIL, f"Child pipeline '{child}' (split off '{tp.name}' over the activity "
+                      "limit) is not in the workspace.", stage=Stage.deployment, component=comp, remediation="Deploy the parent again: its children go with it.")
             c.comp(comp, "pipeline", S.missing, note="not deployed")
             continue
         try:
@@ -206,7 +210,7 @@ def _deployed(inp: Inputs, c: Collector, fab: FabricGateway, workspace: str, pip
             c.add("deployment.definition_matches", K.deployment, R.BLOCKED, f"The deployed definition of '{tp.name}' could not be read: {exc}", stage=Stage.deployment,
                   component=comp, remediation="Grant read access to the pipeline definition.")
             continue
-        d = diff(_norm(_resolve(tp.content, workspace, pipes)), _norm(live or {}))
+        d = diff(_norm(_resolve(tp.raw or tp.content, workspace, pipes)), _norm(live or {}))  # the file Deploy pushed, split as it is
         c.add("deployment.definition_matches", K.deployment, R.FAIL if d else R.PASS,
               f"The deployed definition of '{tp.name}' differs from the generated file." if d else f"The deployed definition of '{tp.name}' equals the generated file (read back from Fabric).",
               stage=Stage.deployment, component=comp, evidence=d, remediation="Deploy again, or regenerate if the portal copy was edited deliberately." if d else "",)

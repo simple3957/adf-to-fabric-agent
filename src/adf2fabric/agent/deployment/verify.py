@@ -164,13 +164,14 @@ class Factory:
 class AdfRuns:
     """Read-only access to an ADF factory's run history."""
 
-    def __init__(self, factory: Factory, token: str, session: Any = None):
+    def __init__(self, factory: Factory, token: "str | Callable[[], str]", session: Any = None):
+        """``token``: an ARM token, or a function that returns a current one. A run-and-compare job can outlast a token (one ran 22
+        minutes on 2026-11-17 and its last two ADF reads got HTTP 401), so with a function the token is fetched for each read."""
         if session is None:
             import requests
 
             session = requests.Session()
         self.factory, self._s, self._token = factory, session, token
-        self._h = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
         self._latest: Optional[dict[str, dict]] = None  # pipeline (lower) -> latest Succeeded run, once prefetched
 
     def clone(self) -> "AdfRuns":
@@ -200,7 +201,8 @@ class AdfRuns:
         if urlsplit(url).netloc != urlsplit(ARM_ENDPOINT).netloc:  # the ARM token only ever goes to ARM
             raise DeployError("Refusing to send an ARM token to a non-ARM URL.")
         try:
-            resp = self._s.post(url, headers=self._h, json=body, timeout=60)
+            token = self._token() if callable(self._token) else self._token
+            resp = self._s.post(url, headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"}, json=body, timeout=60)
         except Exception as exc:  # noqa: BLE001 - connection errors, timeouts: reported, never a traceback
             raise DeployError(f"ADF could not be reached ({type(exc).__name__}).") from None
         if resp.status_code != 200:

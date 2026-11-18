@@ -47,7 +47,13 @@ def assemble_items(store: ProjectStore, pid: str, names: Optional[list[str]] = N
             path = base / rel
             available[p.source_pipeline.lower()] = DeployItem(
                 p.fabric_pipeline_name, json.loads(path.read_text(encoding="utf-8")), str(path), p.structural_valid)
+            for ch in p.split_children:  # split off over the activity limit: deployed with their parent, children first
+                cpath = base / (ch.artifact_path or "")
+                if ch.artifact_path and cpath.exists():
+                    available[ch.name.lower()] = DeployItem(ch.name, json.loads(cpath.read_text(encoding="utf-8")), str(cpath), p.structural_valid)
     wanted = [n.lower() for n in names] if names else list(available)
+    split_of = {p.source_pipeline.lower(): [ch.name.lower() for ch in p.split_children] for p in conversion.pipelines}
+    wanted += [ch for n in list(wanted) for ch in split_of.get(n, []) if ch not in wanted]  # a split-off child always goes with its parent
     unknown = [n for n in (names or []) if n.lower() not in available]
     if unknown:
         raise StageError(f"No converted pipeline named {', '.join(unknown)}.", [f"Available: {', '.join(sorted(available))}."])
@@ -141,7 +147,7 @@ def _verify(c: Container, session: Session, pid: str, options: dict, log: Log) -
     adf = None
     if factory:
         try:  # the factory's subscription selects the account that owns it
-            adf = AdfRuns(factory, c.azure.token(subscription=factory.subscription))
+            adf = AdfRuns(factory, lambda: c.azure.token(subscription=factory.subscription))  # a fresh token per read: a job can outlast one
         except Exception as exc:  # noqa: BLE001 - no ADF history is a weaker baseline, not a failure
             log(f"ADF run history not available: {type(exc).__name__}")
     from adf2fabric.connections.providers.azure_cli import ProviderError

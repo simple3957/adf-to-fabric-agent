@@ -24,6 +24,7 @@ class ConnectionState(str, Enum):
     validation_failed = "validation_failed"
     manual_action_required = "manual_action_required"
     skipped = "skipped"  # the user chose to leave this linked service unbound; nothing is created for it
+    not_needed = "not_needed"  # no converted activity uses it: what replaced its activities is created by the tool (connections/needs.py)
 
 
 class CheckStatus(str, Enum):

@@ -184,8 +184,10 @@ def normalise_expression(text: str) -> str:
 class TargetPipeline:
     name: str  # the pipeline's Fabric name (folder name without .DataPipeline)
     path: str  # relative to the conversion directory
-    content: Optional[dict] = None
+    content: Optional[dict] = None  # for comparing with the source: split-off child pipelines put back in place (agent/conversion/split.py)
     error: str = ""
+    raw: Optional[dict] = None  # the file as generated, when it differs from ``content`` (a split pipeline); what Deploy pushed
+    split_children: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -211,6 +213,15 @@ def scan_target(conversion_dir: Path) -> TargetScan:
             scan.pipelines.append(TargetPipeline(name, rel, data if isinstance(data, dict) else None, "" if isinstance(data, dict) else "not a JSON object"))
         except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
             scan.pipelines.append(TargetPipeline(name, rel, None, type(exc).__name__))
+    # a pipeline over Fabric's activity limit was split by the converter; the source is compared with it as one pipeline
+    from adf2fabric.agent.conversion import split as SP
+
+    kids = SP.split_children({tp.name: tp.content for tp in scan.pipelines if tp.content is not None})
+    for tp in scan.pipelines:
+        mine = kids.get(tp.name.lower())
+        if mine and tp.content is not None:
+            tp.raw, tp.split_children = tp.content, sorted(mine)
+            tp.content = SP.merge(tp.content, mine)
     sdir = conversion_dir / "schedules"
     for f in sorted(sdir.glob("*.json")) if sdir.is_dir() else []:
         try:

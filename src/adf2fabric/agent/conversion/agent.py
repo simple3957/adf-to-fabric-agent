@@ -133,16 +133,7 @@ class ConversionAgent:
 
         resolutions = Resolutions.load(Path(request.resolutions_path) if request.resolutions_path else None)
         ctx = build_project_context(d, resolutions)
-        if self.store.has_workload_manifest(project.id):
-            try:
-                wm = self.store.load_workload_manifest(project.id)
-                ctx.workloads = {w.source_item.lower(): w for w in wm.workloads
-                                 if w.approval.status == 'approved' and w.artifact.fabric_item_id}
-            except Exception:  # noqa: BLE001 - a damaged manifest must not stop conversion; the default path is unaffected
-                ctx.workloads = {}
-        from adf2fabric.agent.workloads import databricks_jobs
-
-        ctx.databricks_jobs = databricks_jobs.load_all(self.store.project_dir(pid))
+        self._attach_workloads(ctx, pid)
         if request.lakehouse:
             smap = self.store.project_dir(pid) / "storage" / "storage-map.json"
             if not smap.exists():
@@ -192,6 +183,10 @@ class ConversionAgent:
             rel = f"pipelines/{p.name}.DataPipeline/pipeline-content.json"
             self.store.write_conversion_file(pid, rel, json.dumps(content, indent=2, ensure_ascii=False) + "\n")
             record.artifact_path = rel
+            for ch in record.split_children:  # over the activity limit: the child pipelines split off it (agent/conversion/split.py)
+                ch.artifact_path = f"pipelines/{ch.name}.DataPipeline/pipeline-content.json"
+                self.store.write_conversion_file(pid, ch.artifact_path,
+                                                 json.dumps(engine.split_contents[p.name][ch.name], indent=2, ensure_ascii=False) + "\n")
             converted.append(record)
             contents[p.name] = content
 
@@ -244,6 +239,48 @@ class ConversionAgent:
         return ConversionResult(success=True, conversion=conv, message=msg, problems=resolutions.problems)
 
     # ------------------------------------------------------------------------------------------------------
+    def forecast(self, pid: str) -> list:
+        """What a convert would produce for every pipeline, computed in memory and never written (the Connect step reads it to know
+        which linked services the converted pipelines still use, before Convert has run). Follows what a convert follows by itself: the
+        project's resolutions, approved workloads already in the workspace, Databricks job records and the activity mapping's choices;
+        not a run's own options (a run with --lakehouse can need fewer connections). Returns the pipeline records ([] when discovery
+        is missing or stale)."""
+        if not self.store.has_adf_semantic_discovery(pid):
+            return []
+        d = self.store.load_adf_semantic_discovery(pid)
+        project = self.store.load(pid)
+        if d.status not in (AdfSemanticStatus.discovered, AdfSemanticStatus.partial) or d.source_commit_sha != project.repository.commit_sha:
+            return []
+        res = self.store.conversion_dir(pid) / "resolutions.json"
+        ctx = build_project_context(d, Resolutions.load(res if res.exists() else None))
+        self._attach_workloads(ctx, pid)
+        from adf2fabric.agent.conversion import project_mapping as PM
+
+        try:
+            mapping = PM.load(self.store, pid)
+            ctx.choices = PM.choices(mapping) if mapping else {}
+        except PM.MappingError:
+            ctx.choices = {}
+        if any(v == ("storage", "lakehouse") for v in ctx.choices.values()):
+            routes, lh = self._lakehouse_for_choices(pid)
+            if routes:
+                ctx.storage_routes, ctx.route_lakehouse, ctx.route_default = routes, lh, False
+        engine = ConversionEngine(ctx, {})
+        return [engine.convert_pipeline(p)[0] for p in sorted(d.pipelines, key=lambda p: p.name.lower())]
+
+    def _attach_workloads(self, ctx: ProjectContext, pid: str) -> None:
+        """Approved workloads already in the workspace, and the Databricks job records: what conversion binds activities to."""
+        if self.store.has_workload_manifest(pid):
+            try:
+                wm = self.store.load_workload_manifest(pid)
+                ctx.workloads = {w.source_item.lower(): w for w in wm.workloads
+                                 if w.approval.status == 'approved' and w.artifact.fabric_item_id}
+            except Exception:  # noqa: BLE001 - a damaged manifest must not stop conversion; the default path is unaffected
+                ctx.workloads = {}
+        from adf2fabric.agent.workloads import databricks_jobs
+
+        ctx.databricks_jobs = databricks_jobs.load_all(self.store.project_dir(pid))
+
     def _lakehouse_for_choices(self, pid: str) -> tuple[dict, Optional[str]]:
         """Shortcut routes and the lakehouse name for activities whose mapping chose the Lakehouse when the run itself did not: the
         storage map's shortcuts, and the lakehouse a person named (the storage map's, else the last provisioning plan's). Never invents one."""

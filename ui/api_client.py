@@ -234,6 +234,9 @@ class ApiClient:
 
         return self._get(f"/projects/{pid}/workloads/approvals/{quote(ref, safe='')}/code")
 
+    def supply_code(self, pid: str, ref: str, text: str) -> dict:
+        return self._post(f"/projects/{pid}/workloads/code", {"ref": ref, "text": text, "confirm": True})
+
     def approve_workloads(self, pid: str, refs: list[str]) -> dict:
         return self._post(f"/projects/{pid}/workloads/approve", {"refs": refs, "confirm": True})
 

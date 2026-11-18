@@ -37,7 +37,7 @@ class ConnectionChoice(_M):
     values: dict[str, str] = Field(default_factory=dict)  # non-secret method fields (username, tenant_id, vault_url, ...)
     display_name: Optional[str] = None  # the Fabric connection name to create
     privacy_level: str = "Organizational"
-    origin: str = "user"  # user | auto_matched
+    origin: str = "user"  # user | auto_matched (an existing connection with the same address) | auto (decided from how ADF signs in)
     variants: list[dict[str, str]] = Field(default_factory=list)  # extra endpoint values for a parameterized linked service
 
 
@@ -85,6 +85,9 @@ class LinkedServiceCard(_M):
     missing: list[str] = Field(default_factory=list)
     next_steps: list[str] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
+    needed: Optional[bool] = None  # does a converted activity still use it (connections/needs.py); None = could not be told
+    needed_by: list[str] = Field(default_factory=list)
+    planned: str = ""  # what Apply will do by itself, in words ("Will reuse 'x'", "Will create ..."); empty when a person must choose
 
 
 # ---- helpers ---------------------------------------------------------------------------------------------------------
@@ -261,7 +264,9 @@ def build_cards(d: AdfSemanticDiscovery, *, choices: Optional[dict[str, Connecti
                 supported_types: Optional[dict[str, list[str]]] = None, connections: Optional[list[dict]] = None,
                 gateways: Optional[list[dict]] = None, secrets_held: Optional[dict[str, list[str]]] = None,
                 network_hints: Optional[dict[str, dict]] = None,
-                states: Optional[dict[str, ConnectionState]] = None) -> list[LinkedServiceCard]:
+                states: Optional[dict[str, ConnectionState]] = None, needs: Optional[dict] = None) -> list[LinkedServiceCard]:
+    """``needs``: linked service (lower) -> ``connections.needs.Need``. A service no converted activity uses is shown as not needed
+    (never asked for); one that is needed and has no choice gets the tool's own decision (``propose``), which Apply carries out."""
     choices = choices or {}
     runtimes = {r.name.lower(): r for r in d.integration_runtimes}
     cards = []
@@ -294,14 +299,74 @@ def build_cards(d: AdfSemanticDiscovery, *, choices: Optional[dict[str, Connecti
                 vals.add(p.default_value)
             if vals:
                 card.parameter_candidates[p.name] = sorted(vals)
+        need = (needs or {}).get(ls.name.lower())
+        if need is not None:
+            card.needed, card.needed_by = need.needed, list(need.needed_by)
+        if need is not None and not need.needed:  # shown as not needed whatever was chosen before; a saved choice stays on disk
+            card.state, card.choice = ConnectionState.not_needed, None
+            card.next_steps = [need.reason]
+            cards.append(card)
+            continue
+        if choice is None and spec is not None:
+            proposal, card.planned = propose(card, ls, spec, avail)
+            if proposal is not None:
+                card.choice = proposal
+                chosen = next((a.method for a in avail if a.method.id == proposal.method), None)
+                if proposal.method == "existing_connection":
+                    card.existing_matches = match_existing(spec, fields, connections or [], chosen)
         _state_and_guidance(card, ls, spec, chosen, (states or {}).get(ls.name))
+        if card.choice is None and card.needed and spec is not None:
+            card.next_steps.insert(0, _why_asked(ls))
         cards.append(card)
     return cards
+
+
+_MSI = {"msi", "managedidentity", "systemassignedmanagedidentity", "managedserviceidentity"}
+
+
+def propose(card: LinkedServiceCard, ls: AdfLinkedService, spec: catalog.ConnectorSpec,
+            avail: list) -> tuple[Optional[ConnectionChoice], str]:
+    """The tool's own decision for a needed linked service nobody has chosen for, and what Apply will do, in words. In order:
+    an existing Fabric connection with the same type and address (exactly one); ADF's managed identity -> Fabric's workspace
+    identity (no secret); ADF's Key Vault secret -> the same secret, read with the person's Azure sign-in when Apply runs.
+    (None, "") when none applies: ADF holds the secret itself (encrypted in the factory, which no tool can read), so a person chooses."""
+    usable = {a.method.id: a.method for a in avail if a.available}
+    exact = [m for m in card.existing_matches if m.match == "exact"]
+    if len(exact) == 1 and "existing_connection" in usable:
+        return (ConnectionChoice(linked_service=ls.name, method="existing_connection", values={"connection_id": exact[0].id},
+                                 origin="auto_matched"),
+                f"Will reuse the Fabric connection '{exact[0].display_name}': same type and address.")
+    endpoint = {f.name: f.value or "" for f in card.endpoint_fields}
+    if (ls.authentication_type or "").replace(" ", "").lower() in _MSI and "workspace_identity" in usable:
+        m = usable["workspace_identity"]
+        if not catalog.validate_choice(spec, m, endpoint, {}, set()):
+            return (ConnectionChoice(linked_service=ls.name, method="workspace_identity", origin="auto"),
+                    "Will create it with the workspace identity, as ADF used its managed identity (no secret). The workspace "
+                    "identity needs a role on the data source.")
+    hint = card.key_vault_hint
+    if hint.get("vault_url") and hint.get("secret_name"):
+        for m in usable.values():
+            if not m.key_vault:
+                continue
+            values = {"vault_url": hint["vault_url"], "secret_name": hint["secret_name"],
+                      **({"username": card.user_name} if card.user_name else {})}
+            if not catalog.validate_choice(spec, m, endpoint, values, set()):
+                return (ConnectionChoice(linked_service=ls.name, method=m.id, values=values, origin="auto"),
+                        f"Will create it with '{m.label}': the secret '{hint['secret_name']}' is read from {hint['vault_url']} "
+                        "with your Azure sign-in when Apply runs, as ADF read it.")
+    return None, ""
+
+
+def _why_asked(ls: AdfLinkedService) -> str:
+    return ("Needs you: no existing Fabric connection has this address, and ADF signs in with a secret it keeps inside the factory "
+            "(no tool can read it) or a method Fabric cannot create. Choose an existing connection or how Fabric signs in.")
 
 
 def _state_and_guidance(card: LinkedServiceCard, ls: AdfLinkedService, spec: Optional[catalog.ConnectorSpec],
                         chosen: Optional[catalog.AuthMethod], tested: Optional[ConnectionState]) -> None:
     rt = card.runtime
+    if card.state == ConnectionState.not_needed:
+        return
     if card.choice is not None and card.choice.method == catalog.SKIP_METHOD:
         card.state = ConnectionState.skipped
         card.next_steps.append("Skipped by choice. Pipelines that use it keep an unbound placeholder, so they are not "
