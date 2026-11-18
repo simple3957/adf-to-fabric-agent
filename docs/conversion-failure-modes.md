@@ -16,7 +16,7 @@ Covered by the **compatibility catalog** (`agent/conversion/compatibility.py`), 
 
 | Component | Microsoft's status | Agent behavior |
 |---|---|---|
-| SSIS package activity / Azure-SSIS runtime | not in Fabric yet | blocker, fail-fast placeholder, alternatives |
+| SSIS package activity / Azure-SSIS runtime | Fabric's Invoke SSIS package is preview and its package location JSON is not documented | blocker, fail-fast placeholder that states the package's readiness (workloads-assess), alternatives |
 | U-SQL / Data Lake Analytics | retired | blocker, alternatives |
 | ML Batch Execution, ML Update Resource | deprecated, not in Fabric | blocker, alternatives |
 | Wrangling Data Flow (Power Query in ADF) | deprecated | scaffold bound to a Dataflow Gen2 item; dated finding |
@@ -35,7 +35,7 @@ fail-fast placeholder (`no_conversion_rule`). Fix: add a handler plus a test, or
 ## 3. Expressions and parameters
 
 Unsupported functions, accessors, system variables and dataset references stay **verbatim** and the activity becomes
-`manual_required` (`expression_not_converted`). Global parameters are read from the factory's Variable Library, or (Float, Array, Object, SecureString, an expression value) become `gp_*` pipeline parameters. Fabric has no
+`manual_required` (`expression_not_converted`). Global parameters are read from the factory's Variable Library (Float, Array and Object as JSON text read back with `float()` / `json()`), or (an expression value, no value) become `gp_*` pipeline parameters. Fabric has no
 `true()` function and `pipeline().Pipeline` is an id there; these are handled in the expression converter.
 
 ## 4. Structure and limits
@@ -48,7 +48,7 @@ are errors. A source-versus-generated graph check (`graph_*` codes) fails the pi
 
 Self-hosted runtimes need an on-premises data gateway; runtimes in a managed virtual network need a virtual network data
 gateway (Microsoft lists managed VNets and private endpoints as "to be determined" in Fabric). Plain Azure runtimes need
-nothing. Schedule and tumbling-window triggers are turned into Fabric schedule definitions where they map exactly (`deploy --schedules`); event triggers and recurrences Fabric cannot express are reported as manual. Connections, workspace items and credentials
+nothing. Schedule and tumbling-window triggers are turned into Fabric schedule definitions where they map exactly (`deploy --schedules`); storage event triggers become Activator rules (generated when their files now land in a lakehouse, otherwise the wizard steps are listed); custom event triggers and recurrences Fabric cannot express are reported as manual. Connections, workspace items and credentials
 must be bound before anything runs. Key Vault-held secrets are re-created in the Fabric connection.
 
 ## 6. Failures only a run can reveal

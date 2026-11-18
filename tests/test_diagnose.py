@@ -48,7 +48,7 @@ def test_every_remedy_names_a_cause_and_a_fix():
 
 
 def test_the_codes_the_converter_gives_are_covered():
-    for code in ("linked_service_not_found", "dataset_not_found", "synapse_notebook_migrate", "ssis_unsupported", "dataflow_reauthor", "unsupported_trigger", "no_conversion_rule",
+    for code in ("linked_service_not_found", "dataset_not_found", "synapse_notebook_migrate", "ssis_invoke_pending", "dataflow_reauthor", "unsupported_trigger", "no_conversion_rule",
                  "stored_procedure_linked_service_not_in_source", "nesting_too_deep", "web_dynamic_url", "databricks_cluster"):
         assert code in R.CONVERSION, code
 

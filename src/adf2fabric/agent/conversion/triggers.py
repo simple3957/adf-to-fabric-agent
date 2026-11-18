@@ -14,8 +14,8 @@ trigger ``timeZone`` uses). An item may have at most 20 schedules.
 This module only produces definitions, and only where the ADF recurrence maps EXACTLY. When it does not (for example a
 weekly trigger every second week, a "last day of the month" trigger, or more than 100 times a day), the result is
 ``manual`` with the reason; nothing is approximated silently. Tumbling-window triggers become interval (Cron) schedules
-with a documented difference, because windowing semantics do not exist in Fabric. Event triggers are not generated: no
-schedule API covers Activator rules.
+with a documented difference, because windowing semantics do not exist in Fabric. Event triggers are not schedules: storage
+event triggers become Activator rules (agent/conversion/event_triggers.py).
 
 Statuses: ``generated`` | ``generated_with_differences`` | ``manual`` | ``not_supported``.
 """
@@ -87,7 +87,7 @@ def build_schedules(t: AdfTrigger) -> TriggerSchedule:
     enabled = (t.runtime_state or "").lower() == "started"
     if "event" in kind or kind in ("blobeventstrigger", "customeventstrigger", "storageeventtrigger"):
         return TriggerSchedule("not_supported", notes=[
-            "Event triggers map to Fabric Activator rules, which no schedule API creates; recreate the rule in Fabric."])
+            "Event triggers map to Fabric Activator rules, not schedules (see event_triggers.py)."])
     if kind not in ("scheduletrigger", "tumblingwindowtrigger"):
         return TriggerSchedule("manual", notes=[f"Trigger type '{t.type}' has no documented Fabric schedule equivalent."])
     rec = t.recurrence
@@ -117,9 +117,20 @@ def build_schedules(t: AdfTrigger) -> TriggerSchedule:
     tumbling = kind == "tumblingwindowtrigger"
     if tumbling:
         differences = True
-        notes.append("Tumbling-window semantics (window start/end values, backfill, dependencies, delay, retry) do not "
-                     "exist in Fabric; this is a plain interval schedule. Pipelines reading @trigger() window outputs "
-                     "need another source for those values.")
+        notes.append("This plain interval schedule passes no window start/end, and Fabric has no backfill, window dependencies, delay or "
+                     "retry. For the window values create an interval-based schedule (preview) in the Fabric portal instead: Schedule > Add "
+                     f"schedule > Interval-based, every {n} {freq}(s), start {_stamp(start) or '(the ADF start time)'}"
+                     + (f", end {_stamp(end)}" if rec.end_time else "") + f", time zone UTC, max concurrency {t.window.get('maxConcurrency') or 1}; "
+                     "then delete this one. The converted pipeline reads pipeline()?.TriggerEvent?.windowStartTimeUtc / windowEndTimeUtc "
+                     "from it. Its API is not public: tools cannot create or list it (a pipeline that has one lists no schedules).")
+        w = t.window
+        lost = [label for label, on in (
+            (f"a delay of {w.get('delay')}", str(w.get("delay") or "00:00:00") not in ("00:00:00", "0")),
+            (f"{w.get('retryCount')} retries", bool(w.get("retryCount"))),
+            (f"{w.get('dependsOn')} window dependenc{'y' if w.get('dependsOn') == 1 else 'ies'}", bool(w.get("dependsOn"))),
+            (f"at most {w.get('maxConcurrency')} windows at once", (w.get("maxConcurrency") or 1) > 1)) if on]
+        if lost:
+            notes.append("This trigger also had " + ", ".join(lost) + "; the schedule does not carry them.")
 
     def manual(reason: str) -> TriggerSchedule:
         return TriggerSchedule("manual", notes=[*notes, reason])

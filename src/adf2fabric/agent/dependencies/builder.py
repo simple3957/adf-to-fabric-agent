@@ -652,9 +652,16 @@ def _implication(dep: Dependency, d: AdfSemanticDiscovery, g: _Graph, runtimes: 
     elif t is T.pipeline:
         dep.migration = _impl(C.ready, "Converted by the normal conversion.")
     elif t is T.trigger:
-        if (dep.attributes.get("type", "")).lower() in _EVENT_TRIGGERS:
-            dep.migration = _impl(C.manual, "Event triggers have no direct Fabric pipeline trigger.",
-                                  ["Recreate it as a Fabric Activator rule on the same event."])
+        if (dep.attributes.get("type", "")).lower() == "blobeventstrigger":
+            dep.migration = _impl(C.manual, "A storage event trigger becomes a Fabric Activator rule: generated when its files now land in a lakehouse "
+                                  "(convert --onelake-trigger), otherwise created in the Fabric Trigger wizard from the listed steps.",
+                                  ["Decide where the files land: a lakehouse (generated rule) or Azure storage (wizard; the storage must be in "
+                                   "Fabric's tenant)."])
+        elif (dep.attributes.get("type", "")).lower() in _EVENT_TRIGGERS:
+            dep.migration = _impl(C.manual, "Fabric has no source for an Event Grid custom topic (its Event Grid source reads namespace topics only).",
+                                  ["Route the topic to an Event Hub with a new Event Grid subscription carrying the same filters (or move the "
+                                   "publishers to an Event Grid namespace), read it with an Eventstream, and add an Activator rule that runs the "
+                                   "pipeline; the conversion report lists the exact filter."])
         elif (dep.attributes.get("type", "")).lower() in ("scheduletrigger", "tumblingwindowtrigger"):
             dep.migration = _impl(C.ready, "Converted to a Fabric schedule, created disabled.")
         else:
@@ -758,7 +765,10 @@ def _runtime_implication(dep: Dependency, d: AdfSemanticDiscovery) -> None:
     if rt is None:  # the implicit Azure runtime
         dep.migration = _impl(C.informational, "The default Azure runtime: Fabric runs on its own capacity.")
     elif rt.is_ssis:
-        dep.migration = _impl(C.unsupported, "Azure-SSIS runtimes have no Fabric equivalent.", ["Move the packages to another service."], blocks=True)
+        dep.migration = _impl(C.unsupported, "An Azure-SSIS runtime is not migrated; Fabric's Invoke SSIS package (preview) runs packages on its "
+                              "own runtime, from OneLake, without on-premises or private-network access.",
+                              ["Check each package with workloads-assess, upload it to a lakehouse and add the Invoke SSIS package activity; "
+                               "or keep the packages on Azure-SSIS in ADF."], blocks=True)
     elif rt.kind == "self_hosted":
         dep.migration = _impl(C.needs_gateway, "A self-hosted runtime is not reusable by Fabric.", [
             "Install an on-premises data gateway on a machine that can reach the source, and create the connection through it."])

@@ -110,7 +110,7 @@ Every deployment is a dry run first. A pipeline is called runtime-validated only
 | G1 | Incomplete pipelines found in discovery: apply the agent's safe reconstruction proposals, or fix them in the source? | Inferred content is never used without consent | Fix in source | |
 | G2 | Which pipelines go first? Accept the dependency-based migration order? | Children are deployed before their callers | Wave 1: ingestion pipelines | |
 | G3 | Triggers are created switched off. When, and by whom, may each schedule be switched on? | Prevents double runs while ADF still runs | After cut-over, by the operator | |
-| G4 | Event and custom-event triggers: recreate them by hand (for example as Fabric Activator rules)? | They are not converted automatically | Yes, owner: platform team | |
+| G4 | Storage event triggers: will their files land in a lakehouse (generated Activator rule) or stay in Azure storage (Fabric wizard; the storage must be in Fabric's tenant)? Custom-event triggers: recreate by hand? | Only the lakehouse case is generated | Yes, owner: platform team | |
 | G5 | Mapping data flows: rebuild in Fabric (Dataflow Gen2 or notebooks), or keep in ADF for now? | Only a placeholder activity is generated | Rebuild as notebooks | |
 | G6 | May the agent read ADF run history as the comparison baseline? Which account can read it? | Fabric runs are compared with the last successful ADF run | Reader on the factory | |
 | G7 | May the agent start real runs in Fabric to prove pipelines? Which pipelines, and is it safe for them to write their targets? | Real runs read sources and write targets | Yes, test pipelines only | |

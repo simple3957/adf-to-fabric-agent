@@ -137,17 +137,24 @@ class ProjectContext:
     globals_needed: dict[str, list[str]] = field(default_factory=dict)  # pipeline(lower) -> global names
     library_name: Optional[str] = None  # the Variable Library that holds the factory's global parameters (None: there are none it can hold)
     library: dict[str, str] = field(default_factory=dict)  # global (lower) -> pipeline type, for those the library holds
+    library_decode: dict[str, str] = field(default_factory=dict)  # global (lower) -> float | json, for those held as JSON text
     ir_kinds: dict[str, Optional[str]] = field(default_factory=dict)  # integration runtime (lower) -> kind
     prereqs: dict[tuple[str, str], Prerequisite] = field(default_factory=dict)
     # Spark workloads that were approved AND deployed to Fabric (workloads-deploy): source item (lower) -> manifest entry.
     # Empty unless the user opted in; conversion then still defaults to running the source compute.
     workloads: dict[str, Any] = field(default_factory=dict)
+    # SSIS packages assessed by workloads-assess (approved or not): "<pipeline>/<activity>" (lower) -> manifest entry. Read only to say how ready
+    # the package is for Fabric's Invoke SSIS package; the activity itself is not generated.
+    ssis_packages: dict[str, Any] = field(default_factory=dict)
     # Databricks job structures read by workloads-assess (projects/<p>/databricks/jobs): job id -> structure. Empty otherwise.
     databricks_jobs: dict[str, dict] = field(default_factory=dict)
     # Opt-in Lakehouse repointing: (account, container) -> shortcut name under Files, from the storage map; the lakehouse's name.
     storage_routes: dict[tuple[str, str], str] = field(default_factory=dict)
     route_lakehouse: Optional[str] = None
     route_default: bool = True  # repoint every dataset that can be (convert --lakehouse); False: only those the activity mapping chose
+    # Storage event triggers whose files now land in a lakehouse (convert --onelake-trigger): trigger (lower) -> OneLakeTarget. A person's
+    # choice only: datasets repointed through shortcuts do not count, because OneLake raises no event for a file written to ADLS.
+    onelake_triggers: dict[str, Any] = field(default_factory=dict)
     # The project's activity mapping (agent/conversion/project_mapping.py): activity id (lower) -> (switch kind, chosen value).
     choices: dict[str, tuple[str, str]] = field(default_factory=dict)
     _ls_sets: dict[str, set] = field(default_factory=dict)  # linked service (lower) -> distinct literal argument sets in use
@@ -239,6 +246,8 @@ class PipelineContext:
     rename: dict[str, str] = field(default_factory=dict)  # lowercase source activity -> output component
     registry: list[Any] = field(default_factory=list)  # ActivityConversion list, flat, source order
     param_names: set[str] = field(default_factory=set)  # lowercase
+    # parameter (lower) -> TriggerEvent property, for the parameters a tumbling window trigger fills with its window times (engine.py)
+    window_params: dict[str, str] = field(default_factory=dict)
 
     def alloc(self, base: str) -> str:
         """A pipeline-unique component name (deterministic)."""
@@ -304,7 +313,8 @@ class ActivityBuilder:
     # -- environments --------------------------------------------------------------------------------
     def env(self, **kw) -> ExprEnv:
         return ExprEnv(activity_rename=self.pc.rename, used_globals=self.pc.used_globals,
-                       existing_params=self.pc.param_names, library=self.pc.project.library, **kw)
+                       existing_params=self.pc.param_names, library=self.pc.project.library,
+                       library_decode=self.pc.project.library_decode, window_params=self.pc.window_params, **kw)
 
     # -- recording -----------------------------------------------------------------------------------
     def mapping(self, source: str, target: Optional[str], rule: str, note: str = "", preserved: bool = True) -> None:

@@ -71,11 +71,12 @@ def build_project_context(d: AdfSemanticDiscovery, resolutions: Resolutions) -> 
     from adf2fabric.agent.conversion import variable_library
 
     library = {k: kinds[1] for k, g in gp.items() if (kinds := variable_library.eligible(g))}
+    library_decode = {k: fn for k, g in gp.items() if (fn := variable_library.decoder(g))}  # Float/Array/Object held as JSON text
     # a global the Variable Library holds is read by each pipeline itself; only the others are passed down as gp_ parameters
     globals_needed = {k: sorted((o for low, o in v.items() if low not in library), key=str.lower) for k, v in direct.items()}
     factory = next((f.name for f in d.factory if f.name), "factory")
     return ProjectContext(
-        library_name=variable_library.library_name(factory) if library else None, library=library,
+        library_name=variable_library.library_name(factory) if library else None, library=library, library_decode=library_decode,
         datasets={x.name.lower(): x for x in d.datasets},
         linked_services={x.name.lower(): x for x in d.linked_services},
         pipelines=pipelines, global_params=gp, triggers=list(d.triggers), resolutions=resolutions,
@@ -138,8 +139,9 @@ class ConversionAgent:
                 wm = self.store.load_workload_manifest(project.id)
                 ctx.workloads = {w.source_item.lower(): w for w in wm.workloads
                                  if w.approval.status == 'approved' and w.artifact.fabric_item_id}
+                ctx.ssis_packages = {u.lower(): w for w in wm.workloads if w.kind.value == "ssis_package" for u in w.used_by}
             except Exception:  # noqa: BLE001 - a damaged manifest must not stop conversion; the default path is unaffected
-                ctx.workloads = {}
+                ctx.workloads, ctx.ssis_packages = {}, {}
         from adf2fabric.agent.workloads import databricks_jobs
 
         ctx.databricks_jobs = databricks_jobs.load_all(self.store.project_dir(pid))
@@ -151,6 +153,20 @@ class ConversionAgent:
             shortcuts = json.loads(smap.read_text(encoding="utf-8")).get("shortcuts", [])
             ctx.storage_routes = {(s["account"].lower(), s["container"].lower()): s["shortcut"] for s in shortcuts}
             ctx.route_lakehouse = request.lakehouse
+        if request.onelake_triggers:  # a person says these triggers' files now land in a lakehouse (never inferred from --lakehouse)
+            from adf2fabric.agent.conversion.event_triggers import OneLakeTarget
+
+            known = {t.name.lower(): t for t in d.triggers}
+            try:
+                targets = {k.lower(): OneLakeTarget.parse(v) for k, v in request.onelake_triggers.items()}
+            except ValueError as exc:
+                return ConversionResult(success=False, message="Conversion failed.", error=f"--onelake-trigger: {exc}.")
+            wrong = sorted(k for k in targets if k not in known or (known[k].type or "").lower() != "blobeventstrigger")
+            if wrong:
+                return ConversionResult(success=False, message="Conversion failed.",
+                                        error=f"--onelake-trigger names no storage event trigger: {', '.join(wrong)}. Storage event triggers: "
+                                              f"{', '.join(sorted(t.name for t in d.triggers if (t.type or '').lower() == 'blobeventstrigger')) or '(none)'}.")
+            ctx.onelake_triggers = targets
         # The project's activity mapping (conversion/activity-mapping.json): written again from discovery (choices kept), then followed.
         from adf2fabric.agent.conversion import project_mapping as PM
 
@@ -221,6 +237,27 @@ class ConversionAgent:
                     self.store.write_conversion_file(pid, rel, json.dumps(body, indent=2, ensure_ascii=False) + "\n")
                     written[t.name] = rel
                 t.schedule_file = written[t.name]
+
+        # Storage event triggers -> the Activator plan (the definition itself is built by deploy, which knows the workspace's ids).
+        from adf2fabric.agent.conversion import event_triggers
+
+        by_name = {t.name.lower(): t for t in d.triggers}
+        planned: dict[str, str] = {}
+        for record in converted:
+            for t in record.triggers:
+                if t.activator_target not in ("onelake", "azure_blob", "custom_event") or not t.activator_steps or t.name.lower() not in by_name:
+                    continue
+                if t.name not in planned:
+                    ev = event_triggers.plan(by_name[t.name.lower()], ctx.onelake_triggers.get(t.name.lower()))
+                    safe = re.sub(r"[^A-Za-z0-9._-]+", "_", t.name).strip("._") or "trigger"
+                    rel = f"activators/{safe}.json"
+                    body = {**ev.to_dict(), "sourceState": t.runtime_state, "itemType": "Reflex", "itemName": event_triggers.item_name(ev),
+                            "api": "POST /v1/workspaces/{workspaceId}/items (type Reflex, part ReflexEntities.json)" if ev.target == "onelake"
+                            else "none: created in the Fabric Trigger wizard" if ev.target == "azure_blob"
+                            else "none: an Eventstream and an Activator rule created by a person (see steps)"}
+                    self.store.write_conversion_file(pid, rel, json.dumps(body, indent=2, ensure_ascii=False) + "\n")
+                    planned[t.name] = rel
+                t.activator_file = planned[t.name]
 
         # Source artifacts discovery could not process are missing from this conversion: it cannot be "converted".
         lost = [u for u in d.unprocessed_artifacts if u.reason in UNPROCESSED_LOSS_REASONS]

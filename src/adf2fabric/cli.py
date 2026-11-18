@@ -1544,8 +1544,13 @@ def discovery_adf_semantic(project_name: str) -> None:
 @click.option("--assisted", "assisted", is_flag=True,
               help="Opt-in: convert the model-assisted drafts a person accepted (and that are still current) in place of the original source of those "
                    "pipelines (see `assist-candidates`). The converter itself stays deterministic; each such pipeline is marked.")
+@click.option("--onelake-trigger", "onelake_triggers", multiple=True,
+              help="TRIGGER=LAKEHOUSE[:Files/<folder>]: this storage event trigger's files now land in that lakehouse, so it becomes a generated "
+                   "Activator rule on OneLake events (deploy --triggers). Default folder Files/<container>. Repeatable. Not implied by --lakehouse: "
+                   "OneLake raises no event for a file written to ADLS behind a shortcut.")
 def convert(project_name: str, pipelines: tuple[str, ...], resolutions_path: str | None,
-            apply_reconstruction: bool, compute_sources_path: str | None, lakehouse: str | None, from_brief: bool, assisted: bool) -> None:
+            apply_reconstruction: bool, compute_sources_path: str | None, lakehouse: str | None, from_brief: bool, assisted: bool,
+            onelake_triggers: tuple[str, ...]) -> None:
     """Convert the discovered ADF pipelines to Fabric pipeline definitions (deterministic: no model writes Fabric JSON; --assisted only swaps in
     ADF source a person reviewed)."""
     config = load_config()
@@ -1566,10 +1571,17 @@ def convert(project_name: str, pipelines: tuple[str, ...], resolutions_path: str
         lakehouse = lakehouse or agreed.get("lakehouse")
         apply_reconstruction = apply_reconstruction or bool(agreed.get("apply_reconstruction"))
         click.echo(f"Following the approved brief: {len(pipelines) or 'all'} pipeline(s), lakehouse {lakehouse or '-'}.")
+    targets: dict[str, str] = {}
+    for item in onelake_triggers:
+        trig, sep, where = item.partition("=")
+        if not sep or not trig.strip() or not where.strip():
+            click.secho(f"--onelake-trigger expects TRIGGER=LAKEHOUSE[:Files/<folder>], got '{item}'.", fg="red", err=True)
+            sys.exit(1)
+        targets[trig.strip()] = where.strip()
     result = ConversionAgent(store).run(
         ConversionRequest(project_name=project_name, pipelines=list(pipelines), resolutions_path=resolutions_path,
                           apply_reconstruction=apply_reconstruction, compute_sources_path=compute_sources_path,
-                          lakehouse=lakehouse, assisted=assisted)
+                          lakehouse=lakehouse, assisted=assisted, onelake_triggers=targets)
     )
     if not result.success:
         click.secho(f"Conversion failed: {result.error}", fg="red", err=True)
@@ -1688,17 +1700,26 @@ def reconstruct(project_name: str) -> None:
 @click.option("--enable-schedules", "enable_schedules", is_flag=True,
               help="With --schedules: create schedules enabled when the ADF trigger was started. A start time in the "
                    "past makes Fabric run the pipeline immediately.")
+@click.option("--triggers", "triggers", is_flag=True,
+              help="Also create the Activator rules generated from ADF storage event triggers (convert --onelake-trigger), switched OFF; "
+                   "an Activator of the same name is never changed. Triggers that stay on Azure storage get read-only readiness checks.")
+@click.option("--triggers-only", "triggers_only", is_flag=True,
+              help="Only the Activator rules, for pipelines already in the workspace. No pipeline is created or overwritten. Implies --triggers.")
+@click.option("--enable-triggers", "enable_triggers", is_flag=True,
+              help="With --triggers: switch a rule on when its ADF trigger was started. It then runs the pipeline on the next matching file.")
 @azure_auth_options()
 @click.option("--apply", "apply_", is_flag=True,
               help="Actually create/overwrite pipelines in Fabric. Without it this is a dry run (read-only).")
 @_audited("deploy")
 def deploy_cmd(project_name: str, workspace_id: str, pipelines: tuple[str, ...], with_children: bool,
-               allow_unbound: bool, schedules: bool, schedules_only: bool, enable_schedules: bool, apply_: bool,
-               auth: str, **auth_env: str | None) -> None:
+               allow_unbound: bool, schedules: bool, schedules_only: bool, enable_schedules: bool, triggers: bool, triggers_only: bool,
+               enable_triggers: bool, apply_: bool, auth: str, **auth_env: str | None) -> None:
     """Deploy converted pipelines to a Fabric workspace (dry run unless --apply)."""
     import json as _json
 
     schedules = schedules or schedules_only
+    triggers = triggers or triggers_only
+    no_pipelines = schedules_only or triggers_only  # only add schedules / rules to pipelines already in the workspace
 
     from adf2fabric.agent.deployment.fabric_deploy import (
         DeployError, DeployItem, FabricClient, child_refs, deploy,
@@ -1749,11 +1770,12 @@ def deploy_cmd(project_name: str, workspace_id: str, pipelines: tuple[str, ...],
     try:
         credential, _ = build_credential(credential_from(auth, **auth_env))
         from adf2fabric.agent.deployment.fabric_deploy import FABRIC_SCOPE
-        client = FabricClient(credential.get_token(FABRIC_SCOPE).token)
+        fabric_token = credential.get_token(FABRIC_SCOPE).token
+        client = FabricClient(fabric_token)
         from adf2fabric.agent.conversion import variable_library
 
         lib_results: list = []
-        results = [] if schedules_only else deploy(client, workspace_id, items, apply=apply_, allow_unbound=allow_unbound,
+        results = [] if no_pipelines else deploy(client, workspace_id, items, apply=apply_, allow_unbound=allow_unbound,
                                                    libraries=variable_library.load(base), library_results=lib_results)
         if results:  # the same record the API stage keeps: where each pipeline was last deployed, which the Report and the UI read
             from adf2fabric.agent.deployment import record as deploy_record
@@ -1773,14 +1795,15 @@ def deploy_cmd(project_name: str, workspace_id: str, pipelines: tuple[str, ...],
         click.secho(f"Deploy failed: could not get a Fabric token or reach Fabric ({type(exc).__name__}). "
                     "Check `az login` with an account that has access to the workspace.", fg="red", err=True)
         sys.exit(1)
-    if schedules_only:
-        click.echo(("SCHEDULES ONLY - no pipeline is created or changed" if apply_ else
-                    "SCHEDULES ONLY (dry run - nothing changed; add --apply)") + f"  workspace: {workspace_id}")
+    if no_pipelines:
+        what = " AND ".join(w for w, on in (("SCHEDULES", schedules_only), ("TRIGGERS", triggers_only)) if on)
+        click.echo((f"{what} ONLY - no pipeline is created or changed" if apply_ else
+                    f"{what} ONLY (dry run - nothing changed; add --apply)") + f"  workspace: {workspace_id}")
     else:
         click.echo(("DEPLOY TO FABRIC" if apply_ else "DEPLOY TO FABRIC (dry run - nothing changed; add --apply)")
                    + f"  workspace: {workspace_id}")
     colours = {"create": "green", "update": "yellow", "refused": "red", "failed": "red", "use": "green"}
-    for lr in ([] if schedules_only else lib_results):
+    for lr in ([] if no_pipelines else lib_results):
         click.secho(f"  - Variable Library {lr.name}: {lr.action}{f' [{lr.item_id}]' if lr.item_id else ''} - {lr.detail}", fg=colours[lr.action])
     for r in results:
         click.secho(f"  - {r.name}: {r.action}{f' [{r.item_id}]' if r.item_id else ''} - {r.detail}", fg=colours[r.action])
@@ -1790,7 +1813,7 @@ def deploy_cmd(project_name: str, workspace_id: str, pipelines: tuple[str, ...],
     if schedules:
         from adf2fabric.agent.deployment.fabric_deploy import ScheduleItem, deploy_schedules, list_pipelines_by_name
 
-        deployed = ({i.name for i in items} if schedules_only
+        deployed = ({i.name for i in items} if no_pipelines
                     else {r.name for r in results if r.action in ("create", "update")})
         sched_items = [
             ScheduleItem(p.fabric_pipeline_name, t.name, body)
@@ -1811,8 +1834,53 @@ def deploy_cmd(project_name: str, workspace_id: str, pipelines: tuple[str, ...],
                 click.secho(f"  - {r.pipeline} / {r.trigger}: {r.action}{f' [{r.schedule_id}]' if r.schedule_id else ''}"
                             f" - {r.detail}", fg=scolours[r.action])
             failed_schedules = any(r.action == "failed" for r in sres)
+    if triggers:
+        failed_schedules = _deploy_triggers(store, project_name, conversion, client, workspace_id, fabric_token, credential, items, results,
+                                            no_pipelines=no_pipelines, apply_=apply_, enable=enable_triggers) or failed_schedules
     if failed_schedules or any(r.action in ("refused", "failed") for r in results):
         sys.exit(2)
+
+
+def _deploy_triggers(store, project_name: str, conversion, client, workspace_id: str, fabric_token: str, credential, items, results, *,
+                     no_pipelines: bool, apply_: bool, enable: bool) -> bool:
+    """The Activator part of `deploy --triggers`. True when something failed."""
+    import json as _json
+
+    from adf2fabric import cloud
+    from adf2fabric.agent.deployment.activator_deploy import deploy_activators, plan_from_file
+    from adf2fabric.agent.deployment.fabric_deploy import DeployError
+    from adf2fabric.agent.provisioning.transport import ArmGateway, token_tenant
+
+    deployed = {i.name.lower() for i in items} if no_pipelines else {r.name.lower() for r in results if r.action in ("create", "update")}
+    base = store.conversion_dir(project_name)
+    plans, seen = [], set()
+    for p in conversion.pipelines:
+        for t in p.triggers:
+            if not t.activator_file or t.name.lower() in seen or p.fabric_pipeline_name.lower() not in deployed:
+                continue
+            seen.add(t.name.lower())
+            try:
+                plans.append(plan_from_file(_json.loads((base / t.activator_file).read_text(encoding="utf-8"))))
+            except (OSError, ValueError, TypeError) as exc:
+                click.secho(f"  - {t.name}: failed - the activator file could not be read ({type(exc).__name__}); convert again", fg="red")
+                return True
+    click.echo("TRIGGERS (Activator rules from ADF storage event triggers; created switched off unless --enable-triggers)")
+    if not plans:
+        click.echo("  none: no pipeline in scope has a storage event trigger (convert --onelake-trigger generates the OneLake ones).")
+        return False
+    arm = ArmGateway(lambda: credential.get_token(cloud.ARM_SCOPE).token) if any(p.target == "azure_blob" for p in plans) else None
+    try:
+        res = deploy_activators(client, workspace_id, plans, tenant_id=token_tenant(fabric_token), apply=apply_, enable=enable, arm=arm)
+    except DeployError as exc:
+        click.secho(f"  triggers failed: {exc}", fg="red", err=True)
+        return True
+    colours = {"create": "green", "exists": "yellow", "skipped": "yellow", "manual": "yellow", "failed": "red"}
+    marks = {"ok": "ok", "fail": "FAIL", "unknown": "unknown"}
+    for r in res:
+        click.secho(f"  - {r.trigger}: {r.action}{f' [{r.item_id}]' if r.item_id else ''} - {r.detail}", fg=colours[r.action])
+        for check, state, detail in r.checks:
+            click.secho(f"      {marks[state]}: {check} - {detail}", fg={"ok": "green", "fail": "red"}.get(state))
+    return any(r.action == "failed" for r in res)
 
 
 @cli.command(name="create-shortcut")

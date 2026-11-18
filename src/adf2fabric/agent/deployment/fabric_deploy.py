@@ -508,12 +508,20 @@ class ScheduleResult:
     detail: str = ""
 
 
+class UnreadableSchedules(DeployError):
+    """The item has a schedule the public API cannot return. Seen live on 2026-11-18: once a pipeline has an interval-based schedule
+    (preview, made in the portal), List Item Schedules answers 400 InvalidConfiguration for the whole item."""
+
+
 def list_schedules(client: FabricClient, workspace: str, item_id: str) -> list[dict]:
     url = f"{FABRIC_API}/workspaces/{workspace}/items/{item_id}/jobs/{SCHEDULE_JOB_TYPE}/schedules"
     found: list[dict] = []
     token: Optional[str] = None
     while True:
         resp = client._call("GET", url + (f"?continuationToken={token}" if token else ""))
+        if resp.status_code == 400 and "InvalidConfiguration" in (resp.text or ""):
+            raise UnreadableSchedules("the pipeline has a schedule Fabric's API cannot read (an interval-based schedule, preview, made in the "
+                                      "portal), so existing schedules cannot be checked for a duplicate")
         if resp.status_code != 200:
             raise DeployError(f"Listing schedules failed (HTTP {resp.status_code}): {_error_text(resp)}")
         data = resp.json()
@@ -563,6 +571,8 @@ def deploy_schedules(client: FabricClient, workspace: str, items: list[ScheduleI
             sid = create_schedule(client, workspace, item_id, body)
             existing.append({"id": sid, "configuration": it.body["configuration"]})  # a second identical trigger in this run sees it
             results.append(ScheduleResult(it.pipeline, it.trigger, "create", sid, f"created {state}"))
+        except UnreadableSchedules as exc:  # never risk a duplicate: not added
+            results.append(ScheduleResult(it.pipeline, it.trigger, "skipped", detail=f"not added: {exc}; add it in the portal"))
         except DeployError as exc:
             results.append(ScheduleResult(it.pipeline, it.trigger, "failed", detail=str(exc)))
     return results

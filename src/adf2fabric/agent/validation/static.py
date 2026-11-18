@@ -553,6 +553,8 @@ def connections_and_secrets(inp: Inputs, c: Collector) -> None:
             leaks += [f"{tp.name}: {p}" for p in has_plaintext_secret(tp.content)]
     for s in inp.tgt.schedules:
         leaks += [f"schedule {s.get('trigger')}: {p}" for p in has_plaintext_secret(s)]
+    for a in inp.tgt.activators:
+        leaks += [f"activator {a.get('trigger')}: {p}" for p in has_plaintext_secret(a)]
     c.add("connections_secrets.plaintext_secrets", K.connections_secrets, R.FAIL if leaks else R.PASS,
           f"{len(leaks)} generated value(s) look like plaintext secrets." if leaks else "No generated artifact holds a plaintext secret (values are never printed here).",
           evidence=leaks, remediation="Remove the literal, rotate the exposed secret, and reference a Fabric connection or Key Vault instead." if leaks else "")
@@ -736,6 +738,7 @@ def _lakehouse_artifact(linked: Any) -> Optional[str]:
 
 def triggers_and_globals(inp: Inputs, c: Collector) -> None:
     sched = {t.lower(): s for s in inp.tgt.schedules for t in [str(s.get("trigger", ""))]}
+    acts = {str(a.get("trigger", "")).lower(): a for a in inp.tgt.activators}
     if not inp.tgt.pipelines:  # conversion has not run
         for f in inp.src.of("trigger"):
             c.comp(f"trigger:{f.name}", "trigger", S.unverified, note="not converted yet")
@@ -750,7 +753,8 @@ def triggers_and_globals(inp: Inputs, c: Collector) -> None:
                       remediation="Re-run conversion.")
                 c.comp(comp, "trigger", S.missing, note="no generated schedule")
                 continue
-            src_pipes = sorted(str((p.get("pipelineReference") or {}).get("referenceName", "")).lower() for p in props.get("pipelines", []) if isinstance(p, dict))
+            listed = [*(props.get("pipelines", []) or []), *([props["pipeline"]] if isinstance(props.get("pipeline"), dict) else [])]  # tumbling: "pipeline"
+            src_pipes = sorted(str((p.get("pipelineReference") or {}).get("referenceName", "")).lower() for p in listed if isinstance(p, dict))
             tgt_pipes = sorted(str(p).lower() for p in s.get("pipelines", []))
             rec = (props.get("typeProperties") or {}).get("recurrence") or {}
             cfg = ((s.get("schedules") or [{}])[0].get("configuration") or {}) if s.get("schedules") else {}
@@ -765,9 +769,28 @@ def triggers_and_globals(inp: Inputs, c: Collector) -> None:
                   f"Trigger '{f.name}' differs from its schedule." if probs else f"Trigger '{f.name}' maps to a disabled Fabric schedule for the same pipeline(s).", component=comp, evidence=probs,
                   remediation="Re-run conversion." if probs else "")
             c.comp(comp, "trigger", S.altered if probs else S.transformed, note="became a Fabric schedule (created disabled)", diff_=probs)
+        elif ttype == "BlobEventsTrigger" and (acts.get(f.name.lower()) or {}).get("target") == "onelake":
+            a = acts[f.name.lower()]
+            tp_ = props.get("typeProperties") or {}
+            src_pipes = sorted(str((p.get("pipelineReference") or {}).get("referenceName", "")).lower() for p in props.get("pipelines", []) if isinstance(p, dict))
+            probs = []
+            if src_pipes != sorted(str(p).lower() for p in a.get("pipelines", [])):
+                probs.append(f"pipelines {src_pipes} -> {a.get('pipelines')}")
+            if len(tp_.get("events") or []) != len(a.get("event_types") or []):
+                probs.append(f"events {tp_.get('events')} -> {a.get('event_types')}")
+            if (tp_.get("blobPathBeginsWith") or tp_.get("blobPathEndsWith")) and not a.get("filters"):
+                probs.append("the ADF path filters were not carried")
+            c.add("execution_semantics.trigger", K.execution_semantics, R.FAIL if probs else R.PASS,
+                  f"Trigger '{f.name}' differs from its Activator rule." if probs else
+                  f"Trigger '{f.name}' maps to a switched-off Fabric Activator rule on lakehouse '{a.get('lakehouse')}' for the same pipeline(s); "
+                  "it watches OneLake, not Azure storage.", component=comp, evidence=probs + list(a.get("notes") or []),
+                  remediation="Re-run conversion." if probs else "Confirm the files are written to the lakehouse before switching the rule on.")
+            c.comp(comp, "trigger", S.altered, note="became a Fabric Activator rule on OneLake events (created switched off)", diff_=probs)
         else:
             c.add("execution_semantics.trigger", K.execution_semantics, R.BLOCKED, f"Trigger '{f.name}' ({ttype}) has no automatic Fabric pipeline schedule.", component=comp,
-                  remediation="Recreate it by hand (for event triggers, a Fabric Activator rule).")
+                  remediation="Recreate it by hand (for a storage event trigger: the Fabric Trigger wizard steps in the conversion report, or "
+                              "`convert --onelake-trigger` when its files now land in a lakehouse; for a custom event trigger: the Eventstream and "
+                              "Activator steps in the conversion report).")
             c.comp(comp, "trigger", S.missing, note=f"{ttype} is not converted")
     used_gp: set[str] = set()
     from_library: set[str] = set()

@@ -6,9 +6,12 @@ through ``properties.libraryVariables`` (``{"<alias>": {"type", "variableName", 
 this way (a probe, not a converted pipeline) ran and returned the library's values.
 
 A global parameter goes to the library only when a pipeline can read it from there and its value is a plain literal:
-String, Int (library type Integer, read as Int) and Bool (library Boolean, read as Bool). Float has no pipeline-readable library
-type (Microsoft: "Number types aren't supported in pipelines"), Array and Object have none, a SecureString must not be written
-into an item definition, and an expression default has no literal value: those stay ``gp_`` pipeline parameters, as before.
+String, Int (library type Integer, read as Int) and Bool (library Boolean, read as Bool) as themselves. Float has no
+pipeline-readable library type (Microsoft, "Variable library integration with pipelines", 2026-06-22: "Number types aren't supported
+in pipelines"), and Array and Object have no library type at all, so these three are stored as a String holding their compact JSON
+text (``0.75``, ``["EU","US"]``) and every reference is read back through ``float(...)`` or ``json(...)`` (expr_convert.py; ``ENCODED``).
+An expression default has no literal value and stays a ``gp_`` pipeline parameter. (ADF itself refuses a SecureString global
+parameter: "UnsupportedTypeSecureString", seen live 2026-11-18.)
 
 The definition parts below (``variables.json``, ``settings.json``) are the ones Fabric's getDefinition returned for a library
 created through the REST API.
@@ -17,6 +20,7 @@ created through the REST API.
 from __future__ import annotations
 
 import json
+import math
 import re
 from typing import Any, Iterable, Optional
 
@@ -42,13 +46,40 @@ def _value(kind: str, raw: Any) -> tuple[bool, Any]:
     return False, None
 
 
+# ADF type -> the function every reference reads the String variable back with
+ENCODED = {"float": "float", "array": "json", "object": "json"}
+
+
+def _encodable(adf_type: str, raw: Any) -> bool:
+    if adf_type == "float":
+        return isinstance(raw, (int, float)) and not isinstance(raw, bool) and math.isfinite(raw)
+    return isinstance(raw, list) if adf_type == "array" else isinstance(raw, dict)
+
+
 def eligible(gp) -> Optional[tuple[str, str]]:
     """(library type, pipeline type) when global parameter ``gp`` can live in the library, else None."""
-    kinds = LIBRARY_TYPES.get((gp.type or "").lower())
-    if not kinds or gp.is_expression or not gp.has_default:
+    t = (gp.type or "").lower()
+    if gp.is_expression or not gp.has_default:
+        return None
+    if t in ENCODED:
+        return ("String", "String") if _encodable(t, gp.default_raw) else None
+    kinds = LIBRARY_TYPES.get(t)
+    if not kinds:
         return None
     ok, _ = _value(kinds[0], gp.default_raw)
     return kinds if ok else None
+
+
+def decoder(gp) -> Optional[str]:
+    """``float`` / ``json`` when ``gp`` is held in the library as JSON text, else None."""
+    return ENCODED.get((gp.type or "").lower()) if eligible(gp) else None
+
+
+def stored_value(gp) -> Any:
+    """The library value: the literal itself, or the compact JSON text of a Float / Array / Object (what ADF's string() prints)."""
+    if decoder(gp):
+        return json.dumps(gp.default_raw, separators=(",", ":"), ensure_ascii=False)
+    return gp.default_raw
 
 
 def variables(globals_: Iterable) -> list[dict]:
@@ -56,7 +87,9 @@ def variables(globals_: Iterable) -> list[dict]:
     for gp in sorted(globals_, key=lambda g: g.name.lower()):
         kinds = eligible(gp)
         if kinds:
-            out.append({"name": gp.name, "note": f"ADF global parameter {gp.name}", "type": kinds[0], "value": gp.default_raw})
+            fn = decoder(gp)
+            note = f"ADF global parameter {gp.name}" + (f" ({gp.type}, stored as JSON text; pipelines read it with {fn}())" if fn else "")
+            out.append({"name": gp.name, "note": note, "type": kinds[0], "value": stored_value(gp)})
     return out
 
 

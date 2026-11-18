@@ -20,6 +20,7 @@ It reads only the semantic representation; the original ADF source is never touc
 from __future__ import annotations
 
 import copy
+import re
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
@@ -33,6 +34,7 @@ from adf2fabric.agent.conversion.context import (
 from adf2fabric.agent.conversion.expr_convert import global_param_name, library_alias
 from adf2fabric.agent.conversion.handlers._common import downgrade_if_not_direct, has_masked_secret
 from adf2fabric.agent.conversion import compatibility as compat
+from adf2fabric.agent.conversion import event_triggers
 from adf2fabric.agent.conversion.triggers import build_schedules
 from adf2fabric.agent.conversion.registry import ConversionRule, rule_for
 from adf2fabric.agent.conversion.pipeline_semantics import outcome_notes, verify_graph
@@ -92,6 +94,7 @@ class ConversionEngine:
     def convert_pipeline(self, p: AdfPipeline) -> tuple[PipelineConversion, dict]:
         pc = PipelineContext(project=self.project, pipeline=p)
         pc.param_names = {x.name.lower() for x in p.parameters}
+        pc.window_params = window_parameters(self.project.triggers, p.name)
         for a in walk(p.activities):
             pc.reserve(a.name)
 
@@ -474,11 +477,30 @@ class ConversionEngine:
         for t in self.project.triggers:
             if p.name.lower() not in {r.lower() for r in t.pipeline_refs}:
                 continue
-            out.append(_trigger_note(t))
+            out.append(_trigger_note(t, self.project.onelake_triggers.get(t.name.lower())))
         return sorted(out, key=lambda n: n.name.lower())
 
 
-def _trigger_note(t: AdfTrigger) -> TriggerNote:
+_WINDOW_OUTPUTS = {"windowstarttime": "windowStartTimeUtc", "windowendtime": "windowEndTimeUtc"}
+
+
+def window_parameters(triggers: list[AdfTrigger], pipeline: str) -> dict[str, str]:
+    """Pipeline parameter (lower) -> the Fabric TriggerEvent property holding the same window time, for each parameter a tumbling window
+    trigger of ``pipeline`` fills with ``@trigger().outputs.windowStartTime`` / ``windowEndTime``. A Fabric interval-based schedule passes
+    no parameters; the pipeline reads ``pipeline()?.TriggerEvent?.windowStartTimeUtc`` itself (what the Fabric expression builder wrote,
+    2026-11-18)."""
+    out: dict[str, str] = {}
+    for t in triggers:
+        if (t.type or "").lower() != "tumblingwindowtrigger":
+            continue
+        for name, value in (t.pipeline_parameters.get(pipeline) or next((v for k, v in t.pipeline_parameters.items() if k.lower() == pipeline.lower()), {})).items():
+            m = re.fullmatch(r"@trigger\(\)\.outputs\.(windowstarttime|windowendtime)", value.replace(" ", "").lower())
+            if m:
+                out[name.lower()] = _WINDOW_OUTPUTS[m.group(1)]
+    return out
+
+
+def _trigger_note(t: AdfTrigger, onelake: Any = None) -> TriggerNote:
     rec = t.recurrence
     when = ""
     if rec:
@@ -494,6 +516,20 @@ def _trigger_note(t: AdfTrigger) -> TriggerNote:
         action = "Create a Fabric event trigger (Activator) for the same storage event."
     else:
         action = "Create the equivalent Fabric trigger or schedule manually."
+    ev = event_triggers.plan(t, onelake) if "event" in kind else None
+    if ev is not None:
+        action = {"onelake": f"A Fabric Activator rule watching lakehouse '{ev.lakehouse}' was generated (deploy with --triggers; it is created "
+                             "switched off). It differs from the source in documented ways - read the notes.",
+                  "azure_blob": "Create the Activator rule in the Fabric Trigger wizard (Azure Blob Storage events): the steps below say exactly "
+                                "what to set.",
+                  "custom_event": "Recreate it as an Eventstream and an Activator rule: Fabric has no source for an Event Grid custom topic. The "
+                                  "steps below give both routes and the exact Event Grid filter to carry."}.get(ev.target, action + " " + " ".join(ev.notes))
+        if ev.target == "custom_event" and not ev.steps:
+            action = "Recreate it by hand: " + " ".join(ev.notes)
+        return TriggerNote(
+            name=t.name, trigger_type=t.type, runtime_state=t.runtime_state, pipelines=sorted(t.pipeline_refs),
+            summary=f"{t.type or 'Trigger'}" + (f"; state {t.runtime_state}" if t.runtime_state else ""), action=action, details=_trigger_details(t),
+            activator_status=ev.status, activator_target=ev.target, activator_notes=ev.notes, activator_steps=ev.steps)
     sched = build_schedules(t)
     if sched.status in ("generated", "generated_with_differences"):
         action += (" A Fabric schedule definition was generated (deploy with --schedules; it is created disabled)."
@@ -532,10 +568,17 @@ def _trigger_details(t: AdfTrigger) -> list[str]:
                 out.append(f"{label}: `{value}`")
         if e.ignore_empty_blobs is not None:
             out.append(f"Ignore empty blobs: {e.ignore_empty_blobs}")
+        for f in e.advanced_filters:
+            out.append(f"Advanced filter: `{f['key']}` {f['operatorType']} {f['values']}")
     for pipeline, params in sorted(t.pipeline_parameters.items()):
         for name, value in sorted(params.items()):
             line = f"Parameter `{name}` of `{pipeline}` was set to `{_shown(value)}`"
-            if value.lower().startswith(_TRIGGER_SCOPE_VALUES):
+            if e is not None and value.replace(" ", "").lower().startswith("@triggerbody()") and (t.type or "").lower() == "customeventstrigger":
+                line += ". In Fabric the Activator rule's action passes the event field as this pipeline parameter; see the Activator notes"
+            elif e is not None and value.replace(" ", "").lower().startswith("@triggerbody()"):
+                line += (". In Fabric the pipeline reads the file event itself through pipeline()?.TriggerEvent (for example "
+                         "@pipeline()?.TriggerEvent?.FileName); see the Activator notes")
+            elif value.lower().startswith(_TRIGGER_SCOPE_VALUES):
                 line += (". Trigger-scope expressions have no Fabric equivalent; Fabric offers the system variables "
                          "pipeline().TriggerTime and pipeline().TriggerName, which may cover it")
             out.append(line)

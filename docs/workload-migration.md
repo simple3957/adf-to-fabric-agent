@@ -252,6 +252,52 @@ value; another data flow expression is a manual step). Until the notebook is in 
 names it (`dataflow_notebook_pending`), so the Convert step lists it. Wrangling (Power Query) data flows still become a Dataflow
 Gen2 refresh. The data flow's own compute, staging and trace settings do not apply to a notebook and are reported as dropped.
 
+## SSIS packages
+
+Since 2026-11-18 an ADF *Execute SSIS Package* activity is a workload (kind `ssis_package`, `agent/workloads/ssis.py`), for Fabric's
+**Invoke SSIS package activity (preview)**. That activity runs a `.dtsx` (and an optional `.dtsConfig`) stored in OneLake, with no
+on-premises or private-network endpoints and no custom or third-party components (Microsoft's preview limitations, page updated
+2026-06-02). So the work per activity is: find the package wherever ADF keeps it, check it against those limits, and put it in OneLake.
+
+**Finding the package** (`typeProperties.packageLocation.type`, from the ADF REST spec):
+
+| ADF location | What the tool does |
+|---|---|
+| `InlinePackage` (embedded) | Reads it from the pipeline JSON (`packageContent`, and `childPackages`). The encoding is not documented ("compressed"), so plain XML and base64 of XML / gzip / zip / zlib / deflate are all tried; an unreadable one is reported. |
+| `File` with a `.dtsx` | A file share the tool does not read: pass the file with `--source "<packagePath>=<local .dtsx>"`. |
+| `File` with a `.ispac` + `packageName` (File System (Project)) | Pass the project with `--source "<packagePath>=<local .ispac>"`: the package and the project's connection managers and parameters are read from it. |
+| `SSISDB` | Export the project from the catalog (SSMS: right-click the project > Export) and pass the `.ispac` with `--source "<packagePath>=<file>"`. |
+| `PackageStore` | Export the package from the store and pass the `.dtsx` with `--source`. |
+| a path or content set by an expression | `dynamic`: known only at run time; never guessed. |
+
+**Checking it.** The package is parsed with the standard library after refusing any DTD or entity declaration (a `.dtsx` never has
+one), within a size limit. Findings:
+
+* **Protection level:** `EncryptAllWithUserKey` / `EncryptAllWithPassword` block it (re-save it with DontSaveSensitive);
+  `EncryptSensitiveWithUserKey` and `EncryptSensitiveWithPassword` need the secrets as overrides (Fabric shows no package password).
+* **Components:** a task or data flow component that is not built-in (`Microsoft.*`, `STOCK:*`) is third-party, which Fabric cannot
+  run (a managed component is judged by its `UserComponentTypeName`). Script tasks and components, Execute Package (child packages),
+  mail, FTP and web service tasks are review items; Execute Process, WMI and MSMQ tasks must change.
+* **Connections** (package and project connection managers), after applying the ADF activity's own overrides
+  (`packageConnectionManagers`, `projectConnectionManagers`, `propertyOverrides` on `ConnectionString`): a host that is the machine itself
+  (`.`, `localhost`), a single-label name, a private IP or a private DNS suffix cannot be reached (`ssis_private_source`, as in the
+  connections analysis); an unrecognised host is a review item; Windows authentication must change to Microsoft Entra or SQL
+  authentication; a local or network-share file path must point at ADLS Gen2 / OneLake. A connection string is read in memory only and
+  never stored.
+* **The activity and its Azure-SSIS runtime:** 32-bit runtime, Windows execution credentials, an SSISDB environment, a configuration
+  file, Key Vault values; the runtime's on-premises proxy (`dataProxyProperties`, cannot be reached from Fabric), virtual network,
+  custom setup (extra components) and Enterprise edition.
+
+**Writing it.** `workloads-generate` writes the package, its embedded child packages and a supplied configuration file under
+`workloads/artifacts/<package>/ssis/`, with a suggested lakehouse folder (`Files/ssis/<package>`). Two packages with one name get
+separate folders. Approval works as for any workload. Deploy does not upload SSIS packages yet, and the converter does not generate
+the Fabric activity: Microsoft does not document the JSON of its package location. The activity is a placeholder
+(`ssis_invoke_pending`) that states the package's classification and reasons; a person uploads the files and adds the activity in
+the Fabric portal. Reading the JSON of one portal-made activity is the next step, before the converter can generate it.
+
+Not proven yet: no package has run on Fabric's Invoke SSIS package from this tool, and the embedded-package encoding has not been
+confirmed against a package embedded by ADF Studio (the tests use Microsoft's sample package in several encodings).
+
 ## What Microsoft documents, and what is still unverified
 
 Verified against Microsoft Learn (2026-10-22): notebookutils `fs`, `notebook.run/exit`, `credentials.getSecret(<vault URL>, name)`,

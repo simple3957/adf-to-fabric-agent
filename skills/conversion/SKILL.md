@@ -25,11 +25,11 @@ Answer one question per activity:
 
 | Situation | What the agent does | Where it shows up |
 |---|---|---|
-| No Fabric equivalent (SSIS, U-SQL, classic ML, unknown type) | blocker plus a fail-fast placeholder activity, alternatives listed | status `blocked`, "Needs attention" |
+| No Fabric equivalent (U-SQL, classic ML, unknown type), or not generated yet (SSIS: Fabric's Invoke SSIS package is preview, its JSON undocumented) | blocker plus a fail-fast placeholder activity, alternatives listed | status `blocked`, "Needs attention" |
 | Needs redesign (Mapping Data Flow, Wrangling Data Flow, Synapse notebooks) | a scaffold bound to a Fabric item you create, alternatives listed | status `manual_required` |
 | Retired / removed connector or connector version | dated finding; blocker if no replacement exists, manual if a current version exists | "Compatibility findings" section, issue `compat_*` |
 | Deprecated or preview feature | dated finding with limitations | `compat_*` issue, `converted_with_differences` or `manual_required` |
-| ADF trigger | a Fabric schedule definition is generated where the recurrence maps exactly (`conversion/schedules/`); `manual` with the reason where it does not; event triggers are not generated | `Fabric schedule:` line in the report, `deploy --schedules` |
+| ADF trigger | a Fabric schedule definition is generated where the recurrence maps exactly (`conversion/schedules/`); `manual` with the reason where it does not; a storage event trigger becomes an Activator plan (`conversion/activators/`): generated for OneLake when a person says the files land in a lakehouse (`--onelake-trigger`), otherwise the Fabric wizard steps | `Fabric schedule:` / `Fabric Activator rule:` lines in the report, `deploy --schedules` / `--triggers` |
 | ADF change data capture resource | reported with its source, target and tables; no Copy job is generated | "Compatibility findings" (`artifact.adf_cdc`) |
 | Unsupported expression function / accessor | expression kept verbatim, never guessed | `expression_not_converted`, `manual_required` |
 | Over a documented limit (120 activities) | structural error, no automatic split | pipeline `structural_valid: false` |

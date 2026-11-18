@@ -82,8 +82,50 @@
     "fabric_invoke_ssis": {
       "url": "https://learn.microsoft.com/en-us/fabric/data-factory/invoke-ssis-package-activity",
       "title": "Invoke SSIS package activity (preview)",
-      "page_updated": null,
-      "read_on": "2026-11-16"
+      "page_updated": "2026-06-02",
+      "read_on": "2026-11-18"
+    },
+    "fabric_pipeline_runs": {
+      "url": "https://learn.microsoft.com/en-us/fabric/data-factory/pipeline-runs",
+      "title": "Run, schedule, or use events to trigger a pipeline",
+      "page_updated": "2026-09-21",
+      "read_on": "2026-11-18"
+    },
+    "fabric_reflex_definition": {
+      "url": "https://learn.microsoft.com/en-us/rest/api/fabric/articles/item-management/definitions/reflex-definition",
+      "title": "Reflex (Activator) item definition",
+      "page_updated": "2026-02-26",
+      "read_on": "2026-11-18"
+    },
+    "fabric_blob_events": {
+      "url": "https://learn.microsoft.com/en-us/fabric/real-time-hub/get-azure-blob-storage-events",
+      "title": "Get Azure Blob Storage events in Real-Time hub",
+      "page_updated": "2026-03-31",
+      "read_on": "2026-11-18"
+    },
+    "fabric_onelake_events": {
+      "url": "https://learn.microsoft.com/en-us/fabric/real-time-hub/explore-fabric-onelake-events",
+      "title": "Explore OneLake events in Fabric Real-Time hub",
+      "page_updated": "2025-12-11",
+      "read_on": "2026-11-18"
+    },
+    "fabric_eventstream_event_grid": {
+      "url": "https://learn.microsoft.com/en-us/fabric/real-time-intelligence/event-streams/add-source-azure-event-grid",
+      "title": "Connect an Event Grid namespace source to an eventstream",
+      "page_updated": "2026-06-30",
+      "read_on": "2026-11-18"
+    },
+    "fabric_eventstream_event_hubs": {
+      "url": "https://learn.microsoft.com/en-us/fabric/real-time-intelligence/event-streams/add-source-azure-event-hubs",
+      "title": "Add an Azure Event Hubs source to an eventstream",
+      "page_updated": "2026-11-17",
+      "read_on": "2026-11-18"
+    },
+    "adf_custom_event_trigger": {
+      "url": "https://learn.microsoft.com/en-us/azure/data-factory/how-to-create-custom-event-trigger",
+      "title": "Create custom event triggers in Azure Data Factory",
+      "page_updated": "2026-08-05",
+      "read_on": "2026-11-18"
     },
     "adf_activity_schema": {
       "url": "https://learn.microsoft.com/en-us/azure/templates/microsoft.datafactory/factories/pipelines",
@@ -2556,10 +2598,13 @@
       "runtime": "redesign",
       "variants": [
         "SSISDB",
-        "file system"
+        "File (package or .ispac project)",
+        "InlinePackage (embedded)",
+        "PackageStore"
       ],
       "carried": [
-        "not converted: no Fabric equivalent"
+        "not generated: Fabric's Invoke SSIS package (preview) exists, but its package location JSON is not documented",
+        "workloads-assess finds the package, checks what Fabric cannot run and (generate) writes the .dtsx files for OneLake"
       ],
       "inputs_outputs": [
         "none"
@@ -2574,27 +2619,31 @@
         "none"
       ],
       "not_carried": [
-        "SSIS package execution"
+        "SSIS package execution (the Fabric activity is added in the portal)"
       ],
       "manual_configuration": [
-        "choose an alternative"
+        "upload the package to a lakehouse and add the Invoke SSIS package activity, or choose another alternative"
       ],
       "validated_by": [
         "placeholder Fail activity present"
       ],
       "by_adf_type": {
         "ExecuteSSISPackage": {
-          "microsoft_comparison": "N/A",
+          "microsoft_comparison": "Invoke SSIS package activity (preview)",
           "options": [
             {
-              "when": "always",
+              "when": "always (until the activity's package location JSON is confirmed from a portal-made activity)",
               "fabric": [],
               "status": "blocked",
-              "how": "Fail placeholder: SSIS execution is not generated",
-              "code": "ssis_unsupported"
+              "how": "Fail placeholder that states the package's readiness from workloads-assess (location, protection level, third-party components, on-premises or private connections, Windows authentication); the Fabric activity is added in the portal",
+              "code": "ssis_invoke_pending"
             }
           ],
           "workarounds": [
+            {
+              "what": "Upload the .dtsx (workloads-generate writes it, with child packages) to a lakehouse and add Fabric's Invoke SSIS package activity (preview) in the portal, with the overrides the workload report lists.",
+              "source": "handler"
+            },
             {
               "what": "Keep the package on the Azure-SSIS integration runtime in ADF and invoke the ADF pipeline from Fabric with Invoke pipeline.",
               "source": "handler"
@@ -2602,22 +2651,18 @@
             {
               "what": "Re-implement the package's data flow as Copy / Dataflow Gen2 / notebook activities.",
               "source": "handler"
-            },
-            {
-              "what": "Fabric's Invoke SSIS package activity (preview) runs a package stored in OneLake; not generated by this tool.",
-              "source": "manual"
             }
           ],
           "lifecycle": [
             {
               "id": "activity.ssis",
-              "status": "not_available",
-              "summary": "SSIS package execution is not available in Fabric Data Factory, and Azure-SSIS integration runtimes have no Fabric equivalent yet.",
+              "status": "preview",
+              "summary": "Fabric runs SSIS packages with the Invoke SSIS package activity (preview): packages stored in OneLake only; no on-premises or private-network data sources or destinations; no custom or third-party components; 1.35 CU-hours per vCore of SSIS runtime uptime, 4 vCores per workspace.",
               "alternatives": [
                 "Keep the package on the Azure-SSIS runtime in ADF and call that pipeline from Fabric.",
                 "Re-implement the package logic with Copy, Dataflow Gen2 or a notebook."
               ],
-              "source_url": "https://learn.microsoft.com/en-us/fabric/data-factory/compare-fabric-data-factory-and-azure-data-factory",
+              "source_url": "https://learn.microsoft.com/en-us/fabric/data-factory/invoke-ssis-package-activity",
               "emit": false,
               "impact": "blocker"
             }
@@ -3462,12 +3507,13 @@
     {
       "id": "integration_runtime.ssis",
       "adf": "Azure-SSIS integration runtime",
-      "fabric": "To be determined",
-      "microsoft": "We're still working on the design for SSIS integration in Fabric.",
+      "fabric": "Fabric's own SSIS runtime behind the Invoke SSIS package activity (preview); nothing to migrate from the Azure-SSIS runtime itself",
+      "microsoft": "The comparison page says: \"We're still working on the design for SSIS integration in Fabric.\" The Invoke SSIS package page (preview) runs packages stored in OneLake, with no on-premises or private-network endpoints and no custom or third-party components.",
       "sources": [
-        "fabric_vs_adf"
+        "fabric_vs_adf",
+        "fabric_invoke_ssis"
       ],
-      "tool": "SSIS activities are blocked with alternatives; a cautious 'verify' prerequisite."
+      "tool": "workloads-assess checks each package against those limits and the runtime's own settings (virtual network, on-premises proxy, custom setup); the activity is a placeholder that states the readiness."
     },
     {
       "id": "managed_vnet",
@@ -3497,7 +3543,7 @@
       "sources": [
         "fabric_vs_adf"
       ],
-      "tool": "A Cron interval schedule, with a stated difference (no window start/end, backfill or dependencies)."
+      "tool": "A disabled Cron interval schedule with the differences named (backfill, dependencies, delay, retries) and the portal steps for an interval-based schedule (preview; no public API: listing a pipeline that has one fails with InvalidConfiguration). Parameters the trigger filled with the window become coalesce(pipeline()?.TriggerEvent?.windowStartTimeUtc / windowEndTimeUtc, the parameter) (window values equal to ADF in a live run, 2026-11-18)."
     },
     {
       "id": "trigger.storage_event",
@@ -3505,19 +3551,26 @@
       "fabric": "File event trigger in Activator",
       "microsoft": "File event triggers work natively in Fabric without extra setup. Fabric integrates triggers into its Activator framework.",
       "sources": [
-        "fabric_vs_adf"
+        "fabric_vs_adf",
+        "fabric_pipeline_runs",
+        "fabric_reflex_definition",
+        "fabric_blob_events",
+        "fabric_onelake_events"
       ],
-      "tool": "Not generated yet: the definition shape is being read from a portal-made trigger; recreate by hand meanwhile."
+      "tool": "When a person says the files now land in a lakehouse (convert --onelake-trigger), an Activator with a OneLake events rule is generated and deployed switched off (deploy --triggers; shape read from a portal-made trigger; on 2026-11-18 deploy created one live and a new lakehouse file ran the pipeline). OneLake raises no event for files written to ADLS behind a shortcut (tested 2026-11-18), so a trigger that keeps watching Azure storage is manual: the report lists the Fabric Trigger wizard steps, and deploy runs read-only checks (same tenant as Fabric, account kind, Event Grid provider, capacity region). The Azure Blob events source definition was not read (agent/conversion/event_triggers.py)."
     },
     {
       "id": "trigger.custom_event",
       "adf": "Custom event trigger",
-      "fabric": "Not named by Microsoft",
-      "microsoft": "Custom event triggers are not mentioned.",
+      "fabric": "Eventstream (Azure Event Hubs or Event Grid namespace source) + Activator rule",
+      "microsoft": "Custom event triggers are not mentioned in the comparison. Fabric's Event Grid source reads Event Grid namespace topics (CloudEvents) and MQTT only; an Event Hubs source takes a Shared Access Key or the workspace identity.",
       "sources": [
-        "fabric_vs_adf"
+        "fabric_vs_adf",
+        "adf_custom_event_trigger",
+        "fabric_eventstream_event_grid",
+        "fabric_eventstream_event_hubs"
       ],
-      "tool": "Not generated; recreate by hand."
+      "tool": "Manual with exact steps: route A keeps the custom topic and adds an Event Grid subscription to an Event Hub carrying the ADF trigger's filters exactly (event types, subject, advanced filters; the filter JSON is printed), read by an Eventstream; route B moves the publishers to an Event Grid namespace. An Activator rule on the Eventstream runs the pipeline, mapping event fields to the parameters the ADF trigger passed. Nothing is generated (agent/conversion/event_triggers.py)."
     },
     {
       "id": "global_parameter",
@@ -3529,7 +3582,7 @@
         "fabric_variable_library_pipelines",
         "live"
       ],
-      "tool": "String/Int/Bool literals -> the factory's Variable Library read through libraryVariables (run live 2026-11-16); other types -> gp_ pipeline parameters."
+      "tool": "String/Int/Bool literals -> the factory's Variable Library read through libraryVariables (run live 2026-11-16); Float/Array/Object literals -> the library as String JSON text, every reference read back with float()/json() (run live 2026-11-18, eight values equal to ADF); an expression or missing value -> a gp_ pipeline parameter. ADF refuses SecureString global parameters."
     },
     {
       "id": "mapping_data_flow",
@@ -6820,6 +6873,7 @@
       "runid",
       "triggeredbypipelinename",
       "triggeredbypipelinerunid",
+      "triggerevent",
       "triggerid",
       "triggername",
       "triggertime"

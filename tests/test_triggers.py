@@ -91,7 +91,7 @@ def test_what_fabric_cannot_express_exactly_is_manual_with_the_reason(t, why):
 def test_tumbling_window_is_an_interval_schedule_with_a_stated_difference():
     r = build_schedules(trig("Minute", 15, type_="TumblingWindowTrigger"))
     assert r.status == "generated_with_differences" and r.schedules[0]["configuration"]["interval"] == 15
-    assert any("Tumbling-window" in n and "@trigger()" in n for n in r.notes)
+    assert any("passes no window start/end" in n and "Interval-based" in n and "TriggerEvent?.windowStartTimeUtc" in n for n in r.notes)
     assert build_schedules(trig("Month", 1, type_="TumblingWindowTrigger", month_days=[1])).status != "generated"
 
 
@@ -239,6 +239,72 @@ def test_parser_keeps_event_settings_and_the_parameters_a_trigger_passes():
                                                 "retries": "3"}  # the connection-string-shaped value is dropped
 
 
+def _tumbling_json(**tp):
+    """A tumbling window trigger as ADF returns it (read from the live factory on 2026-11-18): ONE pipeline under "pipeline", the timing
+    directly in typeProperties."""
+    return {"name": "TR_Tumbling_Test", "properties": {
+        "type": "TumblingWindowTrigger", "runtimeState": "Stopped",
+        "typeProperties": {"frequency": "Hour", "interval": 1, "startTime": "2026-11-18T00:00:00Z", "delay": "00:00:00", "maxConcurrency": 1,
+                           "retryPolicy": {"intervalInSeconds": 30}, "dependsOn": [], **tp},
+        "pipeline": {"pipelineReference": {"referenceName": "PL_TumblingWindow_Test", "type": "PipelineReference"},
+                     "parameters": {"windowStart": "@trigger().outputs.windowStartTime", "windowEnd": "@trigger().outputs.windowEndTime"}}}}
+
+
+def test_a_real_tumbling_window_trigger_is_read_with_its_pipeline_and_timing():
+    # before 2026-11-18 both were missed: no pipeline (read only "pipelines") and no recurrence (read only typeProperties.recurrence)
+    t = parser.parse_trigger(_tumbling_json(), "trigger/TR_Tumbling_Test.json")
+    assert t.pipeline_refs == ["PL_TumblingWindow_Test"]
+    assert t.pipeline_parameters["PL_TumblingWindow_Test"] == {"windowStart": "@trigger().outputs.windowStartTime",
+                                                               "windowEnd": "@trigger().outputs.windowEndTime"}
+    assert (t.recurrence.frequency, t.recurrence.interval, t.recurrence.start_time, t.recurrence.time_zone) == (
+        "Hour", 1, "2026-11-18T00:00:00Z", "UTC")
+    s = build_schedules(t)
+    assert s.status == "generated_with_differences"
+    assert s.schedules[0]["enabled"] is False and s.schedules[0]["configuration"]["type"] == "Cron"
+    assert s.schedules[0]["configuration"]["interval"] == 60 and not any("also had" in n for n in s.notes)
+
+
+def test_the_pipeline_reads_the_window_from_the_fabric_interval_schedule_and_falls_back_to_its_parameter(tmp_path):
+    # the expressions the Fabric expression builder wrote for "Window start/end time" on 2026-11-18
+    files = dict(FILES)
+    files["trigger/TR_Tumbling_Test.json"] = _tumbling_json()
+    files["pipeline/PL_TumblingWindow_Test.json"] = {"name": "PL_TumblingWindow_Test", "properties": {
+        "parameters": {"windowStart": {"type": "String", "defaultValue": ""}, "windowEnd": {"type": "String", "defaultValue": ""},
+                       "other": {"type": "String", "defaultValue": "x"}},
+        "variables": {"s": {"type": "String"}, "e": {"type": "String"}, "o": {"type": "String"}},
+        "activities": [
+            {"name": "S", "type": "SetVariable", "dependsOn": [], "typeProperties": {"variableName": "s", "value": {
+                "value": "@formatDateTime(pipeline().parameters.windowStart, 'yyyy-MM-dd')", "type": "Expression"}}},
+            {"name": "E", "type": "SetVariable", "dependsOn": [], "typeProperties": {"variableName": "e", "value": {
+                "value": "@pipeline().parameters.windowEnd", "type": "Expression"}}},
+            {"name": "O", "type": "SetVariable", "dependsOn": [], "typeProperties": {"variableName": "o", "value": {
+                "value": "@pipeline().parameters.other", "type": "Expression"}}}]}}
+    store, pid = _make_project(tmp_path, files)
+    AdfSemanticDiscoverer(store).run(AdfSemanticDiscoveryRequest(project_name="test-proj"))
+    r = ConversionAgent(store).run(ConversionRequest(project_name="test-proj", pipelines=["PL_TumblingWindow_Test"]))
+    assert r.success, r.error
+    content = json.loads((store.conversion_dir(pid) / "pipelines" / "PL_TumblingWindow_Test.DataPipeline" / "pipeline-content.json")
+                         .read_text(encoding="utf-8"))
+    v = {a["name"]: a["typeProperties"]["value"]["value"] for a in content["properties"]["activities"]}
+    assert v["S"] == "@formatDateTime(coalesce(pipeline()?.TriggerEvent?.windowStartTimeUtc, pipeline().parameters.windowStart), 'yyyy-MM-dd')"
+    assert v["E"] == "@coalesce(pipeline()?.TriggerEvent?.windowEndTimeUtc, pipeline().parameters.windowEnd)"
+    assert v["O"] == "@pipeline().parameters.other"  # not filled by the trigger: unchanged
+    rec = r.conversion.pipelines[0]
+    issues = {i.code for a in rec.activities for i in a.warnings}
+    assert "tumbling_window_value" in issues and "unsupported_system_variable" not in issues
+    note = next(t for t in rec.triggers if t.name == "TR_Tumbling_Test")
+    assert any("Interval-based, every 1 hour(s)" in n and "max concurrency 1" in n for n in note.schedule_notes)
+
+
+def test_tumbling_window_settings_fabric_drops_are_named():
+    t = parser.parse_trigger(_tumbling_json(delay="00:10:00", maxConcurrency=4, retryPolicy={"count": 2, "intervalInSeconds": 30},
+                                            dependsOn=[{"type": "SelfDependencyTumblingWindowTriggerReference", "offset": "-01:00:00"}]),
+                             "trigger/T.json")
+    assert t.window == {"delay": "00:10:00", "maxConcurrency": 4, "retryCount": 2, "retryIntervalInSeconds": 30, "dependsOn": 1}
+    note = next(n for n in build_schedules(t).notes if "also had" in n)
+    assert "a delay of 00:10:00" in note and "2 retries" in note and "1 window dependency" in note and "at most 4 windows" in note
+
+
 def test_a_schedule_trigger_has_no_event_block():
     assert parser.parse_trigger(_trigger_json(), "trigger/T.json").event is None
 
@@ -247,12 +313,14 @@ def test_report_lists_event_settings_and_flags_trigger_scope_parameters(tmp_path
     store, pid = _project(tmp_path, _event_json())
     r = ConversionAgent(store).run(ConversionRequest(project_name="test-proj"))
     note = next(t for p in r.conversion.pipelines for t in p.triggers if t.name == "TR_Nightly")
-    assert note.schedule_status == "not_supported" and not note.schedules
+    # a storage event trigger is not a schedule: it becomes an Activator rule (event_triggers.py), here created in the wizard
+    assert note.schedule_status is None and not note.schedules
+    assert note.activator_status == "manual" and note.activator_target == "azure_blob"
     text = " | ".join(note.details)
     assert "storageAccounts/acct" in text and "Microsoft.Storage.BlobCreated" in text and ".csv" in text
     assert "Parameter `mode` of `PL_Main` was set to `incremental`" in text
-    assert "pipeline().TriggerTime" in next(d for d in note.details if "`fileName`" in d)
-    assert "TriggerTime" not in next(d for d in note.details if "`mode`" in d)
+    assert "TriggerEvent?.FileName" in next(d for d in note.details if "`fileName`" in d)
+    assert "TriggerEvent" not in next(d for d in note.details if "`mode`" in d)
     assert "AccountKey" not in text
     assert "Listens to:" in (store.conversion_dir(pid) / "conversion-report.md").read_text(encoding="utf-8")
 

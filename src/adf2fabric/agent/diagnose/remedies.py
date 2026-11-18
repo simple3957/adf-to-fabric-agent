@@ -44,7 +44,9 @@ CONVERSION: dict[str, Remedy] = {
         "Deploy: it creates the generated, approved notebooks (and their Environment) in this workspace first, then converts again. Or create or bind them on the Convert / Deploy step.",
         "Deploy step: Dry run, then Deploy"),
     "hdinsight_program_settings": Remedy("HDInsight program settings have no Fabric counterpart.", "Rewrite the program as a Fabric notebook or Spark job, or keep running HDInsight and call it from outside Fabric."),
-    "ssis_unsupported": Remedy("SSIS packages cannot run in a Fabric pipeline.", "Keep the package in Azure-SSIS or rebuild it as a Fabric pipeline or dataflow; there is no automatic conversion."),
+    "ssis_invoke_pending": Remedy("The SSIS package can run on Fabric's Invoke SSIS package activity (preview), but this tool does not generate that activity yet.",
+                                  "Run workloads-assess to check the package, workloads-generate to write it, upload it to a lakehouse and add the Invoke SSIS "
+                                  "package activity in the Fabric portal; or keep the package in Azure-SSIS and call that ADF pipeline from Fabric."),
     "usql_retired": Remedy("U-SQL (Azure Data Lake Analytics) is retired.", "Rewrite the logic in Spark SQL or T-SQL (a Fabric notebook or warehouse); there is no automatic conversion."),
     "aml_deprecated": Remedy("Classic Azure ML activities are retired.", "Move to an Azure ML pipeline activity or a Fabric notebook that calls the model."),
     "aml_no_linked_service": Remedy("The Azure ML activity names no linked service.", "Add the linked service to the activity in the ADF source and reconvert."),

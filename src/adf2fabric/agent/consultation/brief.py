@@ -421,9 +421,10 @@ QUESTIONS: list[Question] = [
              recommend=lambda f, a: R("disabled", f"{plural(f.schedule_triggers, 'trigger')}{f', {f.triggers_started} running in ADF today' if f.triggers_started else ''}: "
                                                   "the timings are kept without running anything early.")),
     Question("pipelines.events", "pipelines", "Event triggers were found. How should they be recreated?",
-             "Fabric runs pipelines on storage events through Activator rules, set up by hand. They are not converted.",
+             "Fabric runs pipelines on storage events through Activator rules. The tool generates the rule when the files now land in a "
+             "lakehouse (convert --onelake-trigger); for files that stay in Azure storage it lists the Fabric Trigger wizard steps.",
              "single", True, "record", "The brief.",
-             options=lambda f: [O("activator", "Recreate them as Activator rules by hand"), O("schedule", "Replace them with schedules"),
+             options=lambda f: [O("activator", "Recreate them as Activator rules"), O("schedule", "Replace them with schedules"),
                                 O("adf", "Keep them in ADF for now")],
              when=lambda f, a: f.event_triggers > 0,
              recommend=lambda f, a: R("activator", f"{plural(f.event_triggers, 'event trigger')}: closest to how they behave today.")),

@@ -40,6 +40,7 @@ class WorkloadKind(str, Enum):
     adf_dataflow = "adf_dataflow"  # an ADF mapping data flow, translated to a Fabric notebook (agent/workloads/dataflow.py)
     adf_wrangling = "adf_wrangling"  # an ADF wrangling data flow (Power Query), run by a generated Fabric Dataflow Gen2
     hdinsight_spark = "hdinsight_spark"  # an HDInsight Spark activity's job, run by a Fabric Spark job definition on the same file
+    ssis_package = "ssis_package"  # an Execute SSIS Package activity's package, for Fabric's Invoke SSIS package (agent/workloads/ssis.py)
 
 
 class Classification(str, Enum):

@@ -192,6 +192,7 @@ class TargetPipeline:
 class TargetScan:
     pipelines: list[TargetPipeline] = field(default_factory=list)
     schedules: list[dict] = field(default_factory=list)
+    activators: list[dict] = field(default_factory=list)  # conversion/activators/*.json: storage event trigger -> Activator plan
     name_map: dict[str, str] = field(default_factory=dict)  # lower source pipeline name -> artifact path (from conversion.yaml, names only)
     problems: list[str] = field(default_factory=list)
 
@@ -219,6 +220,14 @@ def scan_target(conversion_dir: Path) -> TargetScan:
                 scan.schedules.append(data)
         except (OSError, UnicodeDecodeError, json.JSONDecodeError):
             scan.problems.append(f"schedule file {f.name} is not valid JSON")
+    adir = conversion_dir / "activators"
+    for f in sorted(adir.glob("*.json")) if adir.is_dir() else []:
+        try:
+            data = json.loads(f.read_text(encoding="utf-8-sig"))
+            if isinstance(data, dict):
+                scan.activators.append(data)
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            scan.problems.append(f"activator file {f.name} is not valid JSON")
     # which generated file belongs to which source pipeline: the conversion record, read for NAMES only (never for success flags)
     cy = conversion_dir / "conversion.yaml"
     if cy.is_file():

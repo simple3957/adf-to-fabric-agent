@@ -13,6 +13,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import zipfile
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -25,7 +26,7 @@ from adf2fabric.agent.dependencies.access import TokenSource
 from adf2fabric.agent.deployment import sjd_deploy
 from adf2fabric.agent.deployment.fabric_deploy import DeployError
 from adf2fabric.agent.discovery.adf_semantic.pipeline_analysis import walk
-from adf2fabric.agent.workloads import analyzer, databricks_jobs, dataflow, environments, notebook_format, transform
+from adf2fabric.agent.workloads import analyzer, databricks_jobs, dataflow, environments, notebook_format, ssis, transform
 from adf2fabric.agent.workloads.source import Code, SourceResolver
 from adf2fabric.project.compute import ComputeUse
 from adf2fabric.project.discovery import AdfActivity, AdfSemanticDiscovery
@@ -96,6 +97,7 @@ class _Spec:
     main_file: Optional[str] = None  # an HDInsight Spark job: the abfss URI of its main file (rootPath + entryFilePath on its storage)
     main_class: Optional[str] = None  # an HDInsight Spark job: className (JVM jobs)
     file_reason: str = ""  # an HDInsight Spark job: why the main file's URI is not known
+    ssis_ref: Optional[Any] = None  # an SSIS package: where ADF keeps it (ssis.PackageRef)
 
 
 def _literal_args(raw: Any) -> tuple[list[str], bool]:
@@ -199,6 +201,12 @@ def _specs(d: AdfSemanticDiscovery, plan: Any, selected: Optional[set[str]], rea
                     wid = f"{W.adf_wrangling.value}:{df.lower()}"
                     spec = specs.setdefault(wid, _Spec(wid, W.adf_wrangling, df, df, a, p.name))
                     spec.used_by.append(f"{p.name}/{a.name}")
+                continue
+            if t == "ExecuteSSISPackage":  # the package runs on Fabric's Invoke SSIS package once it is in OneLake
+                ref = ssis.package_ref(raw, p.name, a.name)
+                wid = f"{W.ssis_package.value}:{ref.identity.lower()}"
+                spec = specs.setdefault(wid, _Spec(wid, W.ssis_package, ref.name, ref.source_item, a, p.name, ssis_ref=ref))
+                spec.used_by.append(f"{p.name}/{a.name}")
                 continue
             if t == "DatabricksJob":
                 for js in _job_specs(p, a, d, read_job, cid_of.get((p.name, a.name), "")):
@@ -451,7 +459,7 @@ _KEEP_ON_SOURCE = AlternativeOption(
 # =====================================================================================================================
 
 
-_MISSING_INPUT = {"incomplete_definition", "unreadable_notebook"}  # blocker findings that mean "supply the input", not "no equivalent"
+_MISSING_INPUT = {"incomplete_definition", "unreadable_notebook"} | ssis.MISSING_INPUT  # blockers that mean "supply the input", not "no equivalent"
 
 
 def _classify(entry: WorkloadEntry, an: Optional[analyzer.Analysis]) -> tuple[K, list[str]]:
@@ -678,8 +686,9 @@ def build_manifest(store: ProjectStore, project_id: str, opts: Optional[Options]
     now = now or datetime.now(timezone.utc)
     d = store.load_adf_semantic_discovery(project_id)
     plan = build_compute_plan(d, opts.pipelines, _sources(opts))
-    if plan is None and any(a.type in ("ExecuteDataFlow", "ExecuteWranglingDataflow", "HDInsightSpark") for p in d.pipelines for a in walk(p.activities)):
-        plan = _NoCompute()  # data flows / HDInsight Spark only: nothing to size here, but each one is still translated or generated
+    if plan is None and any(a.type in ("ExecuteDataFlow", "ExecuteWranglingDataflow", "HDInsightSpark", "ExecuteSSISPackage")
+                            for p in d.pipelines for a in walk(p.activities)):
+        plan = _NoCompute()  # data flows / HDInsight Spark / SSIS only: nothing to size here, but each one is still assessed
     previous = store.load_workload_manifest(project_id) if store.has_workload_manifest(project_id) else None
     prior = {w.id: w for w in previous.workloads} if previous else {}
     entries: list[WorkloadEntry] = []
@@ -826,6 +835,8 @@ def _assess(spec: _Spec, d: AdfSemanticDiscovery, plan: Any, resolver: SourceRes
         return _assess_job(spec, env, d)
     if spec.kind is W.adf_wrangling:
         return _assess_wrangling(spec, env, project_dir, opts, used_names, now)
+    if spec.kind is W.ssis_package:
+        return _assess_ssis(spec, project_dir, opts, used_names, now)
     cells = None
     if spec.kind is W.adf_dataflow:
         code, an, tr, fs = _assess_dataflow(spec, d, project_dir, opts)
@@ -974,6 +985,158 @@ def _assess_wrangling(spec: _Spec, env: ExecutionEnvironment, project_dir: Path,
                                _check("connections_signed_in", False, todo[0]), _check("output_destination_set", False, todo[1])]
     entry.generation.status, entry.generation.reason = "generated_with_open_issues", "Generated; the sign-in and output destination are set in Fabric."
     entry.unresolved = todo
+    return entry
+
+
+_SSIS_ALTERNATIVES = [
+    AlternativeOption(summary="Run it on Fabric's Invoke SSIS package activity (preview): upload the package to a lakehouse and add the activity in "
+                              "the Fabric portal, with the overrides this report lists.",
+                      limitations=["Preview. Packages in OneLake only; no on-premises or private-network sources; no custom or third-party "
+                                   "components.", "Billed 1.35 CU-hours per vCore while the SSIS runtime is up (4 vCores per workspace, 30-minute "
+                                   "idle time-to-live)."]),
+    AlternativeOption(summary="Keep it on the Azure-SSIS runtime in ADF and call that ADF pipeline from Fabric with Invoke pipeline.",
+                      limitations=["ADF and its Azure-SSIS runtime keep running and billing."]),
+    AlternativeOption(summary="Re-implement the package with Copy, Dataflow Gen2 or a notebook.", limitations=["A rewrite: behaviour must be re-tested."]),
+]
+_SSIS_NOT_READ = {  # location type -> (code status, why the package was not read, what to do); {path} is the package path as authored
+    "SSISDB": (C.not_requested, "The package is deployed to an SSIS catalog (SSISDB); reading it needs SQL access to the catalog.",
+               "Export the project from SSISDB (SSMS: right-click the project > Export, which writes a .ispac) and pass it with "
+               "--source \"{path}=<file.ispac>\", then assess again."),
+    "File": (C.not_requested, "The package is on a file share; this tool does not read file shares.",
+             "Download the {what} and pass it with --source \"{path}=<local file>\", then assess again."),
+    "PackageStore": (C.not_requested, "The package is in a package store attached to the Azure-SSIS runtime.",
+                     "Export it (SSMS: Integration Services > Stored Packages > Export) and pass the .dtsx with --source \"{path}=<file.dtsx>\"."),
+}
+
+
+def _source_json(project_dir: Path, folder: str, name: Optional[str]) -> Optional[dict]:
+    """A source artifact's JSON (``source/**/<folder>/<name>.json``), or None when it is not in the imported source."""
+    src = project_dir / "source"
+    hits = sorted(src.glob(f"**/{folder}/{name}.json")) if name and src.is_dir() else []
+    try:
+        return json.loads(hits[0].read_text(encoding="utf-8-sig")) if hits else None
+    except (OSError, ValueError):
+        return None
+
+
+def _ssis_local(opts: Options, *paths: Optional[str]) -> Optional[Path]:
+    """A local file the person passed with --source for one of these source paths (or their file names)."""
+    for p in paths:
+        for key in (p, ssis.file_name(p) if p else None):
+            f = opts.local_files.get(key) if key else None
+            if f and Path(f).is_file():
+                return Path(f)
+    return None
+
+
+def _assess_ssis(spec: _Spec, project_dir: Path, opts: Options, used_names: dict[str, str], now: datetime) -> WorkloadEntry:
+    """An SSIS package: find it where ADF keeps it (ssis.py), check what Fabric's Invoke SSIS package (preview) cannot run, and (generate)
+    write the package files ready for OneLake. The Fabric activity is not generated: Microsoft does not document its package location JSON."""
+    ref: ssis.PackageRef = spec.ssis_ref
+    raw = spec.activity.raw_properties
+    ir_name = _ref(raw.get("connectVia"))
+    runtime = _source_json(project_dir, "integrationRuntime", ir_name)
+    env = ExecutionEnvironment(platform="azure_ssis", source_ref=ir_name or "")
+    if not ir_name:
+        env.gaps.append("The activity names no Azure-SSIS integration runtime (connectVia).")
+    elif runtime is None:
+        env.gaps.append(f"The Azure-SSIS runtime '{ir_name}' is not in the imported source, so its network and custom setup were not checked.")
+    entry = WorkloadEntry(id=spec.id, kind=spec.kind, name=spec.name, source_item=spec.source_item, used_by=sorted(spec.used_by), environment=env,
+                          code=CodeSource(status=C.not_requested, location=spec.source_item), classification=K.blocked)
+    findings = ssis.activity_findings(raw, ref, runtime)
+    xml: Optional[bytes] = None
+    project_files: dict[str, bytes] = {}
+    children: dict[str, bytes] = {}
+    analysis = None
+    status, detail = C.in_project, ""
+    if ref.dynamic:
+        entry.code = CodeSource(status=C.dynamic, location=spec.source_item, detail="The package path or content is an expression, so the package is "
+                                "only known at run time.", action="Give a literal package location (or pass the package with --source) and assess again.")
+    else:
+        local = _ssis_local(opts, ref.project_file, ref.path, ref.package_file)
+        try:
+            if local is not None:
+                data = local.read_bytes()
+                if ref.project_file or local.suffix.lower() == ".ispac":
+                    xml, project_files = ssis.from_ispac(data, ref.package_file)
+                    if xml is None:
+                        raise ssis.PackageError(f"the project has no package named '{ref.package_file}'")
+                else:
+                    xml, _how = ssis.unpack(data, ref.package_file)
+                status, detail = C.supplied, f"Supplied as {local.name}."
+            elif ref.location_type == "InlinePackage":
+                xml, how = ssis.decode_content(ref.content)
+                status, detail = C.in_project, f"Embedded in the pipeline ({how})."
+                for ch in ref.children:
+                    cname = ch.get("packageName") if isinstance(ch.get("packageName"), str) else ssis.file_name(str(ch.get("packagePath") or "child.dtsx"))
+                    try:
+                        children[cname if cname.lower().endswith(".dtsx") else f"{cname}.dtsx"] = ssis.decode_content(ch.get("packageContent"))[0]
+                    except ssis.PackageError as exc:
+                        findings.append(_finding("ssis_child_unreadable", F.source, S.review, f"Embedded child package '{cname}' cannot be read: {exc}.",
+                                                 "Upload that child package to OneLake by hand.", cname))
+            else:
+                st, why, action = _SSIS_NOT_READ.get(ref.location_type, (C.incomplete_definition, "The package location type is not one this "
+                                                     "tool reads.", "Check the activity's package location in ADF Studio."))
+                what = "project (.ispac)" if ref.project_file else "package (.dtsx)"
+                entry.code = CodeSource(status=st, location=spec.source_item, detail=why,
+                                        action=action.format(path=ref.project_file or ref.path or "", what=what))
+        except (ssis.PackageError, zipfile.BadZipFile, OSError) as exc:
+            xml = None
+            entry.code = CodeSource(status=C.error, location=spec.source_item, detail=f"The package cannot be read: {exc}.",
+                                    action="Pass a readable .dtsx (or .ispac) with --source and assess again.")
+    if xml is not None:
+        try:
+            analysis, strings = ssis.analyze_package(xml, project_files)
+            findings += ssis.package_findings(analysis, strings, raw, bool(project_files))
+            strings.clear()  # connection strings can hold passwords: never kept
+            entry.code = CodeSource(status=status, location=spec.source_item, language="ssis_package", sha256=hashlib.sha256(xml).hexdigest(),
+                                    lines=xml.count(b"\n") + 1, detail=f"{detail} {ssis.summary(analysis)}.".strip())
+        except ssis.PackageError as exc:
+            xml = None
+            entry.code = CodeSource(status=C.error, location=spec.source_item, detail=f"The package cannot be read: {exc}.",
+                                    action="Pass a readable .dtsx (or .ispac) with --source and assess again.")
+    entry.findings = sorted(findings, key=lambda f: (f.code, f.construct))
+    folder = _slug(spec.name)
+    if used_names.get(folder.lower(), spec.id) != spec.id:  # two packages with one name (embedded in two activities, say)
+        folder = f"{folder}_{hashlib.sha256(spec.id.encode()).hexdigest()[:6]}"
+    used_names[folder.lower()] = spec.id
+    entry.required_resources = [
+        RequiredResource(kind="lakehouse", name="a lakehouse for the package", reason="Fabric runs SSIS packages stored in OneLake (a lakehouse's Files)."),
+        RequiredResource(kind="file_upload", name=ref.package_file, reason=f"Upload it to the lakehouse (suggested: Files/ssis/{folder}); Fabric's "
+                         "Invoke SSIS package activity runs it from there.")]
+    if ref.configuration_path:
+        entry.required_resources.append(RequiredResource(kind="file_upload", name=ssis.file_name(ref.configuration_path),
+                                                         reason="The package's configuration file: upload it next to the package."))
+    for cname in sorted(children):
+        entry.required_resources.append(RequiredResource(kind="file_upload", name=cname, reason="A child package: upload it next to the package."))
+    entry.alternatives = list(_SSIS_ALTERNATIVES)
+    entry.classification, entry.classification_reasons = _classify(entry, None)
+    blocked = analysis is None or any(f.code in ssis.MISSING_INPUT for f in entry.findings)
+    if not opts.generate:
+        entry.generation.status, entry.generation.reason = "not_generated", "Assessment only: run workloads-generate to write the package files for OneLake."
+    elif blocked:
+        entry.generation.status, entry.generation.reason = "not_generated", "Blocked: " + (entry.classification_reasons or ["the package was not read"])[0]
+    else:
+        base = f"workloads/artifacts/{folder}/ssis"
+        rel, sha = _write(project_dir, f"{base}/{ref.package_file}", xml)
+        for cname, data in children.items():
+            _write(project_dir, f"{base}/{cname}", data)
+        cfg = _ssis_local(opts, ref.configuration_path)
+        if cfg is not None:
+            _write(project_dir, f"{base}/{ssis.file_name(ref.configuration_path)}", cfg.read_bytes())
+        entry.artifact = GeneratedArtifact(kind="ssis_package", file=rel, sha256=sha, display_name=spec.name,
+                                           configuration={"location_type": ref.location_type, "onelake_folder": f"Files/ssis/{folder}",
+                                                          "files": str(1 + len(children) + (cfg is not None))})
+        entry.generation.generated_at = now
+        entry.generation.checks = [
+            _check("package_readable", True, ssis.summary(analysis)),
+            _check("fabric_activity_generated", False, "Microsoft does not document the package location JSON of Fabric's Invoke SSIS package "
+                   "activity, so the activity is added in the Fabric portal until a portal-made one confirms it.")]
+        if ref.configuration_path and cfg is None:
+            entry.generation.checks.append(_check("configuration_file_supplied", False, f"Pass '{ref.configuration_path}' with --source to include it."))
+        entry.generation.status = "generated_with_open_issues"
+        entry.generation.reason = "The package files are ready for OneLake; the upload and the Fabric activity are still manual."
+    entry.unresolved = _unresolved(entry)
     return entry
 
 

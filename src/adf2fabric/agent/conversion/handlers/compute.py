@@ -6,8 +6,12 @@ For every runtime-bound activity the converter states its DISPOSITION:
   Azure Data Explorer) is called from Fabric through a Fabric activity + connection.
 * ``replace``          - the work moves to a Fabric component (notebook, Spark job, Dataflow Gen2).
   The target item must be authored/migrated; the pipeline gets a bound scaffold.
-* ``redesign``         - Fabric has no equivalent (SSIS, retired services); the activity is blocked
-  with documented alternatives and a fail-fast placeholder.
+* ``redesign``         - Fabric has no equivalent (retired services), or the package / job cannot run there
+  as it is; the activity is blocked with documented alternatives and a fail-fast placeholder.
+
+SSIS: Fabric's Invoke SSIS package activity (preview) runs a package from OneLake, but Microsoft does not
+document the JSON of its package location, so the activity is not generated; the placeholder says how
+ready the package is (workloads-assess, agent/workloads/ssis.py) and how to add the activity by hand.
 
 Fabric items that do not exist yet (notebooks, dataflows, Spark job definitions) are referenced by
 a placeholder id and listed as prerequisites; this tool never invents an item id.
@@ -760,12 +764,29 @@ def _dataflow_gen2(cx: ActivityBuilder, df: str) -> None:
     cx.summary = f"{a.type} '{a.name}' -> Fabric Dataflow activity (scaffold) refreshing a Dataflow Gen2 for '{df}'."
 
 
+_SSIS_READY = {"directly_convertible", "convertible_with_changes"}
+
+
 def convert_ssis(cx: ActivityBuilder) -> None:
-    _block(cx, "ssis_unsupported", "SSIS package execution is not available in Fabric Data Factory.",
+    """Fabric's Invoke SSIS package (preview) can run the package from OneLake, but its package location JSON is not documented, so a
+    placeholder stands in. It says how ready the package is, from the workload assessment (agent/workloads/ssis.py)."""
+    w = cx.pc.project.ssis_packages.get(f"{cx.pc.pipeline.name}/{cx.act.name}".lower())
+    if w is None:
+        ready = ("The package has not been assessed yet: run workloads-assess to find it (embedded, file share, SSISDB or package store) "
+                 "and check what Fabric cannot run.")
+    else:
+        cls = getattr(w.classification, "value", w.classification)
+        ready = f"Package '{w.name}' is assessed {cls.replace('_', ' ')}: " + " ".join(w.classification_reasons[:2])
+    fits = w is not None and getattr(w.classification, "value", w.classification) in _SSIS_READY
+    _block(cx, "ssis_invoke_pending",
+           "Fabric's Invoke SSIS package activity (preview) runs a package stored in OneLake, but Microsoft does not document the JSON of "
+           f"its package location, so this tool does not generate it yet. {ready}".strip(),
+           "Upload the .dtsx to a lakehouse (workloads-generate writes it, with its child packages) and add an Invoke SSIS package activity "
+           "in the Fabric portal, with the connection manager and property overrides the workload report lists.",
            "Keep the package on the Azure-SSIS integration runtime in ADF and invoke the ADF pipeline from Fabric "
            "with the Invoke pipeline activity (it can call ADF pipelines).",
            "Re-implement the package's data flow as Copy / Dataflow Gen2 / notebook activities.",
-           disposition="redesign")
+           disposition="replace" if fits else "redesign")
 
 
 def convert_usql(cx: ActivityBuilder) -> None:

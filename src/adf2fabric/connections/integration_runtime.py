@@ -9,7 +9,8 @@ public or private, and recommends a Fabric connectivity path with the prerequisi
   reach the source, and credentials stored on the runtime's nodes cannot be exported (nothing secret is read or copied here);
 * ADF managed virtual networks / managed private endpoints have no direct Fabric equivalent (Microsoft lists them as "to be
   determined"); the supported path is a virtual network data gateway in a virtual network that can reach the resource;
-* Azure-SSIS runtimes have no Fabric equivalent;
+* an Azure-SSIS runtime is not migrated: Fabric's Invoke SSIS package activity (preview) runs packages on Fabric's own SSIS runtime,
+  so what matters is each package (workloads-assess), not the runtime;
 * gateway connections cannot be created through the Fabric API by this tool (their credentials need the gateway's public key),
   so those paths end in "create the connection in Fabric, then reuse it".
 
@@ -144,8 +145,9 @@ def analyze(ls: AdfLinkedService, runtimes: dict[str, AdfIntegrationRuntime],
     kind = a.runtime_kind
     if kind == "ssis":
         a.fabric_path = "unsupported"
-        a.recommendation = ("An Azure-SSIS runtime has no Fabric equivalent. Keep the SSIS packages in ADF or re-implement them "
-                            "with Copy, Dataflow Gen2 or notebooks.")
+        a.recommendation = ("An Azure-SSIS runtime is not migrated. Fabric runs packages with its Invoke SSIS package activity (preview), "
+                            "from OneLake and without on-premises or private-network access: check each package with workloads-assess, "
+                            "or keep the packages in ADF, or re-implement them with Copy, Dataflow Gen2 or notebooks.")
         return a
     if kind == "unclassified":
         a.fabric_path = "manual"
