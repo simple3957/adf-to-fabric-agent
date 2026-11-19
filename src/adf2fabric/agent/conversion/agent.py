@@ -143,20 +143,6 @@ class ConversionAgent:
             shortcuts = json.loads(smap.read_text(encoding="utf-8")).get("shortcuts", [])
             ctx.storage_routes = {(s["account"].lower(), s["container"].lower()): s["shortcut"] for s in shortcuts}
             ctx.route_lakehouse = request.lakehouse
-        if request.onelake_triggers:  # a person says these triggers' files now land in a lakehouse (never inferred from --lakehouse)
-            from adf2fabric.agent.conversion.event_triggers import OneLakeTarget
-
-            known = {t.name.lower(): t for t in d.triggers}
-            try:
-                targets = {k.lower(): OneLakeTarget.parse(v) for k, v in request.onelake_triggers.items()}
-            except ValueError as exc:
-                return ConversionResult(success=False, message="Conversion failed.", error=f"--onelake-trigger: {exc}.")
-            wrong = sorted(k for k in targets if k not in known or (known[k].type or "").lower() != "blobeventstrigger")
-            if wrong:
-                return ConversionResult(success=False, message="Conversion failed.",
-                                        error=f"--onelake-trigger names no storage event trigger: {', '.join(wrong)}. Storage event triggers: "
-                                              f"{', '.join(sorted(t.name for t in d.triggers if (t.type or '').lower() == 'blobeventstrigger')) or '(none)'}.")
-            ctx.onelake_triggers = targets
         # The project's activity mapping (conversion/activity-mapping.json): written again from discovery (choices kept), then followed.
         from adf2fabric.agent.conversion import project_mapping as PM
 
@@ -232,26 +218,24 @@ class ConversionAgent:
                     written[t.name] = rel
                 t.schedule_file = written[t.name]
 
-        # Storage event triggers -> the Activator plan (the definition itself is built by deploy, which knows the workspace's ids).
+        # Storage / custom event triggers -> the event bridge plan (deploy --triggers turns it into an ARM template with the workspace's ids).
         from adf2fabric.agent.conversion import event_triggers
 
         by_name = {t.name.lower(): t for t in d.triggers}
         planned: dict[str, str] = {}
         for record in converted:
             for t in record.triggers:
-                if t.activator_target not in ("onelake", "azure_blob", "custom_event") or not t.activator_steps or t.name.lower() not in by_name:
+                if t.event_status not in ("generated", "generated_with_differences") or t.name.lower() not in by_name:
                     continue
                 if t.name not in planned:
-                    ev = event_triggers.plan(by_name[t.name.lower()], ctx.onelake_triggers.get(t.name.lower()))
+                    ev = event_triggers.plan(by_name[t.name.lower()])
                     safe = re.sub(r"[^A-Za-z0-9._-]+", "_", t.name).strip("._") or "trigger"
-                    rel = f"activators/{safe}.json"
-                    body = {**ev.to_dict(), "sourceState": t.runtime_state, "itemType": "Reflex", "itemName": event_triggers.item_name(ev),
-                            "api": "POST /v1/workspaces/{workspaceId}/items (type Reflex, part ReflexEntities.json)" if ev.target == "onelake"
-                            else "none: created in the Fabric Trigger wizard" if ev.target == "azure_blob"
-                            else "none: an Eventstream and an Activator rule created by a person (see steps)"}
+                    rel = f"event-triggers/{safe}.json"
+                    body = {**ev.to_dict(), "sourceState": t.runtime_state,
+                            "fabricApi": "POST /v1/workspaces/{workspaceId}/items/{pipelineId}/jobs/instances?jobType=Pipeline"}
                     self.store.write_conversion_file(pid, rel, json.dumps(body, indent=2, ensure_ascii=False) + "\n")
                     planned[t.name] = rel
-                t.activator_file = planned[t.name]
+                t.event_file = planned[t.name]
 
         # Source artifacts discovery could not process are missing from this conversion: it cannot be "converted".
         lost = [u for u in d.unprocessed_artifacts if u.reason in UNPROCESSED_LOSS_REASONS]

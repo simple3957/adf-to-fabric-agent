@@ -29,11 +29,6 @@ class ConversionRequest(BaseModel):
         default=None,
         description="Repoint storage datasets to this lakehouse through the OneLake shortcuts of the storage map (opt-in; "
                     "`storage-map` must have run). Bind its id with ItemToId 'lakehouse:<name>' and WorkspaceId.")
-    onelake_triggers: dict[str, str] = Field(
-        default_factory=dict,
-        description="Storage event trigger name -> 'LAKEHOUSE' or 'LAKEHOUSE:Files/<folder>': a person says the trigger's files now land in "
-                    "that lakehouse, so the trigger becomes a generated Activator rule on OneLake events. Never inferred from `lakehouse`: "
-                    "OneLake raises no event for a file written to ADLS behind a shortcut.")
     apply_reconstruction: bool = Field(
         default=False,
         description="Convert the completed pipelines (original + SAFE reconstruction proposals) and mark every "

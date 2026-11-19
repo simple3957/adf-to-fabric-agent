@@ -91,34 +91,10 @@
       "page_updated": "2026-09-21",
       "read_on": "2026-11-18"
     },
-    "fabric_reflex_definition": {
-      "url": "https://learn.microsoft.com/en-us/rest/api/fabric/articles/item-management/definitions/reflex-definition",
-      "title": "Reflex (Activator) item definition",
-      "page_updated": "2026-02-26",
-      "read_on": "2026-11-18"
-    },
-    "fabric_blob_events": {
-      "url": "https://learn.microsoft.com/en-us/fabric/real-time-hub/get-azure-blob-storage-events",
-      "title": "Get Azure Blob Storage events in Real-Time hub",
-      "page_updated": "2026-03-31",
-      "read_on": "2026-11-18"
-    },
-    "fabric_onelake_events": {
-      "url": "https://learn.microsoft.com/en-us/fabric/real-time-hub/explore-fabric-onelake-events",
-      "title": "Explore OneLake events in Fabric Real-Time hub",
-      "page_updated": "2025-12-11",
-      "read_on": "2026-11-18"
-    },
     "fabric_eventstream_event_grid": {
       "url": "https://learn.microsoft.com/en-us/fabric/real-time-intelligence/event-streams/add-source-azure-event-grid",
       "title": "Connect an Event Grid namespace source to an eventstream",
       "page_updated": "2026-06-30",
-      "read_on": "2026-11-18"
-    },
-    "fabric_eventstream_event_hubs": {
-      "url": "https://learn.microsoft.com/en-us/fabric/real-time-intelligence/event-streams/add-source-azure-event-hubs",
-      "title": "Add an Azure Event Hubs source to an eventstream",
-      "page_updated": "2026-11-17",
       "read_on": "2026-11-18"
     },
     "adf_custom_event_trigger": {
@@ -150,6 +126,24 @@
       "title": "Microsoft.DataFactory dataflows template reference (WranglingDataFlow)",
       "page_updated": "2026-07-20",
       "read_on": "2026-11-17"
+    },
+    "adf_storage_event_trigger": {
+      "url": "https://learn.microsoft.com/en-us/azure/data-factory/how-to-create-event-trigger",
+      "title": "Create a storage event trigger in Azure Data Factory",
+      "page_updated": null,
+      "read_on": "2026-11-19"
+    },
+    "fabric_run_on_demand_job": {
+      "url": "https://learn.microsoft.com/en-us/rest/api/fabric/core/job-scheduler/run-on-demand-item-job",
+      "title": "Job Scheduler - Run On Demand Item Job",
+      "page_updated": "2026-09-15",
+      "read_on": "2026-11-19"
+    },
+    "adf_trigger_parameters": {
+      "url": "https://learn.microsoft.com/en-us/azure/data-factory/how-to-use-trigger-parameterization",
+      "title": "Pass trigger information to pipeline",
+      "page_updated": "2026-08-05",
+      "read_on": "2026-11-19"
     }
   },
   "strategies": {
@@ -3618,29 +3612,30 @@
     {
       "id": "trigger.storage_event",
       "adf": "Storage event trigger (BlobEventsTrigger)",
-      "fabric": "File event trigger in Activator",
+      "fabric": "Event Grid subscription + Logic App calling the Fabric Run On Demand Item Job API (Fabric's own pipeline trigger is an Activator rule)",
       "microsoft": "File event triggers work natively in Fabric without extra setup. Fabric integrates triggers into its Activator framework.",
       "sources": [
         "fabric_vs_adf",
-        "fabric_pipeline_runs",
-        "fabric_reflex_definition",
-        "fabric_blob_events",
-        "fabric_onelake_events"
+        "adf_storage_event_trigger",
+        "adf_trigger_parameters",
+        "fabric_run_on_demand_job",
+        "fabric_pipeline_runs"
       ],
-      "tool": "When a person says the files now land in a lakehouse (convert --onelake-trigger), an Activator with a OneLake events rule is generated and deployed switched off (deploy --triggers; shape read from a portal-made trigger; on 2026-11-18 deploy created one live and a new lakehouse file ran the pipeline). OneLake raises no event for files written to ADLS behind a shortcut (tested 2026-11-18), so a trigger that keeps watching Azure storage is manual: the report lists the Fabric Trigger wizard steps, and deploy runs read-only checks (same tenant as Fabric, account kind, Event Grid provider, capacity region). The Azure Blob events source definition was not read (agent/conversion/event_triggers.py)."
+      "tool": "An event bridge, generated: an Event Grid subscription with the ADF trigger's exact filters (event types, subject begins/ends, advanced filters; ignoreEmptyBlobs as data.contentLength > 0) and a Logic App that computes the same pipeline parameters and starts the Fabric pipeline through Run On Demand Item Job (managed identity, or a service principal with its secret in Key Vault). deploy --triggers writes the ARM template; the tool never deploys it; runPipelines is false until cutover (agent/conversion/event_triggers.py). Replaced the Activator form of 2026-11-18, which could not reach ADLS writes behind shortcuts, storage in another tenant or custom topics."
     },
     {
       "id": "trigger.custom_event",
       "adf": "Custom event trigger",
-      "fabric": "Eventstream (Azure Event Hubs or Event Grid namespace source) + Activator rule",
+      "fabric": "Event Grid subscription + Logic App calling the Fabric Run On Demand Item Job API (no Fabric source reads a custom topic)",
       "microsoft": "Custom event triggers are not mentioned in the comparison. Fabric's Event Grid source reads Event Grid namespace topics (CloudEvents) and MQTT only; an Event Hubs source takes a Shared Access Key or the workspace identity.",
       "sources": [
         "fabric_vs_adf",
         "adf_custom_event_trigger",
-        "fabric_eventstream_event_grid",
-        "fabric_eventstream_event_hubs"
+        "adf_trigger_parameters",
+        "fabric_run_on_demand_job",
+        "fabric_eventstream_event_grid"
       ],
-      "tool": "Manual with exact steps: route A keeps the custom topic and adds an Event Grid subscription to an Event Hub carrying the ADF trigger's filters exactly (event types, subject, advanced filters; the filter JSON is printed), read by an Eventstream; route B moves the publishers to an Event Grid namespace. An Activator rule on the Eventstream runs the pipeline, mapping event fields to the parameters the ADF trigger passed. Nothing is generated (agent/conversion/event_triggers.py)."
+      "tool": "An event bridge, generated: an Event Grid subscription with the ADF trigger's exact filters (event types, subject begins/ends, advanced filters; ignoreEmptyBlobs as data.contentLength > 0) and a Logic App that computes the same pipeline parameters and starts the Fabric pipeline through Run On Demand Item Job (managed identity, or a service principal with its secret in Key Vault). deploy --triggers writes the ARM template; the tool never deploys it; runPipelines is false until cutover (agent/conversion/event_triggers.py). Replaced the Activator form of 2026-11-18, which could not reach ADLS writes behind shortcuts, storage in another tenant or custom topics."
     },
     {
       "id": "global_parameter",

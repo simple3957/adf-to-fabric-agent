@@ -355,7 +355,9 @@ def _judge(v: Verification, base: dict[str, dict], how: str = "", split: Optiona
     v.differences, v.matched = compare(fabric, base)
     v.baseline_activities = base
     v.baseline_only = sorted(set(base) - set(fabric), key=str.lower)
-    v.fabric_only = sorted(set(fabric) - set(base), key=str.lower)
+    # the converter's own Trigger_event activity (it records which event trigger started the run) has no ADF counterpart by design
+    v.fabric_only = sorted((n for n in set(fabric) - set(base)
+                            if not (re.fullmatch(r"Trigger_event\d*", n) and (fabric[n] or {}).get("type") == "SetVariable")), key=str.lower)
     notes = ([how] if how else []) + merged
     if v.differences:
         v.verdict = "differs"

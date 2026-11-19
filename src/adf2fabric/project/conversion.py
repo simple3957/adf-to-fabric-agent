@@ -194,12 +194,18 @@ class TriggerNote(_Strict):
     schedules: list[dict[str, Any]] = Field(default_factory=list)  # Create Item Schedule bodies
     schedule_notes: list[str] = Field(default_factory=list)
     schedule_file: Optional[str] = None  # relative to conversion/, when a definition file was written
-    # Storage event trigger -> Fabric Activator rule (see agent/conversion/event_triggers.py).
-    activator_status: Optional[str] = None  # generated_with_differences | manual | not_supported
-    activator_target: Optional[str] = None  # onelake | azure_blob | none
+    # Storage / custom event trigger -> Event Grid subscription + Logic App starting the Fabric pipeline (agent/conversion/event_triggers.py).
+    event_status: Optional[str] = None  # generated | generated_with_differences | manual
+    event_kind: Optional[str] = None  # storage | custom | none
+    event_notes: list[str] = Field(default_factory=list)
+    event_steps: list[str] = Field(default_factory=list)
+    event_file: Optional[str] = None  # the plan, relative to conversion/
+    # Read from records written on 2026-11-18 (the earlier Activator form); no longer set.
+    activator_status: Optional[str] = None
+    activator_target: Optional[str] = None
     activator_notes: list[str] = Field(default_factory=list)
     activator_steps: list[str] = Field(default_factory=list)
-    activator_file: Optional[str] = None  # relative to conversion/
+    activator_file: Optional[str] = None
     details: list[str] = Field(default_factory=list)  # what to recreate by hand: event settings, parameter values
 
 

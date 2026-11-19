@@ -108,6 +108,12 @@ class ConversionEngine:
         from adf2fabric.agent.conversion import split as SP
         from adf2fabric.agent.conversion.fabric_schema import ACTIVITY_LIMIT
 
+        bridged = event_triggers.bridged_pipelines(self.project.triggers).get(p.name.lower())
+        if bridged:  # started by an event trigger: a Trigger_event activity shows in Fabric which trigger and event started each run
+            ev_added, ev_notes = event_triggers.add_trigger_event(content, bridged, pc.alloc("Trigger_event"), ACTIVITY_LIMIT)
+            added = sorted(set(added) | set(ev_added))
+            notes.extend(ev_notes)
+
         if SP.count((content.get("properties") or {}).get("activities")) > ACTIVITY_LIMIT:
             content, children, child_issues = self._split(p, content, notes, SP, ACTIVITY_LIMIT)
         validation = validate_content(content)
@@ -514,7 +520,7 @@ class ConversionEngine:
         for t in self.project.triggers:
             if p.name.lower() not in {r.lower() for r in t.pipeline_refs}:
                 continue
-            out.append(_trigger_note(t, self.project.onelake_triggers.get(t.name.lower())))
+            out.append(_trigger_note(t))
         return sorted(out, key=lambda n: n.name.lower())
 
 
@@ -537,7 +543,7 @@ def window_parameters(triggers: list[AdfTrigger], pipeline: str) -> dict[str, st
     return out
 
 
-def _trigger_note(t: AdfTrigger, onelake: Any = None) -> TriggerNote:
+def _trigger_note(t: AdfTrigger) -> TriggerNote:
     rec = t.recurrence
     when = ""
     if rec:
@@ -550,23 +556,20 @@ def _trigger_note(t: AdfTrigger, onelake: Any = None) -> TriggerNote:
         action = ("Create an interval schedule. Tumbling-window semantics (window start/end values, dependencies, "
                   "backfill) do not exist in Fabric; windowing logic must move into the pipeline.")
     elif "event" in kind:
-        action = "Create a Fabric event trigger (Activator) for the same storage event."
+        action = "Recreate the event trigger."
     else:
         action = "Create the equivalent Fabric trigger or schedule manually."
-    ev = event_triggers.plan(t, onelake) if "event" in kind else None
+    ev = event_triggers.plan(t) if "event" in kind else None
     if ev is not None:
-        action = {"onelake": f"A Fabric Activator rule watching lakehouse '{ev.lakehouse}' was generated (deploy with --triggers; it is created "
-                             "switched off). It differs from the source in documented ways - read the notes.",
-                  "azure_blob": "Create the Activator rule in the Fabric Trigger wizard (Azure Blob Storage events): the steps below say exactly "
-                                "what to set.",
-                  "custom_event": "Recreate it as an Eventstream and an Activator rule: Fabric has no source for an Event Grid custom topic. The "
-                                  "steps below give both routes and the exact Event Grid filter to carry."}.get(ev.target, action + " " + " ".join(ev.notes))
-        if ev.target == "custom_event" and not ev.steps:
+        if ev.status in ("generated", "generated_with_differences"):
+            action = ("An Event Grid subscription with the same filters and a Logic App that starts the Fabric pipeline with the same parameters "
+                      "were planned (deploy --triggers writes the ARM template; runPipelines stays false until cutover).")
+        else:
             action = "Recreate it by hand: " + " ".join(ev.notes)
         return TriggerNote(
             name=t.name, trigger_type=t.type, runtime_state=t.runtime_state, pipelines=sorted(t.pipeline_refs),
             summary=f"{t.type or 'Trigger'}" + (f"; state {t.runtime_state}" if t.runtime_state else ""), action=action, details=_trigger_details(t),
-            activator_status=ev.status, activator_target=ev.target, activator_notes=ev.notes, activator_steps=ev.steps)
+            event_status=ev.status, event_kind=ev.kind, event_notes=ev.notes, event_steps=ev.steps)
     sched = build_schedules(t)
     if sched.status in ("generated", "generated_with_differences"):
         action += (" A Fabric schedule definition was generated (deploy with --schedules; it is created disabled)."
@@ -610,11 +613,8 @@ def _trigger_details(t: AdfTrigger) -> list[str]:
     for pipeline, params in sorted(t.pipeline_parameters.items()):
         for name, value in sorted(params.items()):
             line = f"Parameter `{name}` of `{pipeline}` was set to `{_shown(value)}`"
-            if e is not None and value.replace(" ", "").lower().startswith("@triggerbody()") and (t.type or "").lower() == "customeventstrigger":
-                line += ". In Fabric the Activator rule's action passes the event field as this pipeline parameter; see the Activator notes"
-            elif e is not None and value.replace(" ", "").lower().startswith("@triggerbody()"):
-                line += (". In Fabric the pipeline reads the file event itself through pipeline()?.TriggerEvent (for example "
-                         "@pipeline()?.TriggerEvent?.FileName); see the Activator notes")
+            if e is not None and value.replace(" ", "").lower().startswith("@triggerbody()"):
+                line += ". The event bridge's Logic App computes the same value from the event and passes it as this parameter"
             elif value.lower().startswith(_TRIGGER_SCOPE_VALUES):
                 line += (". Trigger-scope expressions have no Fabric equivalent; Fabric offers the system variables "
                          "pipeline().TriggerTime and pipeline().TriggerName, which may cover it")

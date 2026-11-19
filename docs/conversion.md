@@ -121,7 +121,7 @@ Microsoft's documented upgrader resolution type; `ItemToId` (`"pipeline:Name"`, 
 The schema table (`fabric_schema.py`) is encoded from Microsoft's documentation (DataPipeline definition,
 expression language, activity overview, upgrade guide). "Valid" means consistent with that table, **not**
 accepted by a Fabric service. Parts the documentation does not list are declared in `fabric_schema.INFERRED`
-and printed in every report. Triggers become Fabric schedule definitions where they map exactly (see below); storage event triggers become Activator rules,
+and printed in every report. Triggers become Fabric schedule definitions where they map exactly (see below); storage and custom event triggers become an Event Grid subscription + Logic App (an event bridge),
 generated when their files now land in a lakehouse and otherwise created from the listed wizard steps ([triggers.md](triggers.md)).
 
 ## Integration runtimes and gateways
@@ -164,7 +164,7 @@ schedules`; verified against Microsoft's "Create Item Schedule" page on 2026-10-
 | Week 1, `weekDays` | `Weekly` (`weekdays`, `times`) |
 | Month n, `monthDays` / `monthlyOccurrences` | one `Monthly` schedule per day (`DayOfMonth` or `OrdinalWeekday` First..Fifth) |
 | Tumbling window | `Cron` interval, **with a stated difference**, plus portal steps for an interval-based schedule; window parameters read `pipeline()?.TriggerEvent?.windowStartTimeUtc` ([triggers.md](triggers.md#tumbling-window-triggers)) |
-| Event triggers | not schedules: a storage event trigger becomes an Activator rule ([triggers.md](triggers.md#storage-event-triggers---activator-rules)) |
+| Event triggers | not schedules: an event bridge, Event Grid subscription + Logic App ([triggers.md](triggers.md#storage-and-custom-event-triggers---the-event-bridge-event-grid---logic-app---fabric)) |
 
 Anything else is `manual` with the reason, never approximated: Weekly every N weeks, Daily times on an interval above 1,
 "last day of the month" / negative `monthDays`, a `-1` (last) occurrence, more than 100 times, more than 20 schedules per

@@ -149,9 +149,6 @@ class ProjectContext:
     storage_routes: dict[tuple[str, str], str] = field(default_factory=dict)
     route_lakehouse: Optional[str] = None
     route_default: bool = True  # repoint every dataset that can be (convert --lakehouse); False: only those the activity mapping chose
-    # Storage event triggers whose files now land in a lakehouse (convert --onelake-trigger): trigger (lower) -> OneLakeTarget. A person's
-    # choice only: datasets repointed through shortcuts do not count, because OneLake raises no event for a file written to ADLS.
-    onelake_triggers: dict[str, Any] = field(default_factory=dict)
     # The project's activity mapping (agent/conversion/project_mapping.py): activity id (lower) -> (switch kind, chosen value).
     choices: dict[str, tuple[str, str]] = field(default_factory=dict)
     _ls_sets: dict[str, set] = field(default_factory=dict)  # linked service (lower) -> distinct literal argument sets in use

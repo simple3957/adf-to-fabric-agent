@@ -48,7 +48,7 @@ are errors. A source-versus-generated graph check (`graph_*` codes) fails the pi
 
 Self-hosted runtimes need an on-premises data gateway; runtimes in a managed virtual network need a virtual network data
 gateway (Microsoft lists managed VNets and private endpoints as "to be determined" in Fabric). Plain Azure runtimes need
-nothing. Schedule and tumbling-window triggers are turned into Fabric schedule definitions where they map exactly (`deploy --schedules`); storage event triggers become Activator rules (generated when their files now land in a lakehouse, otherwise the wizard steps are listed); custom event triggers and recurrences Fabric cannot express are reported as manual. Connections, workspace items and credentials
+nothing. Schedule and tumbling-window triggers are turned into Fabric schedule definitions where they map exactly (`deploy --schedules`); storage and custom event triggers become an event bridge (Event Grid subscription + Logic App, generated; deployed in Azure by a person); recurrences Fabric cannot express are reported as manual. Connections, workspace items and credentials
 must be bound before anything runs. Key Vault-held secrets are re-created in the Fabric connection.
 
 ## 6. Failures only a run can reveal

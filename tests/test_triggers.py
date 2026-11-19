@@ -97,7 +97,7 @@ def test_tumbling_window_is_an_interval_schedule_with_a_stated_difference():
 
 def test_event_and_unknown_triggers_are_not_generated():
     ev = build_schedules(trig("Day", type_="BlobEventsTrigger"))
-    assert ev.status == "not_supported" and "Activator" in ev.notes[0] and ev.schedules == []
+    assert ev.status == "not_supported" and "Event Grid subscription" in ev.notes[0] and ev.schedules == []
     assert build_schedules(trig("Day", type_="WeirdTrigger")).status == "manual"
     assert build_schedules(AdfTrigger(name="T", path="p", type="ScheduleTrigger")).status == "manual"
 
@@ -313,14 +313,14 @@ def test_report_lists_event_settings_and_flags_trigger_scope_parameters(tmp_path
     store, pid = _project(tmp_path, _event_json())
     r = ConversionAgent(store).run(ConversionRequest(project_name="test-proj"))
     note = next(t for p in r.conversion.pipelines for t in p.triggers if t.name == "TR_Nightly")
-    # a storage event trigger is not a schedule: it becomes an Activator rule (event_triggers.py), here created in the wizard
+    # a storage event trigger is not a schedule: it becomes an Event Grid subscription + Logic App (event_triggers.py)
     assert note.schedule_status is None and not note.schedules
-    assert note.activator_status == "manual" and note.activator_target == "azure_blob"
+    assert note.event_status == "generated" and note.event_kind == "storage"
     text = " | ".join(note.details)
     assert "storageAccounts/acct" in text and "Microsoft.Storage.BlobCreated" in text and ".csv" in text
     assert "Parameter `mode` of `PL_Main` was set to `incremental`" in text
-    assert "TriggerEvent?.FileName" in next(d for d in note.details if "`fileName`" in d)
-    assert "TriggerEvent" not in next(d for d in note.details if "`mode`" in d)
+    assert "Logic App computes the same value" in next(d for d in note.details if "`fileName`" in d)
+    assert "Logic App" not in next(d for d in note.details if "`mode`" in d)
     assert "AccountKey" not in text
     assert "Listens to:" in (store.conversion_dir(pid) / "conversion-report.md").read_text(encoding="utf-8")
 

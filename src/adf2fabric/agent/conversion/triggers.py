@@ -15,7 +15,7 @@ This module only produces definitions, and only where the ADF recurrence maps EX
 weekly trigger every second week, a "last day of the month" trigger, or more than 100 times a day), the result is
 ``manual`` with the reason; nothing is approximated silently. Tumbling-window triggers become interval (Cron) schedules
 with a documented difference, because windowing semantics do not exist in Fabric. Event triggers are not schedules: storage
-event triggers become Activator rules (agent/conversion/event_triggers.py).
+and custom event triggers become an Event Grid subscription + Logic App that starts the pipeline (agent/conversion/event_triggers.py).
 
 Statuses: ``generated`` | ``generated_with_differences`` | ``manual`` | ``not_supported``.
 """
@@ -87,7 +87,7 @@ def build_schedules(t: AdfTrigger) -> TriggerSchedule:
     enabled = (t.runtime_state or "").lower() == "started"
     if "event" in kind or kind in ("blobeventstrigger", "customeventstrigger", "storageeventtrigger"):
         return TriggerSchedule("not_supported", notes=[
-            "Event triggers map to Fabric Activator rules, not schedules (see event_triggers.py)."])
+            "Event triggers are not schedules: they become an Event Grid subscription + Logic App (see event_triggers.py)."])
     if kind not in ("scheduletrigger", "tumblingwindowtrigger"):
         return TriggerSchedule("manual", notes=[f"Trigger type '{t.type}' has no documented Fabric schedule equivalent."])
     rec = t.recurrence

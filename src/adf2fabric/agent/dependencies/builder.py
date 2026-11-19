@@ -652,16 +652,11 @@ def _implication(dep: Dependency, d: AdfSemanticDiscovery, g: _Graph, runtimes: 
     elif t is T.pipeline:
         dep.migration = _impl(C.ready, "Converted by the normal conversion.")
     elif t is T.trigger:
-        if (dep.attributes.get("type", "")).lower() == "blobeventstrigger":
-            dep.migration = _impl(C.manual, "A storage event trigger becomes a Fabric Activator rule: generated when its files now land in a lakehouse "
-                                  "(convert --onelake-trigger), otherwise created in the Fabric Trigger wizard from the listed steps.",
-                                  ["Decide where the files land: a lakehouse (generated rule) or Azure storage (wizard; the storage must be in "
-                                   "Fabric's tenant)."])
-        elif (dep.attributes.get("type", "")).lower() in _EVENT_TRIGGERS:
-            dep.migration = _impl(C.manual, "Fabric has no source for an Event Grid custom topic (its Event Grid source reads namespace topics only).",
-                                  ["Route the topic to an Event Hub with a new Event Grid subscription carrying the same filters (or move the "
-                                   "publishers to an Event Grid namespace), read it with an Eventstream, and add an Activator rule that runs the "
-                                   "pipeline; the conversion report lists the exact filter."])
+        if (dep.attributes.get("type", "")).lower() in _EVENT_TRIGGERS:
+            dep.migration = _impl(C.manual, "An event trigger becomes an Event Grid subscription with the same filters and a Logic App that "
+                                  "starts the Fabric pipeline with the same parameters (generated; deployed in Azure by a person).",
+                                  ["Deploy the bridge written by deploy --triggers, give its identity access to the workspace, and set "
+                                   "runPipelines at cutover."])
         elif (dep.attributes.get("type", "")).lower() in ("scheduletrigger", "tumblingwindowtrigger"):
             dep.migration = _impl(C.ready, "Converted to a Fabric schedule, created disabled.")
         else:
@@ -712,7 +707,7 @@ def _implication(dep: Dependency, d: AdfSemanticDiscovery, g: _Graph, runtimes: 
                               "The endpoint is computed at run time.",
                               ["Confirm Fabric can reach it (network, authentication)."])
     elif t is T.event_source:
-        dep.migration = _impl(C.manual, "An event source that triggers pipelines.", ["Recreate the subscription as a Fabric Activator rule."])
+        dep.migration = _impl(C.manual, "An event source that triggers pipelines.", ["Deploy the event bridge (Event Grid subscription + Logic App) the conversion plans for its trigger."])
     if dep.resolution is R.dynamic:
         g.issue(dep, "dynamic_target", Severity.warning, "Which target this is depends on an expression: it is resolved only at run time.")
     if dep.resolution is R.circular:
