@@ -86,9 +86,24 @@ what Fabric's getDefinition returned for a pipeline set up that way, and a run o
 (live, 2026-11-16). Then the converted `PL_GlobalParams_Test` was deployed and run twice. In one workspace, deploy created the library;
 in another, it used the library that was already there. Both runs returned the ADF baseline (`dev-50000`, `true`). It is not on the DataPipeline definition page, so `libraryVariables` is listed in `fabric_schema.INFERRED`.
 
-The others keep the earlier rule: a `gp_<name>` pipeline parameter with the factory's value as its default, passed down to child
-pipelines. These are Float (Microsoft: Number types are not supported in pipelines), Array, Object, SecureString (never written
-into an item definition) and an expression value.
+Float, Array and Object have no library type a pipeline can read (Microsoft, "Variable library integration with pipelines",
+2026-06-22: "Number types aren't supported in pipelines"; there is no array or object type). They go to the library as a **String
+holding their compact JSON text** (`0.75`, `["EU","US"]`, `{"mode":"full","retries":3}`: what ADF's `string()` prints), and every
+reference is read back through `float(...)` or `json(...)`, so accessors still work:
+
+| ADF | Fabric |
+|---|---|
+| `@string(mul(pipeline().globalParameters.ratio, 2))` | `@string(mul(float(pipeline().libraryVariables.gp_ratio), 2))` |
+| `@pipeline().globalParameters.regions[0]` | `@json(pipeline().libraryVariables.gp_regions)[0]` |
+| `@pipeline().globalParameters.config.mode` | `@json(pipeline().libraryVariables.gp_config).mode` |
+
+Run live on 2026-11-18 (`PL_GlobalParams_Types_Test`, eight expressions: arithmetic, index, length, property, `string()` of an
+array and an object, interpolation): all eight values equal the ADF run, also with a trailing newline a person typed after the
+object's JSON in the library UI. Each value set of the library must keep the value valid for `float()` / `json()`.
+
+An expression value keeps the earlier rule: a `gp_<name>` pipeline parameter with the factory's value as its default, passed down
+to child pipelines, as does a global with no value. ADF itself refuses a SecureString global parameter (`UnsupportedTypeSecureString`,
+seen 2026-11-18), so none reaches the converter.
 
 `deploy` creates the library before the pipelines. If a library of that name already exists, deploy reads it and uses it when it
 has every variable the pipelines read with the same type; its values are the workspace's own and are never changed. If a variable
@@ -106,7 +121,8 @@ Microsoft's documented upgrader resolution type; `ItemToId` (`"pipeline:Name"`, 
 The schema table (`fabric_schema.py`) is encoded from Microsoft's documentation (DataPipeline definition,
 expression language, activity overview, upgrade guide). "Valid" means consistent with that table, **not**
 accepted by a Fabric service. Parts the documentation does not list are declared in `fabric_schema.INFERRED`
-and printed in every report. Triggers become Fabric schedule definitions where they map exactly (see below); event triggers are recreated by hand.
+and printed in every report. Triggers become Fabric schedule definitions where they map exactly (see below); storage and custom event triggers become an Event Grid subscription + Logic App (an event bridge),
+generated when their files now land in a lakehouse and otherwise created from the listed wizard steps ([triggers.md](triggers.md)).
 
 ## Integration runtimes and gateways
 
@@ -147,8 +163,8 @@ schedules`; verified against Microsoft's "Create Item Schedule" page on 2026-10-
 | Day n > 1, no hours/minutes | `Cron`, interval n*1440 |
 | Week 1, `weekDays` | `Weekly` (`weekdays`, `times`) |
 | Month n, `monthDays` / `monthlyOccurrences` | one `Monthly` schedule per day (`DayOfMonth` or `OrdinalWeekday` First..Fifth) |
-| Tumbling window | `Cron` interval, **with a stated difference** (no window start/end, backfill, dependencies) |
-| Event triggers | not generated (Activator rules have no schedule API) |
+| Tumbling window | `Cron` interval, **with a stated difference**, plus portal steps for an interval-based schedule; window parameters read `pipeline()?.TriggerEvent?.windowStartTimeUtc` ([triggers.md](triggers.md#tumbling-window-triggers)) |
+| Event triggers | not schedules: an event bridge, Event Grid subscription + Logic App ([triggers.md](triggers.md#storage-and-custom-event-triggers---the-event-bridge-event-grid---logic-app---fabric)) |
 
 Anything else is `manual` with the reason, never approximated: Weekly every N weeks, Daily times on an interval above 1,
 "last day of the month" / negative `monthDays`, a `-1` (last) occurrence, more than 100 times, more than 20 schedules per

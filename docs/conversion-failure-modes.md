@@ -35,7 +35,7 @@ fail-fast placeholder (`no_conversion_rule`). Fix: add a handler plus a test, or
 ## 3. Expressions and parameters
 
 Unsupported functions, accessors, system variables and dataset references stay **verbatim** and the activity becomes
-`manual_required` (`expression_not_converted`). Global parameters are read from the factory's Variable Library, or (Float, Array, Object, SecureString, an expression value) become `gp_*` pipeline parameters. Fabric has no
+`manual_required` (`expression_not_converted`). Global parameters are read from the factory's Variable Library (Float, Array and Object as JSON text read back with `float()` / `json()`), or (an expression value, no value) become `gp_*` pipeline parameters. Fabric has no
 `true()` function and `pipeline().Pipeline` is an id there; these are handled in the expression converter.
 
 ## 4. Structure and limits
@@ -48,7 +48,7 @@ are errors. A source-versus-generated graph check (`graph_*` codes) fails the pi
 
 Self-hosted runtimes need an on-premises data gateway; runtimes in a managed virtual network need a virtual network data
 gateway (Microsoft lists managed VNets and private endpoints as "to be determined" in Fabric). Plain Azure runtimes need
-nothing. Schedule and tumbling-window triggers are turned into Fabric schedule definitions where they map exactly (`deploy --schedules`); event triggers and recurrences Fabric cannot express are reported as manual. Connections, workspace items and credentials
+nothing. Schedule and tumbling-window triggers are turned into Fabric schedule definitions where they map exactly (`deploy --schedules`); storage and custom event triggers become an event bridge (Event Grid subscription + Logic App, generated; deployed in Azure by a person); recurrences Fabric cannot express are reported as manual. Connections, workspace items and credentials
 must be bound before anything runs. Key Vault-held secrets are re-created in the Fabric connection.
 
 ## 6. Failures only a run can reveal

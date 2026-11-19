@@ -85,6 +85,24 @@
       "page_updated": null,
       "read_on": "2026-11-16"
     },
+    "fabric_pipeline_runs": {
+      "url": "https://learn.microsoft.com/en-us/fabric/data-factory/pipeline-runs",
+      "title": "Run, schedule, or use events to trigger a pipeline",
+      "page_updated": "2026-09-21",
+      "read_on": "2026-11-18"
+    },
+    "fabric_eventstream_event_grid": {
+      "url": "https://learn.microsoft.com/en-us/fabric/real-time-intelligence/event-streams/add-source-azure-event-grid",
+      "title": "Connect an Event Grid namespace source to an eventstream",
+      "page_updated": "2026-06-30",
+      "read_on": "2026-11-18"
+    },
+    "adf_custom_event_trigger": {
+      "url": "https://learn.microsoft.com/en-us/azure/data-factory/how-to-create-custom-event-trigger",
+      "title": "Create custom event triggers in Azure Data Factory",
+      "page_updated": "2026-08-05",
+      "read_on": "2026-11-18"
+    },
     "adf_activity_schema": {
       "url": "https://learn.microsoft.com/en-us/azure/templates/microsoft.datafactory/factories/pipelines",
       "title": "Microsoft.DataFactory pipelines template reference",
@@ -108,6 +126,24 @@
       "title": "Microsoft.DataFactory dataflows template reference (WranglingDataFlow)",
       "page_updated": "2026-07-20",
       "read_on": "2026-11-17"
+    },
+    "adf_storage_event_trigger": {
+      "url": "https://learn.microsoft.com/en-us/azure/data-factory/how-to-create-event-trigger",
+      "title": "Create a storage event trigger in Azure Data Factory",
+      "page_updated": null,
+      "read_on": "2026-11-19"
+    },
+    "fabric_run_on_demand_job": {
+      "url": "https://learn.microsoft.com/en-us/rest/api/fabric/core/job-scheduler/run-on-demand-item-job",
+      "title": "Job Scheduler - Run On Demand Item Job",
+      "page_updated": "2026-09-15",
+      "read_on": "2026-11-19"
+    },
+    "adf_trigger_parameters": {
+      "url": "https://learn.microsoft.com/en-us/azure/data-factory/how-to-use-trigger-parameterization",
+      "title": "Pass trigger information to pipeline",
+      "page_updated": "2026-08-05",
+      "read_on": "2026-11-19"
     }
   },
   "strategies": {
@@ -3571,27 +3607,35 @@
       "sources": [
         "fabric_vs_adf"
       ],
-      "tool": "A Cron interval schedule, with a stated difference (no window start/end, backfill or dependencies)."
+      "tool": "A disabled Cron interval schedule with the differences named (backfill, dependencies, delay, retries) and the portal steps for an interval-based schedule (preview; no public API: listing a pipeline that has one fails with InvalidConfiguration). Parameters the trigger filled with the window become coalesce(pipeline()?.TriggerEvent?.windowStartTimeUtc / windowEndTimeUtc, the parameter) (window values equal to ADF in a live run, 2026-11-18)."
     },
     {
       "id": "trigger.storage_event",
       "adf": "Storage event trigger (BlobEventsTrigger)",
-      "fabric": "File event trigger in Activator",
+      "fabric": "Event Grid subscription + Logic App calling the Fabric Run On Demand Item Job API (Fabric's own pipeline trigger is an Activator rule)",
       "microsoft": "File event triggers work natively in Fabric without extra setup. Fabric integrates triggers into its Activator framework.",
       "sources": [
-        "fabric_vs_adf"
+        "fabric_vs_adf",
+        "adf_storage_event_trigger",
+        "adf_trigger_parameters",
+        "fabric_run_on_demand_job",
+        "fabric_pipeline_runs"
       ],
-      "tool": "Not generated yet: the definition shape is being read from a portal-made trigger; recreate by hand meanwhile."
+      "tool": "An event bridge, generated: an Event Grid subscription with the ADF trigger's exact filters (event types, subject begins/ends, advanced filters; ignoreEmptyBlobs as data.contentLength > 0) and a Logic App that computes the same pipeline parameters and starts the Fabric pipeline through Run On Demand Item Job (managed identity, or a service principal with its secret in Key Vault). deploy --triggers writes the ARM template; the tool never deploys it; runPipelines is false until cutover (agent/conversion/event_triggers.py). Replaced the Activator form of 2026-11-18, which could not reach ADLS writes behind shortcuts, storage in another tenant or custom topics."
     },
     {
       "id": "trigger.custom_event",
       "adf": "Custom event trigger",
-      "fabric": "Not named by Microsoft",
-      "microsoft": "Custom event triggers are not mentioned.",
+      "fabric": "Event Grid subscription + Logic App calling the Fabric Run On Demand Item Job API (no Fabric source reads a custom topic)",
+      "microsoft": "Custom event triggers are not mentioned in the comparison. Fabric's Event Grid source reads Event Grid namespace topics (CloudEvents) and MQTT only; an Event Hubs source takes a Shared Access Key or the workspace identity.",
       "sources": [
-        "fabric_vs_adf"
+        "fabric_vs_adf",
+        "adf_custom_event_trigger",
+        "adf_trigger_parameters",
+        "fabric_run_on_demand_job",
+        "fabric_eventstream_event_grid"
       ],
-      "tool": "Not generated; recreate by hand."
+      "tool": "An event bridge, generated: an Event Grid subscription with the ADF trigger's exact filters (event types, subject begins/ends, advanced filters; ignoreEmptyBlobs as data.contentLength > 0) and a Logic App that computes the same pipeline parameters and starts the Fabric pipeline through Run On Demand Item Job (managed identity, or a service principal with its secret in Key Vault). deploy --triggers writes the ARM template; the tool never deploys it; runPipelines is false until cutover (agent/conversion/event_triggers.py). Replaced the Activator form of 2026-11-18, which could not reach ADLS writes behind shortcuts, storage in another tenant or custom topics."
     },
     {
       "id": "global_parameter",
@@ -3603,7 +3647,7 @@
         "fabric_variable_library_pipelines",
         "live"
       ],
-      "tool": "String/Int/Bool literals -> the factory's Variable Library read through libraryVariables (run live 2026-11-16); other types -> gp_ pipeline parameters."
+      "tool": "String/Int/Bool literals -> the factory's Variable Library read through libraryVariables (run live 2026-11-16); Float/Array/Object literals -> the library as String JSON text, every reference read back with float()/json() (run live 2026-11-18, eight values equal to ADF); an expression or missing value -> a gp_ pipeline parameter. ADF refuses SecureString global parameters."
     },
     {
       "id": "mapping_data_flow",
@@ -6894,6 +6938,7 @@
       "runid",
       "triggeredbypipelinename",
       "triggeredbypipelinerunid",
+      "triggerevent",
       "triggerid",
       "triggername",
       "triggertime"

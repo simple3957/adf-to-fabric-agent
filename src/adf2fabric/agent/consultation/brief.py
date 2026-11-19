@@ -421,12 +421,13 @@ QUESTIONS: list[Question] = [
              recommend=lambda f, a: R("disabled", f"{plural(f.schedule_triggers, 'trigger')}{f', {f.triggers_started} running in ADF today' if f.triggers_started else ''}: "
                                                   "the timings are kept without running anything early.")),
     Question("pipelines.events", "pipelines", "Event triggers were found. How should they be recreated?",
-             "Fabric runs pipelines on storage events through Activator rules, set up by hand. They are not converted.",
+             "The tool generates, per event trigger, an Event Grid subscription with the same filters and a Logic App that starts the Fabric "
+             "pipeline with the same parameters (deployed in your Azure subscription; nothing runs until cutover).",
              "single", True, "record", "The brief.",
-             options=lambda f: [O("activator", "Recreate them as Activator rules by hand"), O("schedule", "Replace them with schedules"),
+             options=lambda f: [O("bridge", "Event Grid + Logic App starting the Fabric pipeline"), O("schedule", "Replace them with schedules"),
                                 O("adf", "Keep them in ADF for now")],
              when=lambda f, a: f.event_triggers > 0,
-             recommend=lambda f, a: R("activator", f"{plural(f.event_triggers, 'event trigger')}: closest to how they behave today.")),
+             recommend=lambda f, a: R("bridge", f"{plural(f.event_triggers, 'event trigger')}: the same Event Grid filters and parameters as in ADF.")),
     Question("pipelines.invoke", "pipelines", "Pipelines call other pipelines. Which connection should Fabric's Invoke pipeline step use?",
              "Every Execute pipeline step needs a Fabric Data Pipelines connection (OAuth), created by a person once.",
              "single", True, "gate", "The agent waits until that connection is bound.",

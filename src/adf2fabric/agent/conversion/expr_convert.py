@@ -9,7 +9,8 @@ rule ever rewrites one; every other difference is reported, never papered over:
     pipeline().Pipeline                   -> pipeline().PipelineName   (ADF: name; Fabric: ID)
     pipeline().DataFactory                kept, DIFFERENCE reported    (ADF: factory name; Fabric: workspace ID)
     pipeline().globalParameters.X         -> pipeline().libraryVariables.gp_X (String/Int/Bool with a literal value: the
-                                             factory's Variable Library, variable_library.py), else
+                                             factory's Variable Library, variable_library.py); a Float/Array/Object
+                                             literal -> float(...) / json(...) of that variable (held as JSON text), else
                                              pipeline().parameters.gp_X (global parameters do not exist)
     dataset().P                           -> the argument/default passed to the dataset (inlining)
     pipeline().TriggerType, trigger*(),   UNSUPPORTED (no documented Fabric equivalent), kept verbatim
@@ -65,6 +66,8 @@ class ExprEnv:
     used_globals: set[str] = field(default_factory=set)  # original names of global parameters used
     existing_params: set[str] = field(default_factory=set)  # lowercase pipeline parameter names
     library: dict[str, str] = field(default_factory=dict)  # global (lower) -> pipeline type, for those the Variable Library holds
+    library_decode: dict[str, str] = field(default_factory=dict)  # global (lower) -> float | json: held as JSON text, read back through it
+    window_params: dict[str, str] = field(default_factory=dict)  # parameter (lower) -> TriggerEvent window property (tumbling window)
 
 
 @dataclass
@@ -86,7 +89,8 @@ def expr_obj(text: str) -> dict:
 
 
 # ADF global parameter type -> the library variable type, and the type a pipeline reads it as (Microsoft: "Number types aren't supported
-# in pipelines"; Boolean -> Bool, Integer -> Int). Float, Array, Object and SecureString have no pipeline-readable library type.
+# in pipelines"; Boolean -> Bool, Integer -> Int). Float, Array and Object have no pipeline-readable library type: variable_library.ENCODED
+# holds them as String JSON text instead.
 LIBRARY_TYPES = {"string": ("String", "String"), "int": ("Integer", "Int"), "bool": ("Boolean", "Bool")}
 
 
@@ -230,6 +234,16 @@ class _Transformer:
                 gname = str(segs[1][1])
                 alias = library_alias(gname)
                 self.env.used_globals.add(gname)
+                fn = self.env.library_decode.get(gname.lower())
+                if fn:  # a Float / Array / Object: the library holds its JSON text, read back through float() / json()
+                    self.changes.append(f"pipeline().globalParameters.{gname} -> {fn}(pipeline().libraryVariables.{alias}) (the factory's "
+                                        "Variable Library holds it as JSON text)")
+                    self._issue("global_parameter_library_text",
+                                f"Global parameter '{gname}' is read from the Variable Library as JSON text and converted back with {fn}(): "
+                                "Fabric pipelines cannot read a Number, Array or Object library variable.",
+                                Impact.none, f"Keep its value valid JSON for {fn}() in every value set of the Variable Library.")
+                    read = _build(root, [("prop", "libraryVariables", segs[0][2]), ("prop", alias, segs[1][2])])
+                    return _build(Call(fn, (read,)), segs[2:])
                 self.changes.append(f"pipeline().globalParameters.{gname} -> pipeline().libraryVariables.{alias} (the factory's Variable Library)")
                 self._issue("global_parameter_library",
                             f"Global parameter '{gname}' is read from the Variable Library, which holds the factory's global parameters.",
@@ -247,6 +261,19 @@ class _Transformer:
                             Impact.difference,
                             "Supply the per-environment value when the pipeline is scheduled or invoked.")
                 segs = [("prop", "parameters", segs[0][2]), ("prop", target, segs[1][2]), *segs[2:]]
+            elif low == "parameters" and len(segs) > 1 and segs[1][0] == "prop" and str(segs[1][1]).lower() in self.env.window_params:
+                # filled by a tumbling window trigger: a Fabric interval schedule passes no parameters, the pipeline reads the window itself;
+                # a run started by hand (or by another pipeline) still passes the parameter
+                pname, prop_ = str(segs[1][1]), self.env.window_params[str(segs[1][1]).lower()]
+                event = Member(Member(root, "TriggerEvent", True), prop_, True)
+                self.changes.append(f"pipeline().parameters.{pname} -> coalesce(pipeline()?.TriggerEvent?.{prop_}, pipeline().parameters.{pname}) "
+                                    "(the tumbling window's time, read from the Fabric interval schedule)")
+                self._issue("tumbling_window_value",
+                            f"Parameter '{pname}' held the tumbling window's {'start' if 'Start' in prop_ else 'end'} time; in Fabric the pipeline reads it "
+                            f"from an interval-based schedule (pipeline()?.TriggerEvent?.{prop_}) and falls back to the parameter for other runs.",
+                            Impact.difference, "Create the interval-based schedule in the portal (its API is not public); a plain schedule "
+                                               "passes no window, so the parameter's value is used.")
+                return _build(Call("coalesce", (event, _build(root, segs[:2]))), segs[2:])
             elif low == "parameters" or low in FABRIC_PIPELINE_SYSTEM:
                 pass
             else:

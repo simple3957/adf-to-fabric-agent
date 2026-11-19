@@ -899,6 +899,7 @@ class AdfEventTrigger(_Strict):
     ignore_empty_blobs: Optional[bool] = None
     subject_begins_with: Optional[str] = None  # custom events
     subject_ends_with: Optional[str] = None
+    advanced_filters: list[dict[str, Any]] = Field(default_factory=list)  # custom events: [{key, operatorType, values}] as authored
 
 
 class AdfTrigger(_Strict):
@@ -911,6 +912,8 @@ class AdfTrigger(_Strict):
     pipeline_parameters: dict[str, dict[str, str]] = Field(default_factory=dict)
     event: Optional[AdfEventTrigger] = None
     recurrence: Optional[AdfRecurrence] = None
+    # tumbling window extras: delay, maxConcurrency, retryCount, retryIntervalInSeconds, dependsOn (count) - what Fabric's schedule drops
+    window: dict[str, Any] = Field(default_factory=dict)
     parse_status: DiscoveryStatus = DiscoveryStatus.discovered
     note: str = ""
 

@@ -426,16 +426,16 @@ def test_execute_pipeline_wait_default_is_written_explicitly_and_unknown_child_n
 
 
 def test_global_parameters_a_library_cannot_hold_become_parameters_and_flow_down_to_children():
-    # Float has no pipeline-readable library type (Microsoft: Number is not supported in pipelines), so it stays a gp_ parameter
+    # a global with no literal value has nothing to put in the library, so it stays a gp_ parameter
     child = pipe(act("W", "Wait", {"waitTimeInSeconds": expr("@int(pipeline().globalParameters.delay)")}), name="Child")
     parent = pipe(act("Run", "ExecutePipeline", {"pipeline": ref("Pipeline", "Child")}), name="Parent")
-    out = convert([parent, child], global_params={"delay": {"type": "Float", "defaultValue": 7.5}})
+    out = convert([parent, child], global_params={"delay": {"type": "Float"}})
     c_rec, c_content = out["Child"]
     p_rec, p_content = out["Parent"]
-    assert c_content["properties"]["parameters"] == {"gp_delay": {"type": "Float", "defaultValue": 7.5}}
+    assert c_content["properties"]["parameters"] == {"gp_delay": {"type": "Float"}}
     assert "libraryVariables" not in c_content["properties"]
     assert find(c_content, "W")["typeProperties"]["waitTimeInSeconds"]["value"] == "@int(pipeline().parameters.gp_delay)"
-    assert p_content["properties"]["parameters"] == {"gp_delay": {"type": "Float", "defaultValue": 7.5}}
+    assert p_content["properties"]["parameters"] == {"gp_delay": {"type": "Float"}}
     assert find(p_content, "Run")["typeProperties"]["parameters"]["gp_delay"] == {
         "value": "@pipeline().parameters.gp_delay", "type": "Expression"}
     assert by_name(c_rec)["W"].status is S.converted_with_differences and "gp_delay" in c_rec.parameters_added
@@ -463,6 +463,46 @@ def test_string_int_and_bool_global_parameters_are_read_from_the_factorys_variab
     assert "parameters" not in c_content["properties"]  # nothing to pass: each pipeline reads the library itself
     assert "parameters" not in p_content["properties"] and "parameters" not in find(p_content, "Run")["typeProperties"]
     assert c_rec.structural_valid and p_rec.structural_valid and by_name(c_rec)["S"].status is S.converted
+
+
+def test_float_array_and_object_global_parameters_are_held_as_json_text_and_read_back_with_float_or_json():
+    # the expressions of the live ADF test pipeline PL_GlobalParams_Types_Test (2026-11-18)
+    s = pipe(
+        act("R", "SetVariable", {"variableName": "a", "value": expr("@string(mul(pipeline().globalParameters.ratio, 2))")}),
+        act("F", "SetVariable", {"variableName": "b", "value": expr("@pipeline().globalParameters.regions[0]")}),
+        act("M", "SetVariable", {"variableName": "c", "value": expr("@pipeline().globalParameters.config?.mode")}),
+        act("T", "SetVariable", {"variableName": "d", "value": expr("ratio=@{pipeline().globalParameters.ratio}")}),
+        name="Child", variables={k: {"type": "String"} for k in "abcd"})
+    out = convert([s], global_params={"ratio": {"type": "Float", "value": 0.75}, "regions": {"type": "Array", "value": ["EU", "US"]},
+                                      "config": {"type": "Object", "value": {"mode": "full", "retries": 3}}})
+    rec, content = out["Child"]
+    lib = content["properties"]["libraryVariables"]
+    name = lib["gp_ratio"]["libraryName"]
+    assert lib == {k: {"type": "String", "variableName": k[3:], "libraryName": name} for k in ("gp_config", "gp_ratio", "gp_regions")}
+    v = {a: find(content, a)["typeProperties"]["value"]["value"] for a in "RFMT"}
+    assert v["R"] == "@string(mul(float(pipeline().libraryVariables.gp_ratio), 2))"
+    assert v["F"] == "@json(pipeline().libraryVariables.gp_regions)[0]"
+    assert v["M"] == "@json(pipeline().libraryVariables.gp_config)?.mode"
+    assert v["T"] == "ratio=@{float(pipeline().libraryVariables.gp_ratio)}"
+    assert "parameters" not in content["properties"] and rec.structural_valid
+    assert all(by_name(rec)[a].status is S.converted for a in "RFMT")
+    assert "global_parameter_library_text" in codes(by_name(rec)["R"])
+
+
+def test_the_library_holds_compact_json_text_for_float_array_and_object():
+    from adf2fabric.agent.conversion import variable_library
+    from adf2fabric.project.discovery import AdfParameter as AdfGlobalParameter
+
+    gps = [AdfGlobalParameter(name="ratio", type="Float", has_default=True, default_raw=0.75),
+           AdfGlobalParameter(name="regions", type="Array", has_default=True, default_raw=["EU", "US"]),
+           AdfGlobalParameter(name="config", type="Object", has_default=True, default_raw={"mode": "full", "retries": 3}),
+           AdfGlobalParameter(name="bad", type="Array", has_default=True, default_raw="not a list"),
+           AdfGlobalParameter(name="env", type="String", has_default=True, default_raw="dev")]
+    got = {v["name"]: (v["type"], v["value"]) for v in variable_library.variables(gps)}
+    # exactly what ADF's string() printed for these values in the live baseline run
+    assert got == {"config": ("String", '{"mode":"full","retries":3}'), "env": ("String", "dev"), "ratio": ("String", "0.75"),
+                   "regions": ("String", '["EU","US"]')}
+    assert [variable_library.decoder(g) for g in gps] == ["float", "json", "json", None, None]
 
 
 def test_a_library_variable_the_pipeline_does_not_declare_is_a_validation_error():

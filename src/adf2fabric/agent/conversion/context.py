@@ -137,6 +137,7 @@ class ProjectContext:
     globals_needed: dict[str, list[str]] = field(default_factory=dict)  # pipeline(lower) -> global names
     library_name: Optional[str] = None  # the Variable Library that holds the factory's global parameters (None: there are none it can hold)
     library: dict[str, str] = field(default_factory=dict)  # global (lower) -> pipeline type, for those the library holds
+    library_decode: dict[str, str] = field(default_factory=dict)  # global (lower) -> float | json, for those held as JSON text
     ir_kinds: dict[str, Optional[str]] = field(default_factory=dict)  # integration runtime (lower) -> kind
     prereqs: dict[tuple[str, str], Prerequisite] = field(default_factory=dict)
     # Spark workloads that were approved AND deployed to Fabric (workloads-deploy): source item (lower) -> manifest entry.
@@ -239,6 +240,8 @@ class PipelineContext:
     rename: dict[str, str] = field(default_factory=dict)  # lowercase source activity -> output component
     registry: list[Any] = field(default_factory=list)  # ActivityConversion list, flat, source order
     param_names: set[str] = field(default_factory=set)  # lowercase
+    # parameter (lower) -> TriggerEvent property, for the parameters a tumbling window trigger fills with its window times (engine.py)
+    window_params: dict[str, str] = field(default_factory=dict)
 
     def alloc(self, base: str) -> str:
         """A pipeline-unique component name (deterministic)."""
@@ -304,7 +307,8 @@ class ActivityBuilder:
     # -- environments --------------------------------------------------------------------------------
     def env(self, **kw) -> ExprEnv:
         return ExprEnv(activity_rename=self.pc.rename, used_globals=self.pc.used_globals,
-                       existing_params=self.pc.param_names, library=self.pc.project.library, **kw)
+                       existing_params=self.pc.param_names, library=self.pc.project.library,
+                       library_decode=self.pc.project.library_decode, window_params=self.pc.window_params, **kw)
 
     # -- recording -----------------------------------------------------------------------------------
     def mapping(self, source: str, target: Optional[str], rule: str, note: str = "", preserved: bool = True) -> None:

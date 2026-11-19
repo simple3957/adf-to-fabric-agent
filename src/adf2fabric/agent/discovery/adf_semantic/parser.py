@@ -554,7 +554,14 @@ def _event_trigger(trigger_type: Any, tp: dict) -> Optional[AdfEventTrigger]:
         return tp.get(key) if isinstance(tp.get(key), str) else None
 
     ignore = tp.get("ignoreEmptyBlobs")
+    filters = []
+    for f in tp.get("advancedFilters") or []:
+        if isinstance(f, dict) and isinstance(f.get("key"), str) and isinstance(f.get("operatorType"), str):
+            vals = f.get("values") if isinstance(f.get("values"), list) else ([f["value"]] if "value" in f else [])
+            filters.append({"key": f["key"], "operatorType": f["operatorType"],
+                            "values": [v for v in vals if isinstance(v, (str, int, float, bool))]})
     return AdfEventTrigger(
+        advanced_filters=filters,
         scope=text("scope"),
         events=[e for e in (tp.get("events") or []) if isinstance(e, str)],
         blob_path_begins_with=text("blobPathBeginsWith"),
@@ -571,7 +578,9 @@ def parse_trigger(data: dict, path: str) -> AdfTrigger:
 
     pipeline_refs: list[str] = []
     pipeline_parameters: dict[str, dict[str, str]] = {}
-    for pl in props.get("pipelines", []) or []:
+    # a tumbling window trigger runs ONE pipeline, under "pipeline" (singular); every other trigger lists them under "pipelines"
+    single = [props["pipeline"]] if isinstance(props.get("pipeline"), dict) else []
+    for pl in [*(props.get("pipelines", []) or []), *single]:
         if isinstance(pl, dict):
             name = _ref_name(pl.get("pipelineReference"))
             if name:
@@ -603,8 +612,22 @@ def parse_trigger(data: dict, path: str) -> AdfTrigger:
                 {"day": o.get("day"), "occurrence": o.get("occurrence")}
                 for o in (sched.get("monthlyOccurrences") or []) if isinstance(o, dict)],
         )
+    window: dict[str, Any] = {}
+    if recurrence is None and str(props.get("type") or "").lower() == "tumblingwindowtrigger" and isinstance(tp.get("frequency"), str):
+        # a tumbling window keeps its timing directly in typeProperties (always UTC): frequency Minute | Hour | Month, interval, startTime
+        interval = tp.get("interval")
+        recurrence = AdfRecurrence(frequency=tp["frequency"], interval=interval if isinstance(interval, int) and not isinstance(interval, bool) else None,
+                                   time_zone="UTC", start_time=safe_scalar(tp.get("startTime")), end_time=safe_scalar(tp.get("endTime")))
+        retry = tp.get("retryPolicy") if isinstance(tp.get("retryPolicy"), dict) else {}
+        window = {k: v for k, v in {
+            "delay": tp.get("delay") if isinstance(tp.get("delay"), str) else None,
+            "maxConcurrency": tp.get("maxConcurrency") if isinstance(tp.get("maxConcurrency"), int) else None,
+            "retryCount": retry.get("count") if isinstance(retry.get("count"), int) else None,
+            "retryIntervalInSeconds": retry.get("intervalInSeconds") if isinstance(retry.get("intervalInSeconds"), int) else None,
+            "dependsOn": len(tp["dependsOn"]) if isinstance(tp.get("dependsOn"), list) else None}.items() if v is not None}
 
     return AdfTrigger(
+        window=window,
         name=str(data.get("name") or ""),
         path=path,
         type=props.get("type") if isinstance(props.get("type"), str) else None,

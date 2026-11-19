@@ -194,6 +194,7 @@ class TargetPipeline:
 class TargetScan:
     pipelines: list[TargetPipeline] = field(default_factory=list)
     schedules: list[dict] = field(default_factory=list)
+    event_bridges: list[dict] = field(default_factory=list)  # conversion/event-triggers/*.json: event trigger -> Event Grid + Logic App plan
     name_map: dict[str, str] = field(default_factory=dict)  # lower source pipeline name -> artifact path (from conversion.yaml, names only)
     problems: list[str] = field(default_factory=list)
 
@@ -230,6 +231,14 @@ def scan_target(conversion_dir: Path) -> TargetScan:
                 scan.schedules.append(data)
         except (OSError, UnicodeDecodeError, json.JSONDecodeError):
             scan.problems.append(f"schedule file {f.name} is not valid JSON")
+    edir = conversion_dir / "event-triggers"
+    for f in sorted(edir.glob("*.json")) if edir.is_dir() else []:
+        try:
+            data = json.loads(f.read_text(encoding="utf-8-sig"))
+            if isinstance(data, dict):
+                scan.event_bridges.append(data)
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            scan.problems.append(f"event trigger file {f.name} is not valid JSON")
     # which generated file belongs to which source pipeline: the conversion record, read for NAMES only (never for success flags)
     cy = conversion_dir / "conversion.yaml"
     if cy.is_file():

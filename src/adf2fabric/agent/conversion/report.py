@@ -96,13 +96,19 @@ def render_report(c: ProjectConversion) -> str:
             for a in attention:
                 out += _activity_block(a)
         if p.triggers:
-            out += ["", "### Triggers (schedules are generated where they map exactly; events and the rest are recreated by hand)", ""]
+            out += ["", "### Triggers (schedules are generated where they map exactly; storage and custom event triggers become an Event Grid "
+                    "subscription with the same filters and a Logic App that starts the Fabric pipeline; the rest are recreated by hand)", ""]
             for t in p.triggers:
                 out.append(f"- `{t.name}`: {t.summary}. {t.action}")
                 if t.schedule_status:
                     where = f" - `{t.schedule_file}`" if t.schedule_file else ""
                     out.append(f"  - Fabric schedule: **{t.schedule_status}** ({len(t.schedules)} schedule(s)){where}")
                     out += [f"  - {n}" for n in t.schedule_notes]
+                if t.event_status:
+                    where = f" - `{t.event_file}`" if t.event_file else ""
+                    out.append(f"  - Event bridge (Event Grid -> Logic App -> Fabric): **{t.event_status}** ({t.event_kind}){where}")
+                    out += [f"  - {n}" for n in t.event_notes]
+                    out += [f"  - Step {i}: {s}" for i, s in enumerate(t.event_steps, 1)]
                 out += [f"  - {d}" for d in t.details]
         if p.prerequisites:
             out += ["", "### Prerequisites for this pipeline", ""] + _prereq_lines(p.prerequisites)

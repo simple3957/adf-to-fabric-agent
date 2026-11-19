@@ -71,11 +71,12 @@ def build_project_context(d: AdfSemanticDiscovery, resolutions: Resolutions) -> 
     from adf2fabric.agent.conversion import variable_library
 
     library = {k: kinds[1] for k, g in gp.items() if (kinds := variable_library.eligible(g))}
+    library_decode = {k: fn for k, g in gp.items() if (fn := variable_library.decoder(g))}  # Float/Array/Object held as JSON text
     # a global the Variable Library holds is read by each pipeline itself; only the others are passed down as gp_ parameters
     globals_needed = {k: sorted((o for low, o in v.items() if low not in library), key=str.lower) for k, v in direct.items()}
     factory = next((f.name for f in d.factory if f.name), "factory")
     return ProjectContext(
-        library_name=variable_library.library_name(factory) if library else None, library=library,
+        library_name=variable_library.library_name(factory) if library else None, library=library, library_decode=library_decode,
         datasets={x.name.lower(): x for x in d.datasets},
         linked_services={x.name.lower(): x for x in d.linked_services},
         pipelines=pipelines, global_params=gp, triggers=list(d.triggers), resolutions=resolutions,
@@ -216,6 +217,25 @@ class ConversionAgent:
                     self.store.write_conversion_file(pid, rel, json.dumps(body, indent=2, ensure_ascii=False) + "\n")
                     written[t.name] = rel
                 t.schedule_file = written[t.name]
+
+        # Storage / custom event triggers -> the event bridge plan (deploy --triggers turns it into an ARM template with the workspace's ids).
+        from adf2fabric.agent.conversion import event_triggers
+
+        by_name = {t.name.lower(): t for t in d.triggers}
+        planned: dict[str, str] = {}
+        for record in converted:
+            for t in record.triggers:
+                if t.event_status not in ("generated", "generated_with_differences") or t.name.lower() not in by_name:
+                    continue
+                if t.name not in planned:
+                    ev = event_triggers.plan(by_name[t.name.lower()])
+                    safe = re.sub(r"[^A-Za-z0-9._-]+", "_", t.name).strip("._") or "trigger"
+                    rel = f"event-triggers/{safe}.json"
+                    body = {**ev.to_dict(), "sourceState": t.runtime_state,
+                            "fabricApi": "POST /v1/workspaces/{workspaceId}/items/{pipelineId}/jobs/instances?jobType=Pipeline"}
+                    self.store.write_conversion_file(pid, rel, json.dumps(body, indent=2, ensure_ascii=False) + "\n")
+                    planned[t.name] = rel
+                t.event_file = planned[t.name]
 
         # Source artifacts discovery could not process are missing from this conversion: it cannot be "converted".
         lost = [u for u in d.unprocessed_artifacts if u.reason in UNPROCESSED_LOSS_REASONS]
