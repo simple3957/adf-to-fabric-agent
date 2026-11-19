@@ -107,9 +107,21 @@ def _dependencies(api: ApiClient, pid: str, dep: dict) -> None:
             for o in dep["order"]], "No pipelines.")
 
 
+def _assess_button(api: ApiClient, pid: str) -> None:
+    if st.button("Assess Spark workloads", key="rv-workloads", disabled=not can("plans:generate"),
+                 help="Read-only: classifies each notebook, job, data flow, U-SQL script and SSIS package. No code is fetched without a credential and nothing is sent to Fabric."):
+        if (job := run_job(lambda: api.run_stage(pid, "workloads", idempotency_key=intent("workloads")), "Assessing workloads", intent_name="workloads")) \
+                and job["state"] == "succeeded":
+            st.rerun()
+
+
 def _compute(api: ApiClient, pid: str, comp: dict) -> None:
     if not comp.get("available"):
-        empty_state("No Spark compute found", comp.get("needs", ""))
+        empty_state("No Spark compute plan yet", comp.get("needs", ""))
+        # SSIS packages, U-SQL scripts, data flows and HDInsight jobs need no Spark compute plan: they are found in the source, so assessing them must not
+        # wait for a convert (before 2026-11-18 a project with only those had no button here and no way to generate their notebooks)
+        st.caption("Data flows, U-SQL scripts, SSIS packages and HDInsight Spark jobs are translated to Fabric items too: assess them here.")
+        _assess_button(api, pid)
         return
     _table([{"Platform": s["platform"], "Mode": s["mode"], "Runtime": s["runtime"] or "unknown", "Sized": "yes" if s["sized"] else "no", "Activities": s["activities"],
              "Libraries": s["libraries"]} for s in comp.get("sources", [])], "No Spark compute sources.")
@@ -133,11 +145,7 @@ def _compute(api: ApiClient, pid: str, comp: dict) -> None:
                 if (got := call(api.supply_code, pid, n["ref"], up.getvalue().decode("utf-8-sig", errors="replace"))):
                     st.success(f"{got['lines']} lines kept. {got['next']}")
                     st.rerun()
-    if st.button("Assess Spark workloads", key="rv-workloads", disabled=not can("plans:generate"),
-                 help="Read-only: classifies each notebook / job. No code is fetched without a credential and nothing is sent to Fabric."):
-        if (job := run_job(lambda: api.run_stage(pid, "workloads", idempotency_key=intent("workloads")), "Assessing workloads", intent_name="workloads")) \
-                and job["state"] == "succeeded":
-            st.rerun()
+    _assess_button(api, pid)
     if comp.get("workloads"):
         fetch = st.checkbox("Read the code with my Azure sign-in (Databricks notebooks, U-SQL scripts, SSIS packages in ADLS)", key="rv-wl-fetch",
                             help="Uses the Azure CLI sign-in: an Entra ID token for the Databricks workspace, and the signed-in accounts' own storage access "

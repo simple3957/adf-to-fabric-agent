@@ -73,11 +73,14 @@ def conversion_summary(store: ProjectStore, pid: str, conv=None) -> dict[str, An
     """What the UI shows for a conversion. ``stale`` = made from an older commit than the project's source."""
     conv = conv or store.load_conversion(pid)
     project = store.load(pid)
+    from adf2fabric.connections.needs import _walk, is_waiting
+
     res = store.conversion_dir(pid) / "resolutions.json"
+    waiting = {p.source_pipeline: sum(1 for a in _walk(p.activities) if is_waiting(a)) for p in conv.pipelines}
     return dict(
-        status=conv.status.value, status_counts=conv.status_counts,
+        status=conv.status.value, status_counts=conv.status_counts, waiting=sum(waiting.values()),
         pipelines=[{"name": p.source_pipeline, "status": p.status.value, "structurally_valid": p.structural_valid,
-                    "runtime_ready": p.runtime_ready} for p in conv.pipelines],
+                    "runtime_ready": p.runtime_ready, "waiting": waiting[p.source_pipeline]} for p in conv.pipelines],
         unbound=[q.name for q in [*conv.connections, *conv.workspace_items] if not q.bound and not q.name.startswith("pipeline:")],
         filled_at_deploy=[q.name for q in conv.workspace_items if not q.bound and q.name.startswith("pipeline:")],
         preflight=[f.model_dump(mode="json") for f in conv.preflight],

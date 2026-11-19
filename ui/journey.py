@@ -237,10 +237,11 @@ def convert_facts(result: Optional[dict]) -> StepFacts:
         return StepFacts(waiting="Run the conversion.", metric="Not run yet")
     pipes = result.get("pipelines", [])
     ready = sum(1 for p in pipes if p.get("runtime_ready"))
-    blocked = (result.get("status_counts") or {}).get("blocked", 0)
+    blocked = max((result.get("status_counts") or {}).get("blocked", 0) - result.get("waiting", 0), 0)
     unbound = len(result.get("unbound", []))
     errors = sum(1 for f in result.get("preflight", []) if f.get("severity") == "error")
     parts = [f"{blocked} blocked activities"] if blocked else []
+    parts += [f"{result['waiting']} waiting for a notebook Deploy creates"] if result.get("waiting") else []
     parts += [f"{errors} source problem(s)"] if errors else []
     parts += [f"{unbound} unbound"] if unbound else []
     metric = f"{ready} of {len(pipes)} ready to run"

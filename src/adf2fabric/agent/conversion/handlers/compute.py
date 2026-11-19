@@ -243,7 +243,7 @@ def _jar_as_spark_job(cx: ActivityBuilder) -> bool:
     sjd = cx.item("sparkjob", name, f"The Fabric Spark job definition that runs JAR main class '{main}'.")
     if sjd.startswith("<"):
         return False
-    out = cx.add(cx.envelope(a.name, "SparkJobDefinition", {"sparkJobDefinitionId": sjd, "workspaceId": cx.workspace()}))
+    out = cx.add(cx.envelope(a.name, "FabricSparkJobDefinition", {"sparkJobDefinitionId": sjd, "workspaceId": cx.workspace()}))
     cx.mapping("typeProperties.mainClassName", "sparkJobDefinition.mainClass", "jar_to_sjd")
     for key in raw:
         if key not in ("mainClassName", "parameters", "libraries"):
@@ -465,7 +465,7 @@ def _hdinsight_spark_as_sjd(cx: ActivityBuilder) -> None:
         if key not in ("rootPath", "entryFilePath", "className", "arguments", "sparkJobLinkedService"):
             cx.dropped(f"typeProperties.{key}", "an HDInsight cluster setting (sparkConfig, proxyUser, getDebugInfo) with no Spark job "
                        "definition equivalent; set Spark properties in a Fabric Environment")
-    name = cx.add(cx.envelope(a.name, "SparkJobDefinition", tp))
+    name = cx.add(cx.envelope(a.name, "FabricSparkJobDefinition", tp))
     cx.cover(Op.external_execution, name)
     cx.strategy = ConversionStrategy.alternative
     cx.disposition = "replace"
@@ -648,7 +648,7 @@ def convert_spark_job(cx: ActivityBuilder) -> None:
         if key not in ("sparkJob", "file", "className", "args"):
             cx.dropped(f"typeProperties.{key}", "pool/executor/configuration settings belong to the Fabric Spark job "
                        "definition and environment")
-    name = cx.add(cx.envelope(a.name, "SparkJobDefinition", tp))
+    name = cx.add(cx.envelope(a.name, "FabricSparkJobDefinition", tp))
     cx.cover(Op.external_execution, name)
     cx.strategy = ConversionStrategy.alternative
     cx.disposition = "replace"

@@ -965,3 +965,11 @@ def test_generated_json_only_uses_documented_properties(activity):
     rec, _ = convert_one(pipe(activity), **ESTATE)
     undocumented = [i for i in rec.validation.issues if i.code.startswith("undocumented")]
     assert undocumented == [], undocumented
+
+
+def test_spark_activities_use_the_type_fabric_writes_for_a_spark_job_definition():
+    """Found live 2026-11-19 from a portal-made pipeline: the activity type is FabricSparkJobDefinition. The tool wrote SparkJobDefinition, which Fabric
+    accepts at create but fails to start with BadRequest, whatever the ids; with FabricSparkJobDefinition (no connection) the pipeline ran to Completed."""
+    job = act("Sj", "SparkJob", {"sparkJob": ref("SparkJobDefinitionReference", "J")}, linkedServiceName=ref("LinkedService", "LS_SYN"))
+    _, content, _ = one(job, linked_services=[linked_service("LS_SYN", "AzureSynapseAnalytics")])
+    assert find(content, "Sj")["type"] == "FabricSparkJobDefinition"

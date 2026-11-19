@@ -808,7 +808,7 @@ def compute(inp: Inputs, c: Collector) -> None:
     trident = []
     for tp in inp.tgt.pipelines:
         for a in views.pipeline_activities(tp.content or {}):
-            if a.type in ("TridentNotebook", "SparkJobDefinition"):
+            if a.type in ("TridentNotebook", "FabricSparkJobDefinition"):
                 trident.append((tp.name, a))
     wm = inp.workloads
     if not trident:

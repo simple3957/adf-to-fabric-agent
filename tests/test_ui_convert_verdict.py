@@ -44,3 +44,10 @@ def test_blocked_or_manual_work_is_named_never_hidden(verdict):
 def test_a_pipeline_that_is_not_valid_is_not_converted_even_when_no_activity_is_blocked(verdict):
     text, kind = verdict({"pipelines": _pipes(1), "status_counts": {"converted": 9}})
     assert kind == "warning" and "1 pipeline(s) not valid" in text
+
+
+def test_activities_waiting_for_a_deploy_created_notebook_are_not_blocked(verdict):
+    text, kind = verdict({"status": "partial", "waiting": 2, "pipelines": _pipes(), "status_counts": {"blocked": 2}})
+    assert kind == "info" and "wait" in text and "blocked" not in text
+    text, kind = verdict({"status": "partial", "waiting": 1, "pipelines": _pipes(), "status_counts": {"blocked": 2}})
+    assert kind == "warning" and "1 blocked" in text  # a genuinely blocked one still shows

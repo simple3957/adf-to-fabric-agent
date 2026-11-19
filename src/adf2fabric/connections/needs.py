@@ -19,7 +19,7 @@ from typing import Optional
 from adf2fabric.project.store import ProjectStore
 
 # what a converted activity's components are, in words a person reads
-_BECAME = {"TridentNotebook": "a Fabric notebook", "SparkJobDefinition": "a Fabric Spark job definition",
+_BECAME = {"TridentNotebook": "a Fabric notebook", "FabricSparkJobDefinition": "a Fabric Spark job definition",
            "RefreshDataflow": "a Dataflow Gen2", "InvokePipeline": "an Invoke pipeline activity", "Fail": "nothing (it cannot run in Fabric)"}
 
 # a stand-in that waits for what the tool generates (Review > Compute: generate, approve, then Deploy creates it); not a dead end
@@ -28,6 +28,15 @@ _SJD_SOON = "a Fabric Spark job definition (the tool generates it; Deploy create
 _PENDING = {"databricks_notebook_pending": _NOTEBOOK_SOON, "databricks_job_notebooks_pending": _NOTEBOOK_SOON,
             "databricks_python_pending": _NOTEBOOK_SOON, "dataflow_notebook_pending": _NOTEBOOK_SOON, "usql_notebook_pending": _NOTEBOOK_SOON, "ssis_notebook_pending": _NOTEBOOK_SOON,
             "databricks_jar_pending": _SJD_SOON, "hdinsight_spark_job_pending": _SJD_SOON}
+
+
+PENDING_CODES = frozenset(_PENDING)
+
+
+def is_waiting(activity) -> bool:
+    """A blocked activity that only waits for an item the tool generates and Deploy creates (a notebook, a Spark job definition): not a dead end.
+    Until 2026-11-19 it was counted and worded as 'blocked', which read as 'the tool cannot migrate this'."""
+    return activity.status.value == "blocked" and any(getattr(w, "code", None) in PENDING_CODES for w in (activity.warnings or []))
 
 
 @dataclass

@@ -66,3 +66,5 @@ runs returned the ADF baseline: `dev-50000` and `true`. The live read-back (`val
 ## Known test issue
 
 `tests/test_hardening.py::test_finished_jobs_are_still_listed_after_a_restart` failed once in a full run and passes alone; not yet explained.
+
+* HDInsight Spark / Spark job definition activities: the activity type is `FabricSparkJobDefinition` (was `SparkJobDefinition`, which failed to start); the converted HDInsight Spark pipeline ran to Completed in Fabric on 2026-11-19 (see docs/workload-migration.md).

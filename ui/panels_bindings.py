@@ -33,8 +33,8 @@ def section(api: ApiClient, pid: str, unbound: list[str]) -> None:
         st.success(done)
     generated = {n["name"] for n in (read(api, "workload_notebooks", pid) or {}).get("items") or [] if n.get("generated")}
     st.markdown(f"#### Things you need to set · {len(open_)} open" + (f" · {len(items) - len(open_)} set" if len(items) > len(open_) else ""))
-    st.caption("These ids only exist once the item is in Fabric. Pick it from the list (read live from your workspace), paste its id, or create a "
-               "generated notebook in Fabric from here; then Convert again.")
+    st.caption("These ids only exist once the item is in Fabric. A notebook the tool generated is created by Deploy and bound on the next Convert: "
+               "nothing to do here. For anything else, pick it from the list (read live from your workspace) or paste its id.")
     if got.get("fabric_note") and open_:
         st.info(got["fabric_note"])
     for i in items:

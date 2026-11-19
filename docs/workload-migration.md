@@ -377,3 +377,16 @@ Probe items left in the workspace for you to delete in the portal: notebook `zz_
   workspace on 2026-11-13 (az login, Entra ID token), and a job converted with parameters ran in Fabric the same day with outputs
   equal to Databricks ([status-briefing.md](status-briefing.md)). `verify` compares the job's one ADF activity with its task
   activities together (status and runs only: the ADF activity reports no counts).
+
+## The Spark job definition activity's type is `FabricSparkJobDefinition` (2026-11-19)
+
+The converter wrote the activity type `SparkJobDefinition` (the name of the *item*). Fabric accepts that at create but the pipeline fails to start with
+`BadRequest` ("Failed to run the Pipeline"), before any activity runs and whatever the ids or connection (found live: bad ids, connection variants,
+`defaultLakehouse` shapes, a role for the workspace identity, a `linkedService` block, all identical). A pipeline saved in the Fabric portal showed the real
+type: `FabricSparkJobDefinition`, with `typeProperties.sparkJobDefinitionId` (a string or an Expression object), `workspaceId`, and an optional
+`externalReferences.connection`. With that type and no connection the pipeline `PL_HDInsightSpark_Test` ran to `Completed` in Fabric (the converted HDInsight Spark
+activity; its Spark job definition runs the same file). The connection is optional: a Workspace Identity connection (type SparkJobDefinition) made the run fail
+with `UserAccessTokenException` because that identity had no role on the workspace, so the converter does not add one; the run uses the person who saved
+the pipeline. All Spark job definition activities (HDInsight Spark, Synapse Spark job, Databricks JAR) use the new type; validation, the catalog's
+`fabric_schema` and the connection-needs text were renamed with it. The portal also writes a longer default timeout (`0.12:00:00`); the converter keeps the
+source activity's.

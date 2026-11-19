@@ -749,7 +749,7 @@
           "docs": "https://learn.microsoft.com/en-us/fabric/data-factory/notebook-activity"
         },
         {
-          "type": "SparkJobDefinition",
+          "type": "FabricSparkJobDefinition",
           "name": "Spark job definition",
           "docs": "https://learn.microsoft.com/en-us/fabric/data-factory/spark-job-definition-activity"
         }
@@ -794,7 +794,7 @@
             {
               "when": "the JAR is in OneLake / ADLS (an abfss:// library or --artifact), its Spark job definition approved and in this workspace",
               "fabric": [
-                "SparkJobDefinition"
+                "FabricSparkJobDefinition"
               ],
               "status": "converted",
               "how": "a Spark job definition activity on the generated definition",
@@ -1797,7 +1797,7 @@
           "docs": "https://learn.microsoft.com/en-us/fabric/data-factory/azure-hdinsight-activity"
         },
         {
-          "type": "SparkJobDefinition",
+          "type": "FabricSparkJobDefinition",
           "name": "Spark job definition",
           "docs": "https://learn.microsoft.com/en-us/fabric/data-factory/spark-job-definition-activity"
         }
@@ -1933,7 +1933,7 @@
             {
               "when": "its generated Spark job definition (same file: rootPath + entryFilePath on an ADLS Gen2 sparkJobLinkedService, through the OneLake shortcut when the storage map has one) is approved and in this workspace",
               "fabric": [
-                "SparkJobDefinition"
+                "FabricSparkJobDefinition"
               ],
               "status": "converted",
               "how": "a Spark job definition activity on that definition; className -> mainClass, arguments -> commandLineArguments; sparkConfig, proxyUser, getDebugInfo dropped (a difference)",
@@ -2396,7 +2396,7 @@
       ],
       "fabric_activities": [
         {
-          "type": "SparkJobDefinition",
+          "type": "FabricSparkJobDefinition",
           "name": "Spark job definition",
           "docs": "https://learn.microsoft.com/en-us/fabric/data-factory/spark-job-definition-activity"
         }
@@ -2440,7 +2440,7 @@
             {
               "when": "generated from the Synapse definition (Review > Compute), approved and created in this workspace, or bound by hand",
               "fabric": [
-                "SparkJobDefinition"
+                "FabricSparkJobDefinition"
               ],
               "status": "converted",
               "how": "a Spark job definition activity bound to the migrated definition",
@@ -2449,7 +2449,7 @@
             {
               "when": "not migrated yet",
               "fabric": [
-                "SparkJobDefinition"
+                "FabricSparkJobDefinition"
               ],
               "status": "manual_required",
               "how": "file -> executableFile, className -> mainClass, args -> commandLineArguments; a placeholder id until the definition exists",
@@ -6628,7 +6628,7 @@
         "inferred_type_properties": [],
         "docs": "https://learn.microsoft.com/en-us/fabric/data-factory/notebook-activity"
       },
-      "SparkJobDefinition": {
+      "FabricSparkJobDefinition": {
         "required": [
           "sparkJobDefinitionId",
           "workspaceId"

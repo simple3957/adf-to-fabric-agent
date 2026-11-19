@@ -403,15 +403,20 @@ def convert_verdict(result: dict) -> tuple[str, str]:
     'not everything is converted' although nothing was blocked or left manual (changed 2026-11-18)."""
     counts = result.get("status_counts") or {}
     pipes = result.get("pipelines") or []
-    blocked, manual, failed = counts.get("blocked", 0), counts.get("manual_required", 0), counts.get("failed", 0)
+    waiting = result.get("waiting", 0)  # blocked only until Deploy creates their generated notebook: not a dead end (2026-11-19)
+    blocked, manual, failed = max(counts.get("blocked", 0) - waiting, 0), counts.get("manual_required", 0), counts.get("failed", 0)
     diff = counts.get("converted_with_differences", 0)
     total = sum(counts.values())
     invalid = [p["name"] for p in pipes if not p.get("structurally_valid")]
     if not total:
         return "Nothing was converted", "warning"
     if not (blocked or manual or failed or invalid):
-        return (f"Everything is converted: {len(pipes)} pipeline(s), {total} activities"
-                + (f"; {diff} activit{'y has' if diff == 1 else 'ies have'} differences to check" if diff else ""), "success")
+        text = (f"Everything is converted: {len(pipes)} pipeline(s), {total} activities"
+                + (f"; {diff} activit{'y has' if diff == 1 else 'ies have'} differences to check" if diff else ""))
+        if waiting:
+            return (f"Converted as far as it can before Deploy: {len(pipes)} pipeline(s), {total} activities; {waiting} wait{'s' if waiting == 1 else ''} "
+                    "for a Fabric notebook that Deploy creates"), "info"
+        return text, "success"
     left = ", ".join(x for x in (f"{blocked} blocked" if blocked else "", f"{manual} need manual work" if manual else "",
                                  f"{failed} failed" if failed else "", f"{len(invalid)} pipeline(s) not valid" if invalid else "") if x)
     return f"Not everything is converted: {left} (of {total} activities)", "warning"
@@ -465,9 +470,13 @@ def convert(api: ApiClient, pid: str, result: dict | None) -> None:
     counts = result.get("status_counts") or {}
     if counts:
         short = {"converted_with_differences": "with differences", "manual_required": "manual work"}  # a long label is cut off in a narrow tile
-        for col, (k, n) in zip(st.columns(len(counts)), counts.items()):
+        shown = dict(counts)
+        if result.get("waiting"):
+            shown["blocked"] = max(shown.get("blocked", 0) - result["waiting"], 0)
+            shown["waiting"] = result["waiting"]
+        for col, (k, n) in zip(st.columns(len(shown)), shown.items()):
             col.metric(short.get(k, k.replace("_", " ")), n)
-    rows = [{"pipeline": p["name"], "status": p["status"].replace("_", " "), "structurally valid": "✅" if p["structurally_valid"] else "❌",
+    rows = [{"pipeline": p["name"], "status": ("waiting for its notebook" if p.get("waiting") and p["status"] == "blocked" else p["status"].replace("_", " ")), "structurally valid": "✅" if p["structurally_valid"] else "❌",
              "ready to run": "✅" if p["runtime_ready"] else "⬜"} for p in result.get("pipelines", [])]
     clean = all(p["structurally_valid"] and p["runtime_ready"] and p["status"] == "converted" for p in result.get("pipelines", []))
     with st.expander(f"{len(rows)} pipeline(s)" + (": all converted and ready to run" if clean else ""), expanded=not clean or len(rows) <= 5):
@@ -481,7 +490,8 @@ def convert(api: ApiClient, pid: str, result: dict | None) -> None:
     _source_checks(result.get("preflight", []))
     open_ids = [u for u in result.get("unbound") or [] if u != "workspace"]  # the workspace id is filled in at deploy: not something to set here
     if open_ids:
-        st.warning(f"{len(open_ids)} item(s) still open ({', '.join(open_ids[:5])}): pipelines that need them won't be ready to run.")
+        st.info(f"{len(open_ids)} item(s) still open ({', '.join(open_ids[:5])}): pipelines that need them are not ready to run. "
+                "Notebooks the tool generated are created by Deploy; convert again afterwards and they are bound.")
     panels_bindings.section(api, pid, result.get("unbound") or [])
     explain_for_step(api, pid, "convert")
     if result.get("filled_at_deploy"):
